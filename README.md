@@ -126,6 +126,7 @@ Vault file contents and paths are sent to Filen as required for sync, push, pull
 npm install
 npm run dev
 npm run build
+npm run test
 npm run lint
 ```
 
@@ -156,6 +157,7 @@ Before submitting:
 
 ```bash
 npm run build
+npm run test
 npm run lint
 ```
 

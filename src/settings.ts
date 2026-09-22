@@ -1,4 +1,4 @@
-import type { App} from "obsidian";
+import type { App } from "obsidian";
 import { PluginSettingTab, Setting } from "obsidian";
 import { readActivityLogs, type ActivityLogEntry } from "./activity-logs";
 import type FilenSyncPlugin from "./main";

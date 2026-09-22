@@ -8,6 +8,7 @@
 # npm
 node_modules
 tmp/
+.tmp-test/
 
 # local agent / scratch files
 .pi/

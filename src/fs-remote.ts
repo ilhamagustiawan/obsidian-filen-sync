@@ -31,6 +31,12 @@ export type RemoteFs = {
 	close(): void;
 };
 
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
+	const buffer = new ArrayBuffer(bytes.byteLength);
+	new Uint8Array(buffer).set(bytes);
+	return buffer;
+};
+
 type FilenRemoteFsConfig = {
 	email: string;
 	password: string;
@@ -163,7 +169,7 @@ export class FilenRemoteFs implements RemoteFs {
 
 		const parentUuid = await this.getParentUuid(parent);
 
-		const file = new File([bytes], fileName, { lastModified: mtime });
+		const file = new File([toArrayBuffer(bytes)], fileName, { lastModified: mtime });
 		await client.cloud().uploadWebFile({
 			file,
 			parent: parentUuid,

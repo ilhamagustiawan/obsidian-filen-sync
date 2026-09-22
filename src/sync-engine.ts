@@ -1,4 +1,4 @@
-import type { App, TAbstractFile} from "obsidian";
+import type { App, TAbstractFile } from "obsidian";
 import { TFile, TFolder, normalizePath } from "obsidian";
 import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncDb } from "./db";
@@ -511,10 +511,14 @@ export class SyncEngine {
 		const content = await this.config.remote.readFile(path);
 		const hash = await sha256Hex(content);
 		await ensureLocalFolder(this.config.app, path);
-		await this.config.app.vault.adapter.writeBinary(normalizePath(path), content, {
-			mtime: remote.mtime,
-			ctime: remote.mtime,
-		});
+		await this.config.app.vault.adapter.writeBinary(
+			normalizePath(path),
+			toArrayBuffer(content),
+			{
+				mtime: remote.mtime,
+				ctime: remote.mtime,
+			},
+		);
 		await this.upsertPrev({
 			path,
 			mtime: remote.mtime,
@@ -596,7 +600,7 @@ export class SyncEngine {
 			"remote",
 		);
 		await ensureLocalFolder(this.config.app, copyPath);
-		await this.config.app.vault.adapter.writeBinary(copyPath, bytes, {
+		await this.config.app.vault.adapter.writeBinary(copyPath, toArrayBuffer(bytes), {
 			mtime: remote.mtime,
 			ctime: remote.mtime,
 		});
@@ -641,8 +645,14 @@ const skipped = (detail: string): EntrySyncResult => ({
 });
 
 const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
-	const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+	const digest = await window.crypto.subtle.digest("SHA-256", toArrayBuffer(bytes));
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
+	const buffer = new ArrayBuffer(bytes.byteLength);
+	new Uint8Array(buffer).set(bytes);
+	return buffer;
 };
 
 const chooseNewer = (local: LocalEntry, remote: RemoteEntry): "local" | "remote" =>

@@ -57,15 +57,14 @@ async function doRequest(
 		if (data instanceof ArrayBuffer) {
 			body = data;
 		} else if (ArrayBuffer.isView(data)) {
-			body = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+			body = toArrayBuffer(data);
 		} else {
 			// Encode as UTF-8 ArrayBuffer. The Filen API validates a SHA-512 checksum
 			// computed as Buffer.from(JSON.stringify(data), "utf-8") — sending as
 			// ArrayBuffer guarantees byte-exact match regardless of how requestUrl
 			// would otherwise encode a plain string body.
 			const str = typeof data === "string" ? data : JSON.stringify(data);
-			const enc = new TextEncoder().encode(str);
-			body = enc.buffer.slice(enc.byteOffset, enc.byteOffset + enc.byteLength);
+			body = toArrayBuffer(new TextEncoder().encode(str));
 			// Real axios injects Content-Type: application/json from its POST defaults.
 			// Replicate that here so the server can parse the body correctly.
 			if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
@@ -98,6 +97,11 @@ async function doRequest(
 		request: undefined,
 	};
 }
+const toArrayBuffer = (bytes: ArrayBufferView): ArrayBuffer => {
+	const buffer = new ArrayBuffer(bytes.byteLength);
+	new Uint8Array(buffer).set(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+	return buffer;
+};
 
 // Returns an axios-instance-compatible shim. The Filen SDK only calls .post()
 // and .get() on the injected axiosInstance (see sdk/dist/browser/api/client.js),

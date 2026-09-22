@@ -1,15 +1,5 @@
-import type {
-	TAbstractFile} from "obsidian";
-import {
-	type App,
-	type EventRef,
-	Menu,
-	Modal,
-	Notice,
-	Plugin,
-	TFile,
-	setIcon,
-} from "obsidian";
+import type { TAbstractFile } from "obsidian";
+import { type App, type EventRef, Menu, Modal, Notice, Plugin, TFile, setIcon } from "obsidian";
 import {
 	ActivityLogModal,
 	inferActivityLogKind,
@@ -23,7 +13,13 @@ import { FilenRemoteFs } from "./fs-remote";
 import { FilenSyncSetupModal } from "./onboarding-modal";
 import { createSyncPathFilter } from "./path-filters";
 import { PluginSecrets } from "./secrets";
-import { FilenSyncSettings, FilenSyncSettingTab, getVaultRemoteRoot, readFilenAuth, type FilenAuth } from "./settings";
+import {
+	FilenSyncSettings,
+	FilenSyncSettingTab,
+	getVaultRemoteRoot,
+	readFilenAuth,
+	type FilenAuth,
+} from "./settings";
 import {
 	SyncEngine,
 	type SyncActivityEvent,

@@ -1,4 +1,4 @@
-import type { App} from "obsidian";
+import type { App } from "obsidian";
 import { Modal, Notice } from "obsidian";
 
 export const MAX_ACTIVITY_LOG_ENTRIES = 500;
