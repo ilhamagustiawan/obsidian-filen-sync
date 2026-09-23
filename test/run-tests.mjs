@@ -1209,15 +1209,44 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 		// Defaults to "icon" (native Obsidian Sync style)
 		assert.equal(DEFAULT_SETTINGS.statusBarIndicatorStyle, "icon");
 		assert.equal(DEFAULT_SETTINGS.reconciliationNeeded, false);
+		assert.equal(DEFAULT_SETTINGS.syncProgressNoticeMode, "transfers_only");
+		assert.equal(DEFAULT_SETTINGS.showFloatingSyncIndicator, true);
 
 		const parsedEmpty = FilenSyncSettings.fromSaved({});
 		assert.equal(parsedEmpty.statusBarIndicatorStyle, "icon");
+		assert.equal(parsedEmpty.syncProgressNoticeMode, "transfers_only");
+		assert.equal(parsedEmpty.showFloatingSyncIndicator, true);
 
 		const parsedFull = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "full" });
 		assert.equal(parsedFull.statusBarIndicatorStyle, "full");
 
 		const parsedInvalid = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "invalid" });
 		assert.equal(parsedInvalid.statusBarIndicatorStyle, "icon");
+
+		assert.equal(
+			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "always" })
+				.syncProgressNoticeMode,
+			"always",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "manual_only" })
+				.syncProgressNoticeMode,
+			"manual_only",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "never" }).syncProgressNoticeMode,
+			"never",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "invalid" })
+				.syncProgressNoticeMode,
+			"transfers_only",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ showFloatingSyncIndicator: false })
+				.showFloatingSyncIndicator,
+			false,
+		);
 		assert.equal(
 			FilenSyncSettings.fromSaved({ reconciliationNeeded: true }).reconciliationNeeded,
 			true,
@@ -1614,6 +1643,268 @@ test("Legacy credentials migration removes plaintext auth from disk without rese
 			"corrupt auth removed from disk data without persisting",
 		);
 	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibility, and lifecycles", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "filen-ui-test-"));
+	try {
+		const stub = join(dir, "obsidian-stub.mjs");
+		const outfileNotice = join(dir, "sync-notice.mjs");
+		const outfileIndicator = join(dir, "floating-indicator.mjs");
+
+		await writeFile(
+			stub,
+			`
+			export class Notice {
+				constructor(frag, duration) {
+					this.frag = frag;
+					this.duration = duration;
+					this.hidden = false;
+					this.noticeEl = globalThis.__createMockElement("div", "notice");
+					globalThis.__testActiveNotices.push(this);
+				}
+				hide() {
+					this.hidden = true;
+					this.noticeEl.isConnected = false;
+				}
+			}
+			export const setIcon = (el, icon) => {
+				if (el) el.setAttr("data-icon", icon);
+			};
+			`,
+		);
+
+		await build({
+			entryPoints: ["src/ui/sync-notice.ts"],
+			outfile: outfileNotice,
+			bundle: true,
+			format: "esm",
+			platform: "node",
+			plugins: [
+				{
+					name: "obsidian-test-stub",
+					setup(build) {
+						build.onResolve({ filter: /^obsidian$/ }, () => ({ path: stub }));
+					},
+				},
+			],
+		});
+
+		await build({
+			entryPoints: ["src/ui/floating-sync-indicator.ts"],
+			outfile: outfileIndicator,
+			bundle: true,
+			format: "esm",
+			platform: "node",
+			plugins: [
+				{
+					name: "obsidian-test-stub",
+					setup(build) {
+						build.onResolve({ filter: /^obsidian$/ }, () => ({ path: stub }));
+					},
+				},
+			],
+		});
+
+		class MockElement {
+			constructor(tag, cls = "") {
+				this.tag = tag;
+				this.classList = new Set(cls.split(" ").filter(Boolean));
+				this.children = [];
+				this.attributes = new Map();
+				this.textContent = "";
+				this.style = {};
+				this.isConnected = true;
+			}
+			addClass(...classes) {
+				for (const c of classes) this.classList.add(c);
+			}
+			removeClass(...classes) {
+				for (const c of classes) this.classList.delete(c);
+			}
+			hasClass(cls) {
+				return this.classList.has(cls);
+			}
+			setText(t) {
+				this.textContent = String(t);
+			}
+			setAttr(name, val) {
+				this.attributes.set(name, String(val));
+			}
+			removeAttribute(name) {
+				this.attributes.delete(name);
+			}
+			createDiv(opts = {}) {
+				const el = new MockElement("div", opts.cls || "");
+				if (opts.text) el.setText(opts.text);
+				this.children.push(el);
+				return el;
+			}
+			createSpan(opts = {}) {
+				const el = new MockElement("span", opts.cls || "");
+				if (opts.text) el.setText(opts.text);
+				this.children.push(el);
+				return el;
+			}
+			createEl(tag, opts = {}) {
+				const el = new MockElement(tag, opts.cls || "");
+				if (opts.text) el.setText(opts.text);
+				this.children.push(el);
+				return el;
+			}
+			addEventListener(evt, handler) {
+				this._handler = handler;
+			}
+			empty() {
+				this.children = [];
+				this.textContent = "";
+			}
+			remove() {
+				this.isConnected = false;
+			}
+		}
+
+		globalThis.__createMockElement = (tag, cls) => new MockElement(tag, cls);
+		globalThis.__testActiveNotices = [];
+		globalThis.window = globalThis;
+		globalThis.document = {
+			createDocumentFragment: () => new MockElement("fragment"),
+			body: new MockElement("body"),
+		};
+
+		const { SyncNoticeController } = await import(pathToFileURL(outfileNotice).href);
+		const { FloatingSyncIndicator } = await import(pathToFileURL(outfileIndicator).href);
+
+		// Test SyncNoticeController
+		let settings = {
+			syncProgressNoticeMode: "transfers_only",
+			showFloatingSyncIndicator: true,
+		};
+		let logsOpened = false;
+		const controller = new SyncNoticeController(
+			() => settings,
+			() => {
+				logsOpened = true;
+			},
+		);
+
+		// 1. transfers_only mode with no transfers (total = 0, isManual = false)
+		controller.onStatusChange({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "Scanning…",
+			updatedAt: Date.now(),
+			isManual: false,
+			progress: { current: 0, total: 0, path: "" },
+		});
+		assert.equal(
+			globalThis.__testActiveNotices.length,
+			0,
+			"No notice for background scan with 0 transfers",
+		);
+
+		// 2. transfers_only mode with transfers (>0)
+		controller.onStatusChange({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "1/5 · note.md",
+			updatedAt: Date.now(),
+			isManual: false,
+			progress: { current: 1, total: 5, path: "note.md" },
+		});
+		assert.equal(
+			globalThis.__testActiveNotices.length,
+			1,
+			"Notice created when transfers detected",
+		);
+		assert.equal(globalThis.__testActiveNotices[0].hidden, false);
+
+		// 3. Success transitions the active notice
+		controller.onStatusChange({
+			kind: "success",
+			text: "Sync complete",
+			detail: "5 files synced",
+			updatedAt: Date.now(),
+		});
+		assert.equal(globalThis.__testActiveNotices[0].noticeEl.hasClass("is-success"), true);
+
+		controller.closeNotice();
+		assert.equal(globalThis.__testActiveNotices[0].hidden, true);
+
+		// 4. mode = "never"
+		settings.syncProgressNoticeMode = "never";
+		controller.onStatusChange({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "1/1 · note.md",
+			updatedAt: Date.now(),
+			isManual: true,
+			progress: { current: 1, total: 1, path: "note.md" },
+		});
+		assert.equal(globalThis.__testActiveNotices.length, 1, "No new notice when mode is never");
+
+		// Test FloatingSyncIndicator
+		settings.showFloatingSyncIndicator = true;
+		const mockWorkspace = { containerEl: new MockElement("div", "workspace") };
+		const mockApp = { workspace: mockWorkspace };
+		let menuOpened = false;
+		const indicator = new FloatingSyncIndicator(
+			mockApp,
+			() => settings,
+			() => {
+				menuOpened = true;
+			},
+		);
+
+		// Background scan with 0 transfers: should remain hidden
+		indicator.onStatusChange({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "Scanning…",
+			updatedAt: Date.now(),
+			isManual: false,
+			progress: { current: 0, total: 0, path: "" },
+		});
+		assert.equal(mockWorkspace.containerEl.children.length, 1);
+		const pill = mockWorkspace.containerEl.children[0];
+		assert.equal(
+			pill.hasClass("is-hidden"),
+			true,
+			"Indicator remains hidden during quiet background scan",
+		);
+		assert.equal(pill.hasClass("is-syncing"), false);
+
+		// Manual sync: should become visible
+		indicator.onStatusChange({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "Scanning…",
+			updatedAt: Date.now(),
+			isManual: true,
+			progress: { current: 0, total: 0, path: "" },
+		});
+		assert.equal(pill.hasClass("is-hidden"), false, "Pill is visible for manual sync");
+		assert.equal(pill.hasClass("is-syncing"), true);
+
+		// Success
+		indicator.onStatusChange({
+			kind: "success",
+			text: "up to date",
+			detail: "No changes detected.",
+			updatedAt: Date.now(),
+		});
+		assert.equal(pill.hasClass("is-success"), true);
+
+		// Cleanup
+		indicator.destroy();
+		assert.equal(pill.isConnected, false, "Pill disconnected after destroy");
+	} finally {
+		delete globalThis.__createMockElement;
+		delete globalThis.__testActiveNotices;
+		delete globalThis.document;
+		delete globalThis.window;
 		await rm(dir, { recursive: true, force: true });
 	}
 });

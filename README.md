@@ -2,41 +2,56 @@
 
 Sync an Obsidian vault with Filen using a direct folder mirror.
 
-Obsidian Filen Sync mirrors vault files between Obsidian and a folder in your Filen account. It supports manual sync, optional auto-sync, conflict copies, and Filen file versions while keeping sync state locally in the vault's plugin data.
+Obsidian Filen Sync mirrors vault files between Obsidian and a dedicated folder in your Filen account. It provides bidirectional synchronization, one-way push and pull, automatic background sync, conflict preservation, two-pane remote version history, and transfer safety rails, all while isolating sync baselines in local IndexedDB.
 
-> **Early release:** Keep independent backups until you trust it with your workflow.
+> **Early release:** Keep independent backups of your vault until you have verified the plugin with your workflow.
 
 ## Highlights
 
-- Direct Filen folder mirror for your vault files
-- Manual **Sync now** command
-- Optional auto-sync on save, after startup, and on an interval
-- Native Obsidian-style status bar indicator (animated spinning sync icon during sync, idle state with relative sync time, offline/pause warning states, and 1-click action menu)
-- Activity view showing scan, upload, download, delete, and conflict rows
-- Conflict copies when the same file changed locally and remotely
-- Filen file version list, restore, preview, and delete actions
-- Local sync baseline in IndexedDB for change detection
-- SHA-256 fallback to handle timestamp drift
-- Vault-relative ignore rules with safe Obsidian defaults
-- Parallel chunk transfers (1 MiB chunks via a pool of 3 workers) with configurable size limits
-- Fast remote polling via Filen events feed with fallback safety rails
-- Desktop and mobile support
+- **Direct Filen folder mirror**: Vault files mirror directly to a readable remote folder (e.g. `/Obsidian/<vaultName>`), without proprietary database blobs or chunked journal locks.
+- **Flexible sync modes**: Run full bidirectional **Sync now**, or one-way **Push changed local files** and **Pull changed remote files**.
+- **Automated background sync**: Optional auto-sync on file save (with configurable debounce delay), on a periodic interval, and shortly after Obsidian startup.
+- **Fast remote polling**: Probes Filen's cloud events feed during auto-sync to skip full remote scans when nothing changed in the cloud.
+- **Native status bar & floating indicator**: Real-time sync progress via a sleek floating progress pill at the bottom of the workspace (ideal for newer Obsidian versions without a traditional status bar, and on mobile), an active progress notification banner, animated spinning ribbon icon with live progress tooltips, and customizable status bar item.
+- **Two-pane file version history**: Browse remote file revisions in Filen with grouped dates, side-by-side diff comparison against your local file, one-click preview, copy, and restore.
+- **Safety rails & bulk mutation guard**: Prevents catastrophic vault wipes if a folder is emptied or unmounted; prompts for confirmation before bulk overwrites or local deletions.
+- **Conflict preservation**: Automatically detects when a file was modified both locally and remotely, saving conflict copies (`.sync-conflict-*`) to prevent silent data loss.
+- **Target identity isolation**: Sync baselines in local IndexedDB are strictly partitioned by vault ID, authenticated Filen user ID, and remote directory UUID to prevent baseline pollution across accounts or folders.
+- **Pre-mutation revalidation**: Re-reads and verifies local hashes and remote UUIDs immediately before uploading or deleting to prevent race conditions.
+- **Secure credential storage**: Passwords and two-factor codes stay in memory only. Derived authentication keys/tokens are stored securely in Obsidian `SecretStorage`.
+- **Parallel chunk transfers**: Fast 1 MiB chunk streaming via a worker pool with configurable file size limits (skipping large files if desired).
+- **Offline & network resilience**: Automatically detects offline network state, gracefully suspends background sync loops, and resumes when reconnected.
+- **Cross-platform**: Desktop and mobile support (macOS, Windows, Linux, iOS, and Android).
 
 ## How it works
 
-The plugin treats Filen as a remote filesystem. During sync it compares:
+The plugin treats Filen as a remote filesystem. During a bidirectional sync, it compares three sources:
 
-1. the current vault files,
-2. the current Filen mirror folder, and
-3. the previous sync baseline stored locally.
+1. **Current local vault files**
+2. **Current Filen remote mirror folder**
+3. **Previous sync baseline** stored locally in IndexedDB
 
-Changed files are uploaded, downloaded, or deleted to make both sides match. If both sides changed since the last baseline, the plugin keeps a conflict copy instead of silently overwriting one side.
+Based on this comparison:
+
+- **Local additions or edits** are uploaded to Filen.
+- **Remote additions or edits** are downloaded to the vault.
+- **Local deletions** move corresponding remote files to the Filen trash.
+- **Remote deletions** prompt for confirmation before moving local files to the Obsidian system trash.
+- **Concurrent edits** (when both sides changed since the last baseline) keep a local conflict copy (`<filename>.sync-conflict-<side>-<deviceId>-<timestamp>.<ext>`) rather than overwriting either version.
+
+### First sync
+
+On an initial sync without prior history, the plugin uses a conservative baseline:
+
+- No deletions are inferred from absence on either side.
+- Files present on both sides with identical content fingerprints are verified and linked into the baseline.
+- Differing files on both sides generate a conflict copy to ensure no local or remote content is lost.
 
 ## Requirements
 
-- Obsidian `1.11.4` or newer (for SecretStorage)
+- Obsidian `1.11.4` or newer (required for `SecretStorage`)
 - A Filen account
-- Node.js 20+ and npm for development from source
+- Node.js 20+ and npm (only for building from source)
 
 ## Installation
 
@@ -77,87 +92,214 @@ Copy the built files (`main.js`, `manifest.json`, `styles.css`) into `<vault>/.o
 ## Setup
 
 1. Open **Settings → Obsidian Filen Sync**.
-2. Enter your Filen email.
-3. Enter your password and optional two-factor code.
-4. Keep the default remote folder, or choose a folder dedicated to this vault.
-5. Review ignored paths.
+2. Enter your Filen **Email**.
+3. Enter your **Password** and optional **Two-factor code**.
+4. Check the **Remote folder** (default: `/Obsidian`) and **Vault name** (default: your vault's folder name).
+5. Review **Ignore paths** for any custom vault-relative patterns.
 6. Select **Login** or **Test connection**.
 7. Run **Sync now**.
 
-Your password and two-factor code are used for login and stay in memory only. When **Remember derived credentials** is enabled, derived Filen session tokens/keys are stored in Obsidian SecretStorage; they grant account access and are not protected from malicious plugins or a compromised device. Turn off **Remember derived credentials** to keep credentials for this session only; you will need to log in again after restarting Obsidian. Use **Disconnect** to remove saved credentials and switch accounts. Valid legacy credentials are migrated only after SecretStorage readback verification. Invalid credentials or failed sanitization require reconnection; plugin data is never re-saved with the legacy auth payload.
+### Credential security
 
-Sync history is bound to a persistent local vault ID, authenticated Filen user ID, and the resolved UUID of the effective remote folder. If any part changes, history is not reused. Unverified legacy history is left untouched and inactive, so the first sync uses a conservative baseline and may create conflict copies instead of importing old deletion history. A timed-out or aborted transfer can have an uncertain remote result. The plugin saves a non-secret reconciliation-needed marker, pauses automatic sync, and blocks force-upload until outstanding requests settle and a full manual sync succeeds. Client-side checks reduce races but cannot provide server-side compare-and-swap guarantees.
+- Your **password** and **two-factor code** are used for login authentication and remain in memory only. They are never written to disk or transmitted to any third party.
+- When **Remember derived credentials** is enabled (default), derived Filen session keys/tokens are saved in Obsidian's native `SecretStorage`.
+- When **Remember derived credentials** is turned off, credentials stay in memory for the current Obsidian session only; you will need to log in again after restarting Obsidian.
+- Select **Disconnect** at any time to wipe stored session credentials and reset authentication.
 
 ## Commands
 
-| Command                                          | What it does                                                                               |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| **Obsidian Filen Sync: Sync now**                | Compare local and remote changes, update both sides, and keep conflict copies when needed. |
-| **Obsidian Filen Sync: Force sync current file** | Upload active editor file immediately to Filen, with overwrite confirmation if changed.    |
-| **Obsidian Filen Sync: Test Filen connection**   | Check login and remote write/delete access.                                                |
-| **Obsidian Filen Sync: Open sync activity**      | Open the sync activity view for the current or last run.                                   |
-| **Obsidian Filen Sync: Toggle sync on save**     | Enable or disable save-triggered background sync.                                          |
+All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
+
+| Command                                            | What it does                                                                                               |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Obsidian Filen Sync: Sync now**                  | Compare local and remote changes, apply updates bidirectionally, and preserve conflict copies when needed. |
+| **Obsidian Filen Sync: Push changed local files**  | Upload changed local files to Filen without pulling remote changes or deleting local files.                |
+| **Obsidian Filen Sync: Pull changed remote files** | Download changed remote files from Filen without uploading local changes or deleting remote files.         |
+| **Obsidian Filen Sync: Force sync current file**   | Upload active editor file directly to Filen, with overwrite confirmation if the remote copy changed.       |
+| **Obsidian Filen Sync: Test Filen connection**     | Test Filen authentication and remote read/write access.                                                    |
+| **Obsidian Filen Sync: Pause or resume auto-sync** | Pause or resume background auto-sync triggers without affecting manual commands.                           |
+| **Obsidian Filen Sync: Toggle sync on save**       | Enable or disable save-triggered background sync.                                                          |
+| **Obsidian Filen Sync: Open activity logs**        | Open the sync activity modal showing recent connection, scan, transfer, and conflict events.               |
+
+## User interface
+
+### Floating sync indicator
+
+For newer versions of Obsidian where the status bar is minimized or absent, and on mobile devices where status bar items are not supported:
+
+- **Floating progress pill**: Automatically slides into view at the bottom of the active workspace whenever sync is running.
+- **Progress bar & stats**: Displays current file count (e.g. `3 of 10 files`), percentage, animated progress bar, and active filename.
+- **Interactive**: Click or tap the floating pill at any time to open the sync action menu or view activity logs.
+- **Smooth transitions**: Seamlessly fades in when sync begins and fades out when sync completes. Can be toggled in settings.
+
+### Progress notice banner
+
+- **Live progress banner**: Shows a notification banner with a progress bar, percentage, and current transferring file while syncing.
+- **Configurable**: Choose to show the banner when files are transferring (recommended), on every sync run, for manual sync only, or never.
+- **Actionable on error**: If a sync fails, the notice presents an immediate **View logs →** button to inspect the root cause.
+
+### Status bar
+
+When visible, the status bar item reflects real-time sync state and provides quick access to common actions:
+
+- **Idle**: Displays last-sync relative time (e.g. `Filen: idle · 3m ago`) or a compact Obsidian Sync-style icon.
+- **Syncing**: Shows an animated spinning sync icon and live file transfer progress (e.g. `Filen: 3/10 (30%)` in full text mode).
+- **Paused / Offline**: Shows warning badges when auto-sync is paused or the device is offline.
+- **Error**: Shows an alert icon if the last sync encountered an issue.
+- **Action menu**: Click or right-click the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.
+
+### Ribbon icons
+
+- **Filen: sync now** (`refresh-cw`): Spins with smooth animation during active sync. Tooltip updates dynamically with live progress (e.g. `Filen: Syncing 3/10 (30%)`). Clicking during an active sync displays the live progress notice or menu.
+- **Filen: open activity logs** (`list`): Opens the activity log viewer.
+
+### File context menu
+
+Right-click any file in the file explorer or active editor tab to access:
+
+- **Force sync to Filen**: Uploads the file immediately to Filen. Prompts for confirmation if the remote copy changed since the last baseline.
+- **Filen: sync now**: Runs a two-way sync.
+- **Filen: version history**: Opens the two-pane version history modal for that file.
+
+### Two-pane file version history
+
+The version history modal allows inspecting and recovering previous file revisions stored in Filen:
+
+- **Version list**: Revisions grouped by date with timestamps and file sizes.
+- **Preview pane**: Displays text content or binary file information.
+- **Diff viewer**: Toggle **Show diff** to view an inline line-by-line comparison between the selected remote version and your active local file.
+- **Copy & restore**: One-click **Copy text** to clipboard or **Restore this version** (which safely restores the remote file and triggers a synchronization pass back to the vault).
+
+### Activity logs
+
+The activity log modal displays recent events (up to 500 entries) categorized by type:
+
+- Connection and network status
+- Scanned, uploaded, downloaded, and deleted files
+- Conflict warnings and resolution notices
+- Buttons to copy logs to the clipboard or clear the log history
 
 ## Remote layout
 
-Default effective remote folder:
+By default, the plugin mirrors files under:
 
 ```text
-/Obsidian/default
+/Obsidian/<vaultName>
 ```
 
-Vault files are mirrored directly under that folder:
+For example, a vault named `personal` with notes and attachments mirrors to:
 
 ```text
-/Obsidian/default/
-  notes/example.md
-  assets/image.png
+/Obsidian/personal/
+  Daily Notes/2026-05-24.md
+  Projects/Roadmap.md
+  attachments/diagram.png
 ```
 
-The sync baseline stays local. It is not written into the Filen mirror folder.
+The sync baseline is maintained locally in IndexedDB inside the vault's plugin storage. It is never written into your remote Filen folder.
+
+## Settings reference
+
+### Account
+
+| Setting                          | Description                                                                                        | Default |
+| -------------------------------- | -------------------------------------------------------------------------------------------------- | ------- |
+| **Remember derived credentials** | Store derived session keys in Obsidian `SecretStorage`. If disabled, credentials stay in RAM only. | Enabled |
+| **Email**                        | Your Filen account email.                                                                          | Empty   |
+| **Password**                     | Your Filen account password (session-only; never stored on disk).                                  | Empty   |
+| **Two-factor code**              | One-time 2FA verification code (if enabled on your Filen account).                                 | Empty   |
+| **Login / Disconnect**           | Connect to your Filen account or disconnect to clear stored credentials.                           | —       |
+
+### Sync
+
+| Setting           | Description                                                            | Default            |
+| ----------------- | ---------------------------------------------------------------------- | ------------------ |
+| **Remote folder** | Base remote folder in Filen. The vault name is appended automatically. | `/Obsidian`        |
+| **Vault name**    | Remote subfolder name representing this vault.                         | Current vault name |
+| **Ignore paths**  | Vault-relative paths or glob patterns to exclude from synchronization. | Default patterns   |
+
+### Auto-sync & UI
+
+| Setting                         | Description                                                                                                                               | Default                |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| **Auto-sync paused**            | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
+| **Floating sync indicator**     | Show a floating progress indicator at the bottom of the workspace during sync.                                                            | Enabled                |
+| **Sync progress notice**        | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
+| **Status bar indicator style**  | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
+| **Notify on background change** | Display an Obsidian notice when an auto-sync modifies vault files.                                                                        | Disabled               |
+| **Sync on file save**           | Trigger background sync when local files are edited and saved.                                                                            | Enabled                |
+| **Sync on save delay**          | Debounce delay before syncing after a save (5 to 30 seconds).                                                                             | `5` seconds            |
+| **Background sync interval**    | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
+| **Sync after startup**          | Delay in seconds after layout ready before running an initial sync (0 disables).                                                          | `0` (Disabled)         |
+| **Fast remote polling**         | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |
+| **Skip large files**            | Skip transferring files larger than the specified threshold.                                                                              | Enabled                |
+| **Skip size threshold**         | Maximum file size in megabytes before skipping (1 to 1000 MB).                                                                            | `50` MB                |
 
 ## Ignore rules
 
-Default ignore rules skip noisy or unsafe paths such as:
+Default ignore rules skip noisy, device-specific, or internal paths:
 
 - `.obsidian/cache`
 - `.obsidian/workspace*.json`
 - `.git`
 - `node_modules`
-- this plugin's own data folder
+- The plugin's internal data directory
 
-Add more vault-relative rules in plugin settings if needed.
+Add custom vault-relative paths or glob patterns in **Settings → Obsidian Filen Sync → Ignore paths**, one per line.
+
+## Safety and data integrity
+
+- **Bulk operation guard**: If an operation would delete or overwrite an unusually large volume of files (such as when a folder was emptied or unlinked), sync pauses and requests explicit confirmation.
+- **Local delete confirmation**: When remote deletions would remove local files, a confirmation modal details the affected files. Approved local deletions move to the Obsidian system trash.
+- **Remote trash**: Remote deletions move files to Filen's cloud trash rather than permanently deleting them.
+- **Pre-mutation revalidation**: Files are re-read and re-hashed immediately before upload to guarantee that in-progress edits are not corrupted. Remote entries are verified by UUID and hash before deletion or replacement.
+- **Transfer recovery & reconciliation**: If a transfer times out or is aborted with an uncertain outcome, the plugin marks reconciliation as required, pauses automatic sync, and prevents force uploads until a full two-way sync reconciles state safely.
+- **Target identity binding**: Baselines are isolated by `(vaultId, userId, remoteRootUuid)`. Switching Filen accounts or changing the remote folder automatically re-binds cleanly without corrupting previous baselines.
 
 ## Known limitations
 
-- There is no side-by-side conflict resolution UI yet.
-- Conflict strategy is not configurable yet.
-- Renames are treated as delete plus create.
-- Auto-sync is lightweight polling/event sync, not realtime socket sync.
+- **Conflict resolution**: When conflicts arise, conflict copies are saved locally (`.sync-conflict-*`) to preserve all data. An interactive side-by-side 3-way visual merge tool is not included in-app; use Obsidian's core diff or standard diff utilities to merge text.
+- **File renames**: Detected via remote UUID tracking where available. Moves across different directory structures may be processed as delete plus create.
+- **Collaboration**: Designed for personal vault synchronization across devices; not intended as a real-time multi-user concurrent editor.
 
-## Privacy
+## Privacy and compliance
 
-This plugin connects only to Filen. It does not include telemetry or analytics.
-
-Vault file contents and paths are sent to Filen as required for sync, file version, and connection-test actions. Password and two-factor code are not persisted by this plugin. Activity logs may contain filenames and other sensitive path details; they remain in plugin data and are not transmitted as telemetry.
+- **Direct communication**: All network traffic connects directly to Filen's official API servers using Obsidian's native `requestUrl` transport.
+- **Zero telemetry**: The plugin contains no tracking, telemetry, or analytics.
+- **Data scope**: File contents and paths are sent to Filen solely as needed for sync, versioning, and connection testing.
+- **Credentials**: Passwords and two-factor codes are held in memory only during authentication. Stored session keys use Obsidian's protected `SecretStorage`.
+- **Local logs**: Activity logs reside strictly in plugin memory and local storage; they are never sent externally.
 
 ## Development
 
+Prerequisites: Node.js 20+ and npm.
+
 ```bash
+# Install dependencies
 npm install
+
+# Watch mode for development
 npm run dev
+
+# Production build
 npm run build
+
+# Run unit and integration tests
 npm run test
-npm run lint
+
+# Code quality and formatting
+npm run lint       # oxlint
+npm run fmt:check  # oxfmt check
+npm run fmt        # oxfmt auto-format
 ```
 
-Deploy to the default test vault:
+### Deploy to local test vault
 
 ```bash
 npm run deploy:test-vault
 ```
 
-Override the test vault path:
+To specify a custom test vault path:
 
 ```bash
 TEST_VAULT_PATH=/path/to/vault npm run deploy:test-vault
@@ -165,25 +307,13 @@ TEST_VAULT_PATH=/path/to/vault npm run deploy:test-vault
 
 ## Release
 
-1. Update `manifest.json` and `versions.json`.
-2. Run `npm run build`.
-3. Create a GitHub release tagged with the exact plugin version, without a leading `v`.
-4. Attach `manifest.json`, `main.js`, and `styles.css` as individual assets.
-
-## Contributing
-
-Issues and pull requests are welcome. Keep changes small, typed, and easy to verify.
-
-Before submitting:
-
-```bash
-npm run build
-npm run test
-npm run lint
-```
+1. Update `version` in `package.json`, `manifest.json`, and `versions.json` (or use `npm version <patch|minor|major>`).
+2. Run `npm run build` and `npm run test`.
+3. Create a GitHub release tagged with the exact version (e.g. `1.0.0`, without a leading `v`).
+4. Attach `manifest.json`, `main.js`, and `styles.css` as release assets.
 
 ## License
 
 AGPL-3.0-only.
 
-`@filen/sdk` is AGPL, so this plugin is AGPL too.
+`@filen/sdk` is licensed under AGPLv3, and this plugin is licensed under AGPLv3 as well.

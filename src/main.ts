@@ -33,6 +33,8 @@ import {
 	type StatusBarState,
 	type SyncRunResult,
 } from "./sync/coordinator";
+import { FloatingSyncIndicator } from "./ui/floating-sync-indicator";
+import { SyncNoticeController } from "./ui/sync-notice";
 import { sha256Hex } from "./sync/executor";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -63,6 +65,9 @@ export default class FilenSyncPlugin extends Plugin {
 	private statusBarItemEl: HTMLElement | null = null;
 	private statusBarIconEl: HTMLElement | null = null;
 	private statusBarTextEl: HTMLElement | null = null;
+	private syncRibbonIconEl: HTMLElement | null = null;
+	private noticeController!: SyncNoticeController;
+	private floatingIndicator!: FloatingSyncIndicator;
 	private statusBarState: StatusBarState = {
 		kind: "idle",
 		text: "Set up Filen",
@@ -93,6 +98,17 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 		this.register(() => setUncertainMutationHandler(null));
 
+		this.noticeController = new SyncNoticeController(
+			() => this.settings,
+			() => this.openActivityLogs(),
+		);
+
+		this.floatingIndicator = new FloatingSyncIndicator(
+			this.app,
+			() => this.settings,
+			(e) => this.openStatusBarMenu(e),
+		);
+
 		this.coordinator = new SyncCoordinator(
 			this.app,
 			this.manifest.id,
@@ -108,7 +124,9 @@ export default class FilenSyncPlugin extends Plugin {
 					) {
 						this.lastSyncTimestamp = Date.now();
 					}
-					this.renderStatusBar();
+					this.updateStatusDisplays();
+					this.noticeController.onStatusChange(state);
+					this.floatingIndicator.onStatusChange(state);
 				},
 				onLogActivity: (message) => {
 					this.logActivity(message);
@@ -132,16 +150,20 @@ export default class FilenSyncPlugin extends Plugin {
 						(this.statusBarState.kind === "idle" ||
 							this.statusBarState.kind === "success")
 					) {
-						this.renderStatusBar();
+						this.updateStatusDisplays();
 					}
 				}, 60_000),
 			);
 		}
 
-		const syncRibbonIcon = this.addRibbonIcon("refresh-cw", "Filen: sync now", () => {
-			void this.syncNow();
+		this.syncRibbonIconEl = this.addRibbonIcon("refresh-cw", "Filen: sync now", () => {
+			if (this.coordinator.active) {
+				this.showSyncProgressNoticeOnDemand();
+			} else {
+				void this.syncNow();
+			}
 		});
-		syncRibbonIcon.addClass("filen-sync-ribbon-sync");
+		this.syncRibbonIconEl.addClass("filen-sync-ribbon-sync");
 
 		const activityLogsRibbonIcon = this.addRibbonIcon(
 			"list",
@@ -239,6 +261,8 @@ export default class FilenSyncPlugin extends Plugin {
 	onunload() {
 		this.unloaded = true;
 		this.coordinator.close();
+		this.noticeController?.closeNotice();
+		this.floatingIndicator?.destroy();
 		if (this.activityLogsSaveTimer !== null) {
 			window.clearTimeout(this.activityLogsSaveTimer);
 			this.activityLogsSaveTimer = null;
@@ -493,11 +517,22 @@ export default class FilenSyncPlugin extends Plugin {
 	refreshAutoSync(): void {
 		this.coordinator.refreshAutoSync(() => this.canAutoSync());
 		if (!this.coordinator.active) this.setDefaultStatus();
-		else this.renderStatusBar();
+		else this.updateStatusDisplays();
 	}
 
 	refreshStatusBar(): void {
-		this.renderStatusBar();
+		this.updateStatusDisplays();
+	}
+
+	refreshFloatingIndicator(): void {
+		this.floatingIndicator.refreshVisibility();
+	}
+
+	private showSyncProgressNoticeOnDemand(): void {
+		this.noticeController.showOnDemand(this.statusBarState);
+		if (this.settings.showFloatingSyncIndicator) {
+			this.floatingIndicator.onStatusChange(this.statusBarState);
+		}
 	}
 
 	async syncNow(): Promise<SyncRunResult> {
@@ -980,7 +1015,61 @@ export default class FilenSyncPlugin extends Plugin {
 		updatedAt: number | null = Date.now(),
 	): void {
 		this.statusBarState = { kind, text, detail, updatedAt };
+		this.updateStatusDisplays();
+	}
+
+	private updateStatusDisplays(): void {
 		this.renderStatusBar();
+		this.updateRibbonIcon();
+	}
+
+	private updateRibbonIcon(): void {
+		if (this.syncRibbonIconEl === null) return;
+		this.syncRibbonIconEl.removeClass("is-syncing", "is-error", "is-warning");
+
+		if (this.statusBarState.kind === "syncing") {
+			this.syncRibbonIconEl.addClass("is-syncing");
+			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
+				const pct = Math.round(
+					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
+						100,
+				);
+				const pathDetail = this.statusBarState.progress.path
+					? ` · ${this.statusBarState.progress.path.split("/").pop()}`
+					: "";
+				const tooltip = `Filen: Syncing ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)${pathDetail}\nClick for sync details`;
+				setTooltip(this.syncRibbonIconEl, tooltip);
+				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			} else {
+				const tooltip = `Filen: ${this.statusBarState.text}\nClick for sync details`;
+				setTooltip(this.syncRibbonIconEl, tooltip);
+				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			}
+			return;
+		}
+
+		if (this.statusBarState.kind === "error") {
+			this.syncRibbonIconEl.addClass("is-error");
+			const tooltip = `Filen: Sync failed (${this.statusBarState.detail})\nClick to retry sync`;
+			setTooltip(this.syncRibbonIconEl, tooltip);
+			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			return;
+		}
+
+		if (this.statusBarState.kind === "warning") {
+			this.syncRibbonIconEl.addClass("is-warning");
+			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}`;
+			setTooltip(this.syncRibbonIconEl, tooltip);
+			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			return;
+		}
+
+		const tooltip =
+			this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0
+				? `Filen: Up to date (${formatRelativeTime(this.lastSyncTimestamp)})\nClick to sync now`
+				: "Filen: Sync now";
+		setTooltip(this.syncRibbonIconEl, tooltip);
+		this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 	}
 
 	private renderStatusBar(): void {
@@ -1040,7 +1129,17 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.statusBarState.kind === "syncing") {
 			setIcon(this.statusBarIconEl, "refresh-cw");
-			this.statusBarTextEl.setText(`Filen ${this.statusBarState.text}`);
+			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
+				const pct = Math.round(
+					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
+						100,
+				);
+				this.statusBarTextEl.setText(
+					`Filen: ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)`,
+				);
+			} else {
+				this.statusBarTextEl.setText(`Filen ${this.statusBarState.text}`);
+			}
 			this.statusBarItemEl.addClass("is-syncing");
 			const tooltip = this.buildStatusTooltip();
 			setTooltip(this.statusBarItemEl, tooltip);
@@ -1098,7 +1197,18 @@ export default class FilenSyncPlugin extends Plugin {
 				? "All files synced"
 				: this.statusBarState.text;
 			lines.push(label ? `Syncing: ${label}` : "Syncing…");
-			if (this.statusBarState.detail) {
+			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
+				const pct = Math.round(
+					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
+						100,
+				);
+				lines.push(
+					`Progress: ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} files (${pct}%)`,
+				);
+				if (this.statusBarState.progress.path) {
+					lines.push(`File: ${this.statusBarState.progress.path}`);
+				}
+			} else if (this.statusBarState.detail) {
 				lines.push(this.statusBarState.detail);
 			}
 			lines.push("Click for sync actions.");

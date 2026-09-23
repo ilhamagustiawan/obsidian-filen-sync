@@ -15,6 +15,8 @@ export type StatusBarState = {
 	text: string;
 	detail: string;
 	updatedAt: number | null;
+	progress?: SyncProgress;
+	isManual?: boolean;
 };
 
 export type SyncRunResult =
@@ -184,6 +186,8 @@ export class SyncCoordinator {
 			text: `${label}…`,
 			detail: "Starting...",
 			updatedAt: Date.now(),
+			isManual,
+			progress: { current: 0, total: 0, path: "" },
 		});
 		this.callbacks.onLogActivity(`${label} started`);
 
@@ -218,6 +222,8 @@ export class SyncCoordinator {
 						text: `${label}…`,
 						detail: `${p.current}/${p.total} · ${p.path}`,
 						updatedAt: Date.now(),
+						progress: p,
+						isManual,
 					});
 				},
 				confirmDeletes,
@@ -239,6 +245,7 @@ export class SyncCoordinator {
 					text: "Sync paused",
 					detail: reason,
 					updatedAt: Date.now(),
+					isManual,
 				});
 				if (options.autoSync) this.resetAutoSyncBackoff();
 				return { kind: "cancelled", reason };
@@ -253,6 +260,7 @@ export class SyncCoordinator {
 					text: "up to date",
 					detail: "No changes detected.",
 					updatedAt: Date.now(),
+					isManual,
 				});
 				return { kind: "up-to-date" };
 			}
@@ -270,6 +278,7 @@ export class SyncCoordinator {
 				text: summary,
 				detail: `${label}: ${summary}`,
 				updatedAt: Date.now(),
+				isManual,
 			});
 
 			if (!options.silent) {
@@ -316,6 +325,7 @@ export class SyncCoordinator {
 				text: `${label} failed`,
 				detail: message,
 				updatedAt: Date.now(),
+				isManual,
 			});
 
 			if (!options.silent) {
