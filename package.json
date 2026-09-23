@@ -3,7 +3,16 @@
 	"version": "1.0.0",
 	"description": "Sync your Obsidian vault with Filen using a direct folder mirror, optional auto-sync, conflict copies, and file versions.",
 	"keywords": [],
+	"homepage": "https://github.com/ilhamagustiawan/obsidian-filen-sync#readme",
+	"bugs": {
+		"url": "https://github.com/ilhamagustiawan/obsidian-filen-sync/issues"
+	},
 	"license": "AGPL-3.0-only",
+	"author": "Ilham Agustiawan",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ilhamagustiawan/obsidian-filen-sync.git"
+	},
 	"type": "module",
 	"main": "main.js",
 	"scripts": {
