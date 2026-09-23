@@ -36,12 +36,32 @@ type AxiosLikeResponse = {
 	request: undefined;
 };
 
+/** Default deadline for requests where the SDK/caller does not supply one. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+let outstandingMutationRequests = 0;
+let reconciliationRequired = false;
+let uncertainMutationHandler: (() => Promise<void>) | null = null;
+
+export const getOutstandingMutationRequests = (): number => outstandingMutationRequests;
+export const needsRemoteReconciliation = (): boolean => reconciliationRequired;
+export const setRemoteReconciliationRequired = (required: boolean): void => {
+	reconciliationRequired = required;
+};
+export const setUncertainMutationHandler = (handler: (() => Promise<void>) | null): void => {
+	uncertainMutationHandler = handler;
+};
+
 async function doRequest(
 	url: string,
 	method: string,
 	data: unknown,
 	config: FilenRequestConfig,
 ): Promise<AxiosLikeResponse> {
+	const endpoint = new URL(url);
+	if (endpoint.protocol !== "https:") {
+		throw new Error("Filen requests must use HTTPS.");
+	}
+	if (config.signal?.aborted) throw new Error("Filen request was cancelled.");
 	// Copy string-valued headers from config. The SDK (buildHeaders, browser mode)
 	// does NOT include Content-Type — real axios adds it from defaults. We add it below.
 	const headers: Record<string, string> = {};
@@ -53,7 +73,7 @@ async function doRequest(
 	}
 
 	let body: ArrayBuffer | undefined;
-	if (data !== null) {
+	if (data !== null && data !== undefined) {
 		if (data instanceof ArrayBuffer) {
 			body = data;
 		} else if (ArrayBuffer.isView(data)) {
@@ -76,13 +96,65 @@ async function doRequest(
 	// requestUrl goes through Electron's main-process net module, which uses
 	// the OS certificate store. This bypasses ERR_CERT_AUTHORITY_INVALID that
 	// occurs when XHR/fetch in the renderer cannot validate gateway.filen.net.
-	const res = await requestUrl({
+	const request = requestUrl({
 		url,
 		method: method.toUpperCase(),
 		headers,
 		body,
 		throw: false,
 	});
+	const timeoutMs =
+		config.timeout === undefined
+			? DEFAULT_REQUEST_TIMEOUT_MS
+			: Number.isFinite(config.timeout) && config.timeout >= 0
+				? config.timeout
+				: DEFAULT_REQUEST_TIMEOUT_MS;
+	const hasDeadline = timeoutMs > 0;
+	const isMutation = method.toUpperCase() !== "GET";
+	if (isMutation) outstandingMutationRequests += 1;
+	let requestSettled = false;
+	void request.then(
+		() => {
+			requestSettled = true;
+			if (isMutation) outstandingMutationRequests -= 1;
+		},
+		() => {
+			requestSettled = true;
+			if (isMutation) outstandingMutationRequests -= 1;
+		},
+	);
+	let timeoutId: number | undefined;
+	let abortListener: (() => void) | undefined;
+	const deadline = hasDeadline
+		? new Promise<never>((_, reject) => {
+				timeoutId = window.setTimeout(
+					() => reject(new Error("Filen request timed out.")),
+					timeoutMs,
+				);
+			})
+		: new Promise<never>(() => {});
+	const cancellation = config.signal
+		? new Promise<never>((_, reject) => {
+				abortListener = () => reject(new Error("Filen request was cancelled."));
+				config.signal?.addEventListener("abort", abortListener, { once: true });
+			})
+		: new Promise<never>(() => {});
+	let res: Awaited<typeof request>;
+	try {
+		res = await Promise.race([request, deadline, cancellation]);
+	} catch (error) {
+		if (isMutation && !requestSettled) {
+			reconciliationRequired = true;
+			await uncertainMutationHandler?.().catch(() => {});
+			throw new Error(
+				`Filen mutation result is uncertain (${error instanceof Error ? error.message : "request interrupted"}); reconcile before retrying.`,
+			);
+		}
+		throw error;
+	} finally {
+		if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+		if (abortListener !== undefined) config.signal?.removeEventListener("abort", abortListener);
+	}
 
 	const rt = config.responseType ?? "json";
 	const responseData: unknown =

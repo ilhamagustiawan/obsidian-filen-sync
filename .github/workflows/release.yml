@@ -1,0 +1,53 @@
+name: Release plugin
+
+on:
+    push:
+        tags:
+            - "[0-9]*.[0-9]*.[0-9]*"
+            - "[0-9]*.[0-9]*.[0-9]*-*"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            id-token: write
+            attestations: write
+        steps:
+            - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+              with:
+                  node-version: 22
+                  cache: npm
+            - run: npm ci
+            - run: npm audit --omit=dev --audit-level=high
+            - run: npm run test
+            - run: npm run build
+            - run: npm run lint
+            - run: npm run fmt:check
+            - name: Verify tag matches manifest
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              run: node -e 'const m=require("./manifest.json"); if(m.version!==process.env.RELEASE_TAG) throw new Error(`Tag ${process.env.RELEASE_TAG} does not match manifest ${m.version}`)'
+            - name: Prepare release files and checksums
+              run: |
+                  mkdir release
+                  cp main.js manifest.json release/
+                  if [ -f styles.css ]; then cp styles.css release/; fi
+                  (cd release && sha256sum * > SHA256SUMS)
+            - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+              with:
+                  subject-path: "release/*"
+            - name: Publish GitHub release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  PRERELEASE_FLAG=""
+                  if echo "${GITHUB_REF_NAME}" | grep -q -- "-"; then
+                      PRERELEASE_FLAG="--prerelease"
+                  fi
+                  gh release create "${GITHUB_REF_NAME}" release/* ${PRERELEASE_FLAG} --generate-notes || gh release upload "${GITHUB_REF_NAME}" release/* --clobber

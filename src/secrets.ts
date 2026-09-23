@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import type { FilenAuth } from "./settings";
+import { readFilenAuth, type FilenAuth } from "./auth";
 
 const AUTH_ID = "filen-sync-auth";
 const PASSWORD_ID = "filen-sync-password";
@@ -25,10 +25,15 @@ export class PluginSecrets {
 		const raw = this.app.secretStorage.getSecret(AUTH_ID);
 		if (!raw) return null;
 		try {
-			return JSON.parse(raw) as FilenAuth;
+			return readFilenAuth(JSON.parse(raw));
 		} catch {
 			return null;
 		}
+	}
+
+	/** Clear persisted derived credentials. */
+	clearAuth(): void {
+		this.app.secretStorage.setSecret(AUTH_ID, "");
 	}
 
 	/** True when auth credentials are present. */
@@ -36,17 +41,9 @@ export class PluginSecrets {
 		return this.getAuth() !== null;
 	}
 
-	// ── Password ────────────────────────────────────────────────────
-
-	/** Store the session password. Pass empty string to clear. */
-	setPassword(password: string): void {
-		this.app.secretStorage.setSecret(PASSWORD_ID, password);
-	}
-
-	/** Retrieve the stored password, or empty string. */
-	getPassword(): string {
-		const raw = this.app.secretStorage.getSecret(PASSWORD_ID);
-		return typeof raw === "string" ? raw : "";
+	/** Remove a raw password left by versions that persisted it. */
+	clearLegacyPassword(): void {
+		this.app.secretStorage.setSecret(PASSWORD_ID, "");
 	}
 
 	// ── Lifecycle ────────────────────────────────────────────────────

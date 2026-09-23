@@ -15,6 +15,7 @@ export type ActivityLogHost = {
 	getActivityLogs(): readonly ActivityLogEntry[];
 	clearActivityLogs(): Promise<void>;
 	onActivityLogsChanged(listener: () => void): () => void;
+	isOffline?: () => boolean;
 };
 
 export const formatActivityLogEntry = (entry: ActivityLogEntry): string =>
@@ -93,6 +94,14 @@ export class ActivityLogModal extends Modal {
 		this.contentEl.createEl("p", {
 			text: "Recent connection and sync activity.",
 			cls: "filen-sync-activity-log-description",
+		});
+
+		const isOffline = this.host.isOffline?.() ?? false;
+		const connDiv = this.contentEl.createDiv({ cls: "filen-sync-activity-log-connection" });
+		connDiv.createSpan({ text: "Connection: " });
+		connDiv.createSpan({
+			text: isOffline ? "Offline" : "Online",
+			cls: `filen-sync-connection-badge ${isOffline ? "is-offline" : "is-online"}`,
 		});
 
 		const actions = this.contentEl.createDiv({ cls: "filen-sync-activity-log-actions" });

@@ -1,13 +1,19 @@
 import { FilenSDK } from "@filen/sdk";
 import { createObsidianAxiosLike } from "./obsidian-axios-adapter";
 import type { FilenAuth } from "./settings";
+import { downloadFileChunks, uploadFileChunks } from "./sync/chunk-transfers";
+import { validateRemoteRoot, validateSyncPath } from "./sync/path-validation";
 
 export type RemoteEntry = {
 	path: string;
 	mtime: number;
 	size: number;
 	isDir: boolean;
+	uuid?: string;
+	remoteHash?: string;
 };
+
+export type RemoteTargetIdentity = { userId: number; rootUuid: string };
 
 export type RemoteFileVersion = {
 	uuid: string;
@@ -20,21 +26,23 @@ export type RemoteFileVersion = {
 
 export type RemoteFs = {
 	walk(): Promise<RemoteEntry[]>;
-	readFile(path: string): Promise<Uint8Array>;
-	writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
-	rm(path: string): Promise<void>;
+	readFile(path: string, expectedRemoteUuid?: string): Promise<Uint8Array>;
+	writeFile(
+		path: string,
+		bytes: Uint8Array,
+		mtime: number,
+		ctime: number,
+		expectedRemoteUuid?: string,
+	): Promise<RemoteEntry>;
+	rm(path: string, expectedRemoteUuid?: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	checkConnect(): Promise<void>;
 	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
 	readFileVersion(version: RemoteFileVersion): Promise<Uint8Array>;
 	restoreFileVersion(path: string, versionUuid: string): Promise<void>;
+	stat?(path: string): Promise<RemoteEntry | null>;
 	close(): void;
-};
-
-const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
-	const buffer = new ArrayBuffer(bytes.byteLength);
-	new Uint8Array(buffer).set(bytes);
-	return buffer;
+	checkEvents?(watermarkMs: number): Promise<{ hasChanges: boolean; newWatermarkMs: number }>;
 };
 
 type FilenRemoteFsConfig = {
@@ -54,12 +62,21 @@ export class FilenRemoteFs implements RemoteFs {
 	async walk(): Promise<RemoteEntry[]> {
 		const rootUuid = await this.getParentUuid("");
 		const cloud = (await this.getClient()).cloud();
+		return this.sortEntries(await this.walkTree(rootUuid, cloud));
+	}
 
-		try {
-			return this.sortEntries(await this.walkTree(rootUuid, cloud));
-		} catch {
-			return this.sortEntries(await this.walkRecursive(rootUuid, cloud));
+	/** Resolve the authenticated account and effective mirror directory before DB binding. */
+	async getTargetIdentity(): Promise<RemoteTargetIdentity> {
+		const client = await this.getClient();
+		// Flush the SDK's in-memory directory cache so a replaced root cannot reuse
+		// an earlier UUID as the database binding.
+		client.init(client.config);
+		configureSdkRetryBounds(client);
+		const userId = client.config.userId;
+		if (typeof userId !== "number" || !Number.isFinite(userId) || userId <= 0) {
+			throw new Error("Filen did not provide a valid authenticated user identity.");
 		}
+		return { userId, rootUuid: await this.getParentUuid("") };
 	}
 
 	private async walkTree(
@@ -74,92 +91,68 @@ export class FilenRemoteFs implements RemoteFs {
 				continue;
 			}
 
-			const path = treePath.startsWith("/") ? treePath.slice(1) : treePath;
-			if (path.length === 0) {
-				continue;
-			}
+			const path = validateSyncPath(treePath.startsWith("/") ? treePath.slice(1) : treePath);
 
 			entries.push({
 				path,
-				mtime: item.lastModified,
+				mtime: normalizeRemoteTimestampMs(item.lastModified),
 				size: item.size,
 				isDir: item.type === "directory",
+				uuid:
+					typeof (item as { uuid?: unknown }).uuid === "string"
+						? (item as { uuid: string }).uuid
+						: undefined,
+				remoteHash:
+					typeof (item as { hash?: unknown }).hash === "string"
+						? (item as { hash: string }).hash
+						: undefined,
 			});
 		}
 
 		return entries;
 	}
 
-	private async walkRecursive(
-		rootUuid: string,
-		cloud: ReturnType<FilenSDK["cloud"]>,
-	): Promise<RemoteEntry[]> {
-		const visited = new Set<string>([rootUuid]);
-
-		// Cap concurrent listDirectory calls to avoid hitting API rate limits.
-		const MAX_CONCURRENT = 16;
-		let active = 0;
-		const waitQueue: Array<() => void> = [];
-		const acquire = (): Promise<void> => {
-			if (active < MAX_CONCURRENT) {
-				active++;
-				return Promise.resolve();
-			}
-			return new Promise((resolve) => waitQueue.push(resolve));
-		};
-		const release = (): void => {
-			const next = waitQueue.shift();
-			if (next) {
-				next();
-			} else {
-				active--;
-			}
-		};
-
-		const walkDir = async (uuid: string, pathPrefix: string): Promise<RemoteEntry[]> => {
-			await acquire();
-			let items;
-			try {
-				items = await cloud.listDirectory({ uuid });
-			} finally {
-				release();
-			}
-
-			const entries: RemoteEntry[] = [];
-			const subDirPromises: Promise<RemoteEntry[]>[] = [];
-
-			for (const item of items) {
-				const path = pathPrefix.length > 0 ? `${pathPrefix}/${item.name}` : item.name;
-				entries.push({
-					path,
-					mtime: item.lastModified,
-					size: item.size,
-					isDir: item.type === "directory",
-				});
-				if (item.type === "directory" && !visited.has(item.uuid)) {
-					visited.add(item.uuid);
-					subDirPromises.push(walkDir(item.uuid, path));
-				}
-			}
-
-			const subResults = await Promise.all(subDirPromises);
-			return entries.concat(...subResults);
-		};
-
-		return walkDir(rootUuid, "");
-	}
-
 	private sortEntries(entries: RemoteEntry[]): RemoteEntry[] {
 		return entries.sort((left, right) => left.path.localeCompare(right.path));
 	}
 
-	async readFile(path: string): Promise<Uint8Array> {
-		const fs = (await this.getClient()).fs();
-		const content = await fs.readFile({ path: this.join(path) });
-		return new Uint8Array(content);
+	async readFile(path: string, expectedRemoteUuid?: string): Promise<Uint8Array> {
+		validateSyncPath(path);
+		const client = await this.getClient();
+		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
+		if (uuid === null) {
+			throw new Error(`Remote file not found: ${path}`);
+		}
+		if (expectedRemoteUuid !== undefined && uuid !== expectedRemoteUuid) {
+			throw new Error(`Remote file changed before download: ${path}. Replan the sync.`);
+		}
+		const file = await client.cloud().getFile({ uuid });
+		return downloadFileChunks(client, {
+			uuid: file.uuid,
+			bucket: file.bucket,
+			region: file.region,
+			version: file.version,
+			size: file.size,
+			chunks: file.chunks,
+			key: file.metadataDecrypted.key,
+		});
 	}
 
-	async writeFile(path: string, bytes: Uint8Array, mtime: number, _ctime: number): Promise<void> {
+	async writeFile(
+		path: string,
+		bytes: Uint8Array,
+		mtime: number,
+		ctime: number,
+		expectedRemoteUuid?: string,
+	): Promise<RemoteEntry> {
+		validateSyncPath(path);
+		const current = await this.stat(path);
+		if (
+			(expectedRemoteUuid === undefined && current !== null) ||
+			(expectedRemoteUuid !== undefined && current?.uuid !== expectedRemoteUuid)
+		) {
+			throw new Error(`Remote file changed before upload: ${path}. Replan the sync.`);
+		}
 		const client = await this.getClient();
 		const normalized = normalizeRemotePath(path);
 		const parent = normalized.includes("/")
@@ -169,48 +162,145 @@ export class FilenRemoteFs implements RemoteFs {
 
 		const parentUuid = await this.getParentUuid(parent);
 
-		const file = new File([toArrayBuffer(bytes)], fileName, { lastModified: mtime });
-		await client.cloud().uploadWebFile({
-			file,
-			parent: parentUuid,
-			name: fileName,
-		});
+		const uploaded = await uploadFileChunks(client, parentUuid, fileName, bytes, mtime, ctime);
 		client.init(client.config);
+		configureSdkRetryBounds(client);
+		return {
+			path,
+			mtime,
+			size: uploaded.size,
+			isDir: false,
+			uuid: uploaded.uuid,
+			remoteHash: uploaded.hash,
+		};
 	}
 
-	async rm(path: string): Promise<void> {
-		const fs = (await this.getClient()).fs();
-		await fs.unlink({ path: this.join(path), permanent: true });
+	async rm(path: string, expectedRemoteUuid?: string): Promise<void> {
+		validateSyncPath(path);
+		const client = await this.getClient();
+		const current = await this.stat(path);
+		if (
+			current === null ||
+			(expectedRemoteUuid !== undefined && current.uuid !== expectedRemoteUuid)
+		) {
+			throw new Error(`Remote file changed before deletion: ${path}. Replan the sync.`);
+		}
+		await client.cloud().trashFile({ uuid: current.uuid! });
+		client.init(client.config);
+		configureSdkRetryBounds(client);
 	}
 
 	async mkdir(path: string): Promise<void> {
+		if (path.length > 0) validateSyncPath(path);
 		const fs = (await this.getClient()).fs();
 		await fs.mkdir({ path: this.join(path) });
 	}
 
+	async checkEvents(
+		watermarkMs: number,
+	): Promise<{ hasChanges: boolean; newWatermarkMs: number }> {
+		const client = await this.getClient();
+		const lastTimestamp = Math.floor(watermarkMs / 1000);
+		const rawEvents = await (
+			client as unknown as {
+				api: (version: number) => {
+					user: () => {
+						events: (p: {
+							lastTimestamp: number;
+							filter: string;
+						}) => Promise<
+							Array<{ id: number | string; type: string; timestamp: number }>
+						>;
+					};
+				};
+			}
+		)
+			.api(3)
+			.user()
+			.events({ lastTimestamp, filter: "all" });
+
+		if (!Array.isArray(rawEvents) || rawEvents.length === 0) {
+			return { hasChanges: false, newWatermarkMs: watermarkMs };
+		}
+
+		let maxTimestampMs = watermarkMs;
+		for (const event of rawEvents) {
+			if (typeof event.timestamp === "number" && Number.isFinite(event.timestamp)) {
+				const ms = event.timestamp < 1e11 ? event.timestamp * 1000 : event.timestamp;
+				if (ms > maxTimestampMs) maxTimestampMs = ms;
+			}
+		}
+
+		return { hasChanges: true, newWatermarkMs: maxTimestampMs };
+	}
+
 	async checkConnect(): Promise<void> {
 		await this.ensureRoot();
-		const testPath = `_connection_test_${Date.now()}.txt`;
-		const content = new TextEncoder().encode("ok");
+		const testPath = `_connection_test_${window.crypto.randomUUID()}.txt`;
+		const content = new TextEncoder().encode("filen-connection-check");
 		let created = false;
+		let primaryError: Error | null = null;
+		let cleanupError: Error | null = null;
 
 		try {
-			await this.writeFile(testPath, content, Date.now(), Date.now());
 			created = true;
+			await this.writeFile(testPath, content, Date.now(), Date.now());
+			const downloaded = await this.readFile(testPath);
+			if (
+				downloaded.length !== content.length ||
+				downloaded.some((byte, i) => byte !== content[i])
+			) {
+				throw new Error("Connection probe did not return the uploaded bytes.");
+			}
 		} catch (error) {
-			throw normalizeRemoteError(error);
+			primaryError = normalizeRemoteError(error);
 		} finally {
 			if (created) {
 				try {
 					await this.rm(testPath);
-				} catch {
-					// best-effort cleanup
+				} catch (error) {
+					cleanupError = normalizeRemoteError(error);
 				}
 			}
 		}
+
+		if (primaryError !== null) {
+			if (cleanupError !== null) {
+				throw new Error(
+					`${primaryError.message} Probe cleanup also failed: ${cleanupError.message}`,
+				);
+			}
+			throw primaryError;
+		}
+		if (cleanupError !== null) {
+			throw new Error(
+				`Connection probe succeeded, but cleanup failed: ${cleanupError.message}`,
+			);
+		}
+	}
+
+	async stat(path: string): Promise<RemoteEntry | null> {
+		validateSyncPath(path);
+		const client = await this.getClient();
+		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
+		if (uuid === null) return null;
+		const file = await client.cloud().getFile({ uuid });
+		if (file.trash) return null;
+		return {
+			path,
+			mtime: normalizeRemoteTimestampMs(file.metadataDecrypted.lastModified),
+			size: file.size,
+			isDir: false,
+			uuid: file.uuid,
+			remoteHash:
+				typeof file.metadataDecrypted?.hash === "string"
+					? file.metadataDecrypted.hash
+					: undefined,
+		};
 	}
 
 	async getFileVersions(path: string): Promise<RemoteFileVersion[]> {
+		validateSyncPath(path);
 		const client = await this.getClient();
 		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
 		if (uuid === null) return [];
@@ -228,33 +318,15 @@ export class FilenRemoteFs implements RemoteFs {
 	async readFileVersion(version: RemoteFileVersion): Promise<Uint8Array> {
 		const client = await this.getClient();
 		const file = await client.cloud().getFile({ uuid: version.uuid });
-		const stream = client.cloud().downloadFileToReadableStream({
+		return downloadFileChunks(client, {
 			uuid: version.uuid,
 			bucket: version.bucket,
 			region: version.region,
 			version: file.version,
-			key: file.metadataDecrypted.key,
 			size: file.size,
 			chunks: version.chunks,
+			key: file.metadataDecrypted.key,
 		});
-		const reader = stream.getReader();
-		const buffers: Uint8Array[] = [];
-		let total = 0;
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (value !== undefined) {
-				buffers.push(value);
-				total += value.byteLength;
-			}
-		}
-		const out = new Uint8Array(total);
-		let offset = 0;
-		for (const buf of buffers) {
-			out.set(buf, offset);
-			offset += buf.byteLength;
-		}
-		return out;
 	}
 
 	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {
@@ -294,6 +366,7 @@ export class FilenRemoteFs implements RemoteFs {
 			// XHR/fetch in the renderer raises for gateway.filen.net.
 			createObsidianAxiosLike() as unknown as ConstructorParameters<typeof FilenSDK>[2],
 		);
+		configureSdkRetryBounds(client);
 
 		if (this.config.auth === null) {
 			try {
@@ -314,11 +387,8 @@ export class FilenRemoteFs implements RemoteFs {
 
 	private get root(): string {
 		const value = this.config.remoteRoot.trim();
-		if (value.length === 0) {
-			return "/Obsidian";
-		}
-
-		return value.startsWith("/") ? value : `/${value}`;
+		const root = value.length === 0 ? "/Obsidian" : value.startsWith("/") ? value : `/${value}`;
+		return validateRemoteRoot(root);
 	}
 
 	private join(path: string): string {
@@ -341,6 +411,31 @@ export class FilenRemoteFs implements RemoteFs {
 		return fs.mkdir({ path: targetPath });
 	}
 }
+
+const configureSdkRetryBounds = (sdk: FilenSDK): void => {
+	const internal = sdk as unknown as {
+		_api?: {
+			apiClient?: {
+				request: (params: Record<string, unknown>) => Promise<unknown>;
+			};
+		};
+	};
+	const apiClient = internal._api?.apiClient;
+	if (apiClient === undefined) return;
+	const originalRequest = apiClient.request.bind(apiClient);
+	apiClient.request = (params) => {
+		const endpoint = typeof params.endpoint === "string" ? params.endpoint : "";
+		if (endpoint.startsWith("/v3/upload?")) {
+			// Mutating chunk retries can outlive a timed-out request. Use one dispatch.
+			return originalRequest({ ...params, maxRetries: 1, retryTimeout: 1 });
+		}
+		if (params.method === "GET" && /^\/[^/]+\/[^/]+\/[^/]+\/\d+$/u.test(endpoint)) {
+			// This is the SDK's egest chunk endpoint: retain bounded safe-read retries.
+			return originalRequest({ ...params, maxRetries: 3, retryTimeout: 500 });
+		}
+		return originalRequest(params);
+	};
+};
 
 const normalizeRemotePath = (path: string): string => path.replace(/^\/+/, "").replace(/\/+$/, "");
 

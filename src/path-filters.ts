@@ -13,6 +13,7 @@ type PathFilterConfig = {
 	configDir: string;
 	pluginId: string;
 	ignorePatterns: string[];
+	maxFileSizeBytes?: number;
 };
 
 type CompiledIgnoreRule = {
@@ -22,7 +23,7 @@ type CompiledIgnoreRule = {
 
 export type SyncPathFilter = {
 	patterns: string[];
-	isIgnored(path: string): boolean;
+	isIgnored(path: string, size?: number): boolean;
 };
 
 export const normalizeIgnorePatterns = (patterns: Iterable<string>): string[] => {
@@ -52,7 +53,15 @@ export const createSyncPathFilter = (config: PathFilterConfig): SyncPathFilter =
 
 	return {
 		patterns,
-		isIgnored(path: string): boolean {
+		isIgnored(path: string, size?: number): boolean {
+			if (
+				size !== undefined &&
+				config.maxFileSizeBytes !== undefined &&
+				size > config.maxFileSizeBytes
+			) {
+				return true;
+			}
+
 			const normalizedPath = normalizePattern(path);
 			if (normalizedPath.length === 0) {
 				return true;

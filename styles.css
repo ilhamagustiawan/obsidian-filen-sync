@@ -3,8 +3,9 @@
 	align-items: center;
 	gap: 6px;
 	cursor: pointer;
-	border-radius: 999px;
-	padding-inline: 6px;
+	border-radius: var(--radius-s, 4px);
+	padding-inline: 4px;
+	height: var(--status-bar-height, 24px);
 	transition:
 		background-color 120ms ease,
 		color 120ms ease;
@@ -23,20 +24,34 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 14px;
-	height: 14px;
+	width: 16px;
+	height: 16px;
+}
+
+.filen-sync-status-icon svg {
+	width: 15px;
+	height: 15px;
+	transform-origin: 50% 50%;
 }
 
 .filen-sync-status-item.is-icon-only .filen-sync-status-text {
 	display: none;
 }
 
-.filen-sync-status-item.is-syncing .filen-sync-status-icon {
-	animation: filen-sync-spin 1s linear infinite;
+.filen-sync-status-item.is-syncing {
+	color: var(--interactive-accent);
+}
+
+.filen-sync-status-item.is-syncing .filen-sync-status-icon svg {
+	animation: filen-sync-spin 1.2s linear infinite;
 }
 
 .filen-sync-status-item.is-idle {
-	color: var(--text-error);
+	color: var(--text-muted);
+}
+
+.filen-sync-status-item.is-idle:hover {
+	color: var(--text-normal);
 }
 
 .filen-sync-status-item.is-success {

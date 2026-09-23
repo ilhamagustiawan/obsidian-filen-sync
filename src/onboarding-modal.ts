@@ -34,9 +34,9 @@ export class FilenSyncSetupModal extends Modal {
 		steps.createEl("li", { text: "Run sync now to create the mirror" });
 
 		const note = this.contentEl.createDiv({ cls: "filen-sync-setup-note" });
-		note.createEl("strong", { text: "Privacy" });
+		note.createEl("strong", { text: "Privacy and first sync" });
 		note.createSpan({
-			text: " Your password and 2FA code stay in memory for this session only.",
+			text: " Password and 2FA stay in memory. Remembered derived credentials are stored in Obsidian SecretStorage. Existing sync history stays inactive; the first sync is conservative and may create conflict copies.",
 		});
 
 		const actions = this.contentEl.createDiv({ cls: "modal-button-container" });

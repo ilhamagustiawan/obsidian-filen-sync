@@ -1,9 +1,10 @@
-import type { App } from "obsidian";
-import { PluginSettingTab, Setting } from "obsidian";
+import type { App, TextComponent } from "obsidian";
+import { Notice, PluginSettingTab, Setting } from "obsidian";
 import { readActivityLogs, type ActivityLogEntry } from "./activity-logs";
 import type FilenSyncPlugin from "./main";
 import { DEFAULT_IGNORE_PATTERNS, normalizeIgnorePatterns } from "./path-filters";
-import { PluginSecrets } from "./secrets";
+import { validateRemoteRoot } from "./sync/path-validation";
+export { readFilenAuth, type FilenAuth } from "./auth";
 
 export type SyncedFileRecord = {
 	path: string;
@@ -13,6 +14,8 @@ export type SyncedFileRecord = {
 	hash?: string;
 	/** Remote UUID assigned by Filen. Tracked to detect remote renames. */
 	remoteUuid?: string;
+	/** Remote content hash from Filen metadata (SHA-512). */
+	remoteHash?: string;
 	/** Unix-ms timestamp of the last successful sync operation for this file. */
 	lastSyncAt?: number;
 	/** Which side was last known to have the canonical version. */
@@ -26,30 +29,27 @@ export type SyncedFileRecord = {
  */
 export const SYNC_DB_SCHEMA_VERSION = 1;
 
-export type FilenAuth = {
-	email: string;
-	masterKeys: string[];
-	apiKey: string;
-	publicKey: string;
-	privateKey: string;
-	authVersion: 1 | 2 | 3;
-	baseFolderUUID: string;
-	userId: number;
-};
-
 export type FilenSyncSettings = {
 	email: string;
 	remoteRoot: string;
 	deviceId: string;
+	vaultId: string;
 	vaultName: string;
 	ignorePatterns: string[];
 	hasAuth: boolean;
+	rememberAuth: boolean;
 	syncOnSave: boolean;
 	syncOnSaveDelaySeconds: number;
 	syncIntervalMinutes: number;
 	syncStartupDelaySeconds: number;
 	syncPaused: boolean;
+	notifyOnBackgroundChange: boolean;
+	statusBarIndicatorStyle: "icon" | "full";
+	fastRemotePolling: boolean;
+	skipLargeFiles: boolean;
+	skipSizeLargerThanMB: number;
 	activityLogs: ActivityLogEntry[];
+	reconciliationNeeded: boolean;
 };
 
 const DEFAULT_REMOTE_ROOT = "/Obsidian";
@@ -58,15 +58,23 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	email: "",
 	remoteRoot: DEFAULT_REMOTE_ROOT,
 	deviceId: "",
+	vaultId: "",
 	vaultName: "default",
 	ignorePatterns: [...DEFAULT_IGNORE_PATTERNS],
 	hasAuth: false,
+	rememberAuth: true,
 	syncOnSave: true,
 	syncOnSaveDelaySeconds: 5,
 	syncIntervalMinutes: 3,
 	syncStartupDelaySeconds: 0,
 	syncPaused: false,
+	notifyOnBackgroundChange: false,
+	statusBarIndicatorStyle: "icon",
+	fastRemotePolling: true,
+	skipLargeFiles: true,
+	skipSizeLargerThanMB: 50,
 	activityLogs: [],
+	reconciliationNeeded: false,
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -87,53 +95,6 @@ const clampNumber = (value: number, min: number, max: number): number =>
 const readStringArray = (value: unknown): string[] =>
 	Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
-const readAuthVersion = (value: unknown): 1 | 2 | 3 | null => {
-	if (value === 1 || value === 2 || value === 3) {
-		return value;
-	}
-
-	return null;
-};
-
-export const readFilenAuth = (value: unknown): FilenAuth | null => {
-	if (!isRecord(value)) {
-		return null;
-	}
-
-	const email = readString(value.email, "");
-	const masterKeys = readStringArray(value.masterKeys);
-	const apiKey = readString(value.apiKey, "");
-	const publicKey = readString(value.publicKey, "");
-	const privateKey = readString(value.privateKey, "");
-	const authVersion = readAuthVersion(value.authVersion);
-	const baseFolderUUID = readString(value.baseFolderUUID, "");
-	const userId = readNumber(value.userId, 0);
-
-	if (
-		email.length === 0 ||
-		masterKeys.length === 0 ||
-		apiKey.length === 0 ||
-		publicKey.length === 0 ||
-		privateKey.length === 0 ||
-		authVersion === null ||
-		baseFolderUUID.length === 0 ||
-		userId <= 0
-	) {
-		return null;
-	}
-
-	return {
-		email,
-		masterKeys,
-		apiKey,
-		publicKey,
-		privateKey,
-		authVersion,
-		baseFolderUUID,
-		userId,
-	};
-};
-
 export const FilenSyncSettings = {
 	fromSaved(value: unknown): FilenSyncSettings {
 		if (!isRecord(value)) {
@@ -148,12 +109,14 @@ export const FilenSyncSettings = {
 			email: readString(value.email, DEFAULT_SETTINGS.email),
 			remoteRoot: readString(value.remoteRoot, DEFAULT_REMOTE_ROOT),
 			deviceId: readString(value.deviceId, ""),
+			vaultId: readString(value.vaultId, ""),
 			vaultName: readString(value.vaultName, DEFAULT_SETTINGS.vaultName),
 			ignorePatterns:
 				"ignorePatterns" in value
 					? normalizeIgnorePatterns(readStringArray(value.ignorePatterns))
 					: [...DEFAULT_SETTINGS.ignorePatterns],
 			hasAuth: readBoolean(value.hasAuth, DEFAULT_SETTINGS.hasAuth),
+			rememberAuth: readBoolean(value.rememberAuth, DEFAULT_SETTINGS.rememberAuth),
 			syncOnSave: readBoolean(value.syncOnSave, DEFAULT_SETTINGS.syncOnSave),
 			syncOnSaveDelaySeconds: clampNumber(
 				readNumber(value.syncOnSaveDelaySeconds, DEFAULT_SETTINGS.syncOnSaveDelaySeconds),
@@ -169,13 +132,38 @@ export const FilenSyncSettings = {
 				DEFAULT_SETTINGS.syncStartupDelaySeconds,
 			),
 			syncPaused: readBoolean(value.syncPaused, DEFAULT_SETTINGS.syncPaused),
+			notifyOnBackgroundChange: readBoolean(
+				value.notifyOnBackgroundChange,
+				DEFAULT_SETTINGS.notifyOnBackgroundChange,
+			),
+			statusBarIndicatorStyle: value.statusBarIndicatorStyle === "full" ? "full" : "icon",
+			fastRemotePolling: readBoolean(
+				value.fastRemotePolling,
+				DEFAULT_SETTINGS.fastRemotePolling,
+			),
+			skipLargeFiles: readBoolean(value.skipLargeFiles, DEFAULT_SETTINGS.skipLargeFiles),
+			skipSizeLargerThanMB: clampNumber(
+				readNumber(value.skipSizeLargerThanMB, DEFAULT_SETTINGS.skipSizeLargerThanMB),
+				1,
+				1000,
+			),
 			activityLogs: readActivityLogs(value.activityLogs),
+			reconciliationNeeded: readBoolean(value.reconciliationNeeded, false),
 		};
 	},
 } as const;
 
 export const getVaultRemoteRoot = (remoteRoot: string, vaultName: string): string => {
-	const root = normalizeRemoteRoot(remoteRoot || DEFAULT_REMOTE_ROOT);
+	const rawRoot = remoteRoot.trim();
+	const rootInput =
+		rawRoot.length === 0 || rawRoot === "/"
+			? DEFAULT_REMOTE_ROOT
+			: rawRoot.startsWith("/")
+				? rawRoot
+				: `/${rawRoot}`;
+	const root = normalizeRemoteRoot(
+		validateRemoteRoot(rootInput.endsWith("/") ? rootInput.slice(0, -1) : rootInput),
+	);
 	const vaultSegment = normalizeRemoteSegment(vaultName || "default");
 	if (root.split("/").filter(Boolean).pop() === vaultSegment) {
 		return root;
@@ -214,19 +202,51 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const section = createSection(
 			containerEl,
 			"Account",
-			"Connect to Filen. Your password and two-factor code are kept only for this Obsidian session.",
+			"Connect to Filen. Your password and two-factor code are used for login only.",
 		);
 
+		new Setting(section)
+			.setName("Remember derived credentials")
+			.setDesc(
+				"Save Filen authentication credentials in Obsidian SecretStorage. They grant account access.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.rememberAuth).onChange(async (value) => {
+					try {
+						await this.plugin.setRememberAuth(value);
+						this.display();
+					} catch (error) {
+						new Notice(
+							error instanceof Error
+								? error.message
+								: "Could not update credential storage.",
+						);
+					}
+				}),
+			);
+
 		if (this.plugin.hasSavedAuth()) {
-			const card = section.createDiv({ cls: "filen-sync-settings-card is-connected" });
+			const isOffline = this.plugin.isOffline?.() ?? false;
+			const card = section.createDiv({
+				cls: `filen-sync-settings-card ${isOffline ? "is-offline" : "is-connected"}`,
+			});
 			const header = card.createDiv({ cls: "filen-sync-settings-card-header" });
-			header.createEl("div", { text: "Connected", cls: "filen-sync-settings-card-badge" });
 			header.createEl("div", {
-				text: `Connected as ${this.plugin.settings.email}`,
+				text: isOffline ? "Offline" : "Connected",
+				cls: `filen-sync-settings-card-badge ${isOffline ? "is-offline" : ""}`.trim(),
+			});
+			header.createEl("div", {
+				text: isOffline
+					? `Offline (${this.plugin.settings.email})`
+					: `Connected as ${this.plugin.settings.email}`,
 				cls: "filen-sync-settings-card-title",
 			});
 			card.createEl("p", {
-				text: "Session saved.",
+				text: isOffline
+					? "You're currently offline. Background sync is paused until network restores."
+					: this.plugin.settings.rememberAuth
+						? "Derived credentials saved in SecretStorage."
+						: "Credentials available for this session only.",
 				cls: "filen-sync-settings-card-copy",
 			});
 			const actions = card.createDiv({ cls: "filen-sync-settings-card-actions" });
@@ -261,6 +281,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.email = value.trim();
 						await this.plugin.saveSettings();
+						void this.plugin.refreshSyncTarget();
 					}),
 			);
 
@@ -269,13 +290,6 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setDesc("Not stored.")
 			.addText((text) => {
 				text.inputEl.type = "password";
-				if (!this.plugin.hasSessionPassword()) {
-					const stored = new PluginSecrets(this.plugin.app).getPassword();
-					if (stored.length > 0) {
-						text.setValue(stored);
-						this.plugin.setSessionPassword(stored);
-					}
-				}
 				text.setPlaceholder(
 					this.plugin.hasSessionPassword() ? "••••••••" : "Password",
 				).onChange((value) => {
@@ -329,7 +343,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.remoteRoot = value.trim() || DEFAULT_REMOTE_ROOT;
 						await this.plugin.saveSettings();
-						this.plugin.refreshSyncTarget();
+						void this.plugin.refreshSyncTarget();
 					}),
 			);
 
@@ -340,7 +354,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 				text.setValue(this.plugin.settings.vaultName).onChange(async (value) => {
 					this.plugin.settings.vaultName = value.trim() || "default";
 					await this.plugin.saveSettings();
-					this.plugin.refreshSyncTarget();
+					void this.plugin.refreshSyncTarget();
 				}),
 			);
 
@@ -379,7 +393,9 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const section = createSection(
 			containerEl,
 			"Auto-sync",
-			"Optional background sync triggers.",
+			this.plugin.settings.reconciliationNeeded
+				? "Automatic sync is paused until a successful full two-way sync reconciles an interrupted transfer."
+				: "Optional background sync triggers.",
 		);
 
 		new Setting(section)
@@ -391,6 +407,38 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 					this.plugin.refreshAutoSync();
 				}),
+			);
+
+		new Setting(section)
+			.setName("Status bar indicator style")
+			.setDesc(
+				"Choose whether to display a compact sync icon (like native Obsidian Sync) or include text.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("icon", "Compact icon (Obsidian Sync style)")
+					.addOption("full", "Icon and text")
+					.setValue(this.plugin.settings.statusBarIndicatorStyle)
+					.onChange(async (value) => {
+						this.plugin.settings.statusBarIndicatorStyle =
+							value === "full" ? "full" : "icon";
+						await this.plugin.saveSettings();
+						this.plugin.refreshStatusBar();
+					}),
+			);
+
+		new Setting(section)
+			.setName("Notify when a background sync changes files")
+			.setDesc(
+				"Show a notice when an automatic background sync updates, uploads, or deletes files.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.notifyOnBackgroundChange)
+					.onChange(async (value) => {
+						this.plugin.settings.notifyOnBackgroundChange = value;
+						await this.plugin.saveSettings();
+					}),
 			);
 
 		new Setting(section)
@@ -458,6 +506,43 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 						}
 					}),
 			);
+
+		new Setting(section)
+			.setName("Fast remote polling")
+			.setDesc(
+				"Probe Filen's events feed and skip the full remote scan when nothing changed in the cloud (auto-sync only; manual sync always scans in full).",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.fastRemotePolling).onChange(async (value) => {
+					this.plugin.settings.fastRemotePolling = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		let skipSizeText: TextComponent | null = null;
+		new Setting(section)
+			.setName("Skip large files")
+			.setDesc("Skip files larger than N megabytes (left untouched on both sides).")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.skipLargeFiles).onChange(async (value) => {
+					this.plugin.settings.skipLargeFiles = value;
+					await this.plugin.saveSettings();
+					skipSizeText?.setDisabled(!value);
+				}),
+			)
+			.addText((text) => {
+				skipSizeText = text;
+				text.setPlaceholder("50")
+					.setValue(String(this.plugin.settings.skipSizeLargerThanMB))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (Number.isFinite(parsed) && parsed >= 1) {
+							this.plugin.settings.skipSizeLargerThanMB = parsed;
+							await this.plugin.saveSettings();
+						}
+					});
+				text.setDisabled(!this.plugin.settings.skipLargeFiles);
+			});
 	}
 
 	private renderActionsSection(containerEl: HTMLElement): void {

@@ -9,15 +9,17 @@ Obsidian Filen Sync mirrors vault files between Obsidian and a folder in your Fi
 ## Highlights
 
 - Direct Filen folder mirror for your vault files
-- Manual **Sync now**, **Push local**, and **Pull remote** commands
+- Manual **Sync now** command
 - Optional auto-sync on save, after startup, and on an interval
-- Status bar indicator with sync details and quick actions
+- Native Obsidian-style status bar indicator (animated spinning sync icon during sync, idle state with relative sync time, offline/pause warning states, and 1-click action menu)
 - Activity view showing scan, upload, download, delete, and conflict rows
 - Conflict copies when the same file changed locally and remotely
 - Filen file version list, restore, preview, and delete actions
 - Local sync baseline in IndexedDB for change detection
 - SHA-256 fallback to handle timestamp drift
 - Vault-relative ignore rules with safe Obsidian defaults
+- Parallel chunk transfers (1 MiB chunks via a pool of 3 workers) with configurable size limits
+- Fast remote polling via Filen events feed with fallback safety rails
 - Desktop and mobile support
 
 ## How it works
@@ -32,27 +34,45 @@ Changed files are uploaded, downloaded, or deleted to make both sides match. If 
 
 ## Requirements
 
-- Obsidian `0.15.0` or newer
+- Obsidian `1.11.4` or newer (for SecretStorage)
 - A Filen account
-- Node.js 18+ and npm for development from source
+- Node.js 20+ and npm for development from source
 
-## Install from source
+## Installation
+
+### Beta testing via BRAT (Recommended)
+
+You can install beta releases and receive automatic updates using the [BRAT](https://github.com/TfTHacker/obsidian42-brat) plugin:
+
+1. Install the **BRAT** plugin from Obsidian's Community Plugins directory (**Settings → Community plugins → Browse → Obsidian42 - BRAT**).
+2. Open the Obsidian Command Palette (`Ctrl/Cmd + P`) and run:
+   **BRAT: Add a beta plugin for testing**
+3. Paste this repository path:
+    ```text
+    ilhamagustiawan/obsidian-filen-sync
+    ```
+4. Select **Add plugin**. BRAT will download the release assets (`manifest.json`, `main.js`, `styles.css`) and keep the plugin updated automatically.
+
+### Manual install
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ilhamagustiawan/obsidian-filen-sync/releases).
+2. In your vault, navigate to `.obsidian/plugins/` and create a folder named `obsidian-filen-sync`:
+    ```text
+    <vault>/.obsidian/plugins/obsidian-filen-sync/
+      main.js
+      manifest.json
+      styles.css
+    ```
+3. In Obsidian, open **Settings → Community plugins**, select **Reload plugins**, and enable **Obsidian Filen Sync**.
+
+### Install from source
 
 ```bash
 npm install
 npm run build
 ```
 
-Copy the release files into your vault plugin folder:
-
-```text
-<vault>/.obsidian/plugins/obsidian-filen-sync/
-  main.js
-  manifest.json
-  styles.css
-```
-
-Then enable **Obsidian Filen Sync** in **Settings → Community plugins**.
+Copy the built files (`main.js`, `manifest.json`, `styles.css`) into `<vault>/.obsidian/plugins/obsidian-filen-sync/` and enable the plugin in Obsidian.
 
 ## Setup
 
@@ -64,18 +84,19 @@ Then enable **Obsidian Filen Sync** in **Settings → Community plugins**.
 6. Select **Login** or **Test connection**.
 7. Run **Sync now**.
 
-Your password and two-factor code are kept in memory only for the current Obsidian session. Saved Filen authentication data is stored in Obsidian plugin data. Use **Disconnect** to remove saved auth and switch accounts.
+Your password and two-factor code are used for login and stay in memory only. When **Remember derived credentials** is enabled, derived Filen session tokens/keys are stored in Obsidian SecretStorage; they grant account access and are not protected from malicious plugins or a compromised device. Turn off **Remember derived credentials** to keep credentials for this session only; you will need to log in again after restarting Obsidian. Use **Disconnect** to remove saved credentials and switch accounts. Valid legacy credentials are migrated only after SecretStorage readback verification. Invalid credentials or failed sanitization require reconnection; plugin data is never re-saved with the legacy auth payload.
+
+Sync history is bound to a persistent local vault ID, authenticated Filen user ID, and the resolved UUID of the effective remote folder. If any part changes, history is not reused. Unverified legacy history is left untouched and inactive, so the first sync uses a conservative baseline and may create conflict copies instead of importing old deletion history. A timed-out or aborted transfer can have an uncertain remote result. The plugin saves a non-secret reconciliation-needed marker, pauses automatic sync, and blocks force-upload until outstanding requests settle and a full manual sync succeeds. Client-side checks reduce races but cannot provide server-side compare-and-swap guarantees.
 
 ## Commands
 
-| Command                                            | What it does                                                                               |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **Obsidian Filen Sync: Sync now**                  | Compare local and remote changes, update both sides, and keep conflict copies when needed. |
-| **Obsidian Filen Sync: Push changed local files**  | Upload local changes to Filen without pulling remote changes.                              |
-| **Obsidian Filen Sync: Pull changed remote files** | Download remote changes without pushing local changes.                                     |
-| **Obsidian Filen Sync: Test Filen connection**     | Check login and remote write/delete access.                                                |
-| **Obsidian Filen Sync: Open sync activity**        | Open the sync activity view for the current or last run.                                   |
-| **Obsidian Filen Sync: Toggle sync on save**       | Enable or disable save-triggered background sync.                                          |
+| Command                                          | What it does                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| **Obsidian Filen Sync: Sync now**                | Compare local and remote changes, update both sides, and keep conflict copies when needed. |
+| **Obsidian Filen Sync: Force sync current file** | Upload active editor file immediately to Filen, with overwrite confirmation if changed.    |
+| **Obsidian Filen Sync: Test Filen connection**   | Check login and remote write/delete access.                                                |
+| **Obsidian Filen Sync: Open sync activity**      | Open the sync activity view for the current or last run.                                   |
+| **Obsidian Filen Sync: Toggle sync on save**     | Enable or disable save-triggered background sync.                                          |
 
 ## Remote layout
 
@@ -118,7 +139,7 @@ Add more vault-relative rules in plugin settings if needed.
 
 This plugin connects only to Filen. It does not include telemetry or analytics.
 
-Vault file contents and paths are sent to Filen as required for sync, push, pull, file version, and connection-test actions. Password and two-factor code are not persisted by this plugin.
+Vault file contents and paths are sent to Filen as required for sync, file version, and connection-test actions. Password and two-factor code are not persisted by this plugin. Activity logs may contain filenames and other sensitive path details; they remain in plugin data and are not transmitted as telemetry.
 
 ## Development
 
