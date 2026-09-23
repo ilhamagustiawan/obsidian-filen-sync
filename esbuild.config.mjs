@@ -11,6 +11,7 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === "production";
 const fsExtraShimPath = path.resolve("src/shims/fs-extra.ts");
+const keyUtilsStubPath = path.resolve("stubs/js-crypto-key-utils/index.js");
 
 const context = await esbuild.context({
 	banner: {
@@ -38,6 +39,14 @@ const context = await esbuild.context({
 			name: "alias-fs-extra-browser-shim",
 			setup(build) {
 				build.onResolve({ filter: /^fs-extra$/ }, () => ({ path: fsExtraShimPath }));
+			},
+		},
+		{
+			name: "alias-js-crypto-key-utils",
+			setup(build) {
+				build.onResolve({ filter: /^js-crypto-key-utils$/ }, () => ({
+					path: keyUtilsStubPath,
+				}));
 			},
 		},
 		polyfillNode({
