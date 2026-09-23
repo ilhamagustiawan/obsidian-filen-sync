@@ -188,12 +188,14 @@ export class SyncNoticeController {
 			this.badgeEl.setText(`${pct}%`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
-			this.countEl.setText(`${current} of ${total} files`);
+			this.countEl.setText(
+				`${current} of ${total} changes${state.progress?.totalBytes === undefined ? "" : ` · ${((state.progress.completedBytes ?? 0) / 1048576).toFixed(1)}/${(state.progress.totalBytes / 1048576).toFixed(1)} MB`}`,
+			);
 		} else {
 			this.badgeEl.setText("Syncing");
 			this.barFill.addClass("is-indeterminate");
 			this.barFill.style.width = "40%";
-			this.countEl.setText("Scanning changes…");
+			this.countEl.setText(state.text);
 		}
 
 		if (path) {

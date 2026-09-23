@@ -749,7 +749,8 @@ test("fast remote polling obeys safety rails and reuses cached tree only when sa
 			mkdir: async () => {},
 			walk: async () => {
 				walkCount += 1;
-				return [{ path: "note.md", mtime: 1000, size: 50, isDir: false }];
+				// Reuse applies to a pass without any mutation.
+				return [];
 			},
 			checkEvents: async (watermark) => {
 				probeCount += 1;
@@ -1896,6 +1897,25 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			updatedAt: Date.now(),
 		});
 		assert.equal(pill.hasClass("is-success"), true);
+
+		indicator.onStatusChange({
+			kind: "pending",
+			text: "2 changes pending",
+			detail: "Local changes waiting to sync.",
+			updatedAt: Date.now(),
+		});
+		assert.equal(pill.hasClass("is-pending"), true);
+		assert.equal(pill.hasClass("is-hidden"), false);
+		assert.equal(indicator.hideTimer, null, "Pending state stays visible");
+
+		indicator.onStatusChange({
+			kind: "warning",
+			text: "Confirmation needed",
+			detail: "Review local deletions.",
+			updatedAt: Date.now(),
+		});
+		assert.equal(pill.hasClass("is-warning"), true);
+		assert.equal(indicator.hideTimer, null, "Actionable warning stays visible");
 
 		// Cleanup
 		indicator.destroy();

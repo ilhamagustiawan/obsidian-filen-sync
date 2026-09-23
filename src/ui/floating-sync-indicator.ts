@@ -93,6 +93,13 @@ export class FloatingSyncIndicator {
 			return;
 		}
 
+		if (state.kind === "pending") {
+			this.clearHideTimer();
+			this.renderPending(state);
+			this.show();
+			return;
+		}
+
 		if (this.isVisible) {
 			if (state.kind === "success") {
 				this.renderSuccess(state);
@@ -173,7 +180,7 @@ export class FloatingSyncIndicator {
 			return;
 		}
 
-		this.pillEl.removeClass("is-success", "is-error", "is-warning");
+		this.pillEl.removeClass("is-success", "is-error", "is-warning", "is-pending");
 		this.pillEl.addClass("is-syncing");
 
 		setIcon(this.iconSpan, "refresh-cw");
@@ -188,13 +195,15 @@ export class FloatingSyncIndicator {
 			this.pctEl.setText(`${pct}%`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
-			this.countEl.setText(`${current} of ${total} files`);
+			this.countEl.setText(
+				`${current} of ${total} changes${state.progress?.totalBytes === undefined ? "" : ` · ${((state.progress.completedBytes ?? 0) / 1048576).toFixed(1)}/${(state.progress.totalBytes / 1048576).toFixed(1)} MB`}`,
+			);
 		} else {
 			this.titleEl.setText("Filen Sync");
 			this.pctEl.setText("");
 			this.barFill.addClass("is-indeterminate");
 			this.barFill.style.width = "40%";
-			this.countEl.setText("Scanning changes…");
+			this.countEl.setText(state.text);
 		}
 
 		if (path) {
@@ -219,7 +228,7 @@ export class FloatingSyncIndicator {
 			return;
 		}
 
-		this.pillEl.removeClass("is-syncing", "is-error", "is-warning");
+		this.pillEl.removeClass("is-syncing", "is-error", "is-warning", "is-pending");
 		this.pillEl.addClass("is-success");
 
 		setIcon(this.iconSpan, "check");
@@ -250,7 +259,7 @@ export class FloatingSyncIndicator {
 			return;
 		}
 
-		this.pillEl.removeClass("is-syncing", "is-success", "is-warning");
+		this.pillEl.removeClass("is-syncing", "is-success", "is-warning", "is-pending");
 		this.pillEl.addClass("is-error");
 
 		setIcon(this.iconSpan, "alert-circle");
@@ -263,7 +272,7 @@ export class FloatingSyncIndicator {
 		this.countEl.setText(state.detail || "An error occurred");
 		this.fileEl.setText("Click for sync options");
 
-		this.scheduleHide(5000);
+		this.clearHideTimer();
 	}
 
 	private renderWarning(state: StatusBarState): void {
@@ -279,7 +288,7 @@ export class FloatingSyncIndicator {
 			return;
 		}
 
-		this.pillEl.removeClass("is-syncing", "is-success", "is-error");
+		this.pillEl.removeClass("is-syncing", "is-success", "is-error", "is-pending");
 		this.pillEl.addClass("is-warning");
 
 		setIcon(this.iconSpan, "pause");
@@ -292,6 +301,28 @@ export class FloatingSyncIndicator {
 		this.countEl.setText(state.detail || state.text);
 		this.fileEl.setText("");
 
-		this.scheduleHide(3000);
+		this.clearHideTimer();
+	}
+
+	private renderPending(state: StatusBarState): void {
+		if (
+			!this.pillEl ||
+			!this.iconSpan ||
+			!this.titleEl ||
+			!this.pctEl ||
+			!this.barFill ||
+			!this.countEl ||
+			!this.fileEl
+		)
+			return;
+		this.pillEl.removeClass("is-syncing", "is-success", "is-error", "is-warning");
+		this.pillEl.addClass("is-pending");
+		setIcon(this.iconSpan, "cloud-upload");
+		this.titleEl.setText("Filen Sync");
+		this.pctEl.setText("Pending");
+		this.barFill.removeClass("is-indeterminate");
+		this.barFill.style.width = "0%";
+		this.countEl.setText(state.text);
+		this.fileEl.setText(state.detail);
 	}
 }

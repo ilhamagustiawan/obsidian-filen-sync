@@ -350,6 +350,7 @@ function planPath(
 
 function isLocalChanged(local: LocalFileInfo, prev: SyncedFileRecord): boolean {
 	if (local.size !== prev.size) return true;
+	if (local.hash !== undefined && prev.hash !== undefined) return local.hash !== prev.hash;
 	if (local.mtime !== prev.mtime) {
 		// If mtime drifted but hash is provided and identical to baseline, not changed
 		if (local.hash !== undefined && prev.hash !== undefined && local.hash === prev.hash) {

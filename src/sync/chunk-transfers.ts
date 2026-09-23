@@ -5,7 +5,12 @@ import { mapPool } from "./pool";
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 export const CHUNK_CONCURRENCY = 3; // Fixed pool of 3 workers
 
-export type ChunkTransferProgressCallback = (doneChunks: number, totalChunks: number) => void;
+export type ChunkTransferProgressCallback = (
+	doneChunks: number,
+	totalChunks: number,
+	completedBytes: number,
+	totalBytes: number,
+) => void;
 
 type UploadDoneParams = {
 	uuid: string;
@@ -167,7 +172,7 @@ export async function uploadFileChunks(
 			version: 2,
 		});
 
-		onProgress?.(0, 0);
+		onProgress?.(0, 0, 0, 0);
 		return { uuid: fileUUID, size: 0, chunks: 0, hash: "" };
 	}
 
@@ -178,6 +183,7 @@ export async function uploadFileChunks(
 	const hashHex = await computeSha512Hex(bytes);
 
 	let completedChunks = 0;
+	let completedBytes = 0;
 	const chunkIndices = Array.from({ length: chunkCount }, (_, i) => i);
 	await mapPool(chunkIndices, CHUNK_CONCURRENCY, async (index) => {
 		const start = index * CHUNK_SIZE;
@@ -202,7 +208,8 @@ export async function uploadFileChunks(
 		});
 
 		completedChunks += 1;
-		onProgress?.(completedChunks, chunkCount);
+		completedBytes += end - start;
+		onProgress?.(completedChunks, chunkCount, completedBytes, fileSize);
 		return response;
 	});
 
@@ -270,11 +277,12 @@ export async function downloadFileChunks(
 ): Promise<Uint8Array> {
 	const client = sdk as unknown as SdkWithInternals;
 	if (target.size === 0 || target.chunks === 0) {
-		onProgress?.(0, 0);
+		onProgress?.(0, 0, 0, 0);
 		return new Uint8Array(0);
 	}
 
 	let completedChunks = 0;
+	let completedBytes = 0;
 	const chunkIndices = Array.from({ length: target.chunks }, (_, i) => i);
 	const chunkBuffers = await mapPool(chunkIndices, CHUNK_CONCURRENCY, async (index) => {
 		const encryptedBuffer = await client.getWorker().api.v3.file.download.chunk.buffer.fetch({
@@ -292,7 +300,8 @@ export async function downloadFileChunks(
 		});
 
 		completedChunks += 1;
-		onProgress?.(completedChunks, target.chunks);
+		completedBytes += decryptedBuffer.byteLength;
+		onProgress?.(completedChunks, target.chunks, completedBytes, target.size);
 		return new Uint8Array(decryptedBuffer);
 	});
 

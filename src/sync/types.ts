@@ -58,6 +58,16 @@ export type SyncProgress = {
 	current: number;
 	total: number;
 	path: string;
+	phase?:
+		| "scanning-local"
+		| "scanning-remote"
+		| "planning"
+		| "directories"
+		| "confirming"
+		| "transferring";
+	operation?: Exclude<SyncOperation, "noop">;
+	completedBytes?: number;
+	totalBytes?: number;
 };
 
 export type SyncActivityEvent =
