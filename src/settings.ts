@@ -199,14 +199,6 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.addClass("filen-sync-settings");
-
-		const intro = containerEl.createDiv({ cls: "filen-sync-settings-hero" });
-		intro.createDiv({ text: "Obsidian Filen Sync", cls: "filen-sync-settings-hero-title" });
-		intro.createEl("p", {
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			text: "Mirror this vault to a Filen folder with manual sync, optional auto-sync, and conflict copies.",
-		});
 
 		this.renderAccountSection(containerEl);
 		this.renderSyncSection(containerEl);
@@ -243,41 +235,25 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		if (this.plugin.hasSavedAuth()) {
 			const isOffline = this.plugin.isOffline?.() ?? false;
-			const card = section.createDiv({
-				cls: `filen-sync-settings-card ${isOffline ? "is-offline" : "is-connected"}`,
-			});
-			const header = card.createDiv({ cls: "filen-sync-settings-card-header" });
-			header.createEl("div", {
-				text: isOffline ? "Offline" : "Connected",
-				cls: `filen-sync-settings-card-badge ${isOffline ? "is-offline" : ""}`.trim(),
-			});
-			header.createEl("div", {
-				text: isOffline
-					? `Offline (${this.plugin.settings.email})`
-					: `Connected as ${this.plugin.settings.email}`,
-				cls: "filen-sync-settings-card-title",
-			});
-			card.createEl("p", {
-				text: isOffline
-					? "You're currently offline. Background sync is paused until network restores."
-					: this.plugin.settings.rememberAuth
-						? "Derived credentials saved in SecretStorage."
-						: "Credentials available for this session only.",
-				cls: "filen-sync-settings-card-copy",
-			});
-			const actions = card.createDiv({ cls: "filen-sync-settings-card-actions" });
-			const disconnect = actions.createEl("button", { text: "Disconnect" });
-			disconnect.addClass("mod-warning");
-			disconnect.addEventListener("click", () => {
-				void (async () => {
-					await this.plugin.clearSavedAuth();
-					this.display();
-				})();
-			});
-			card.createEl("p", {
-				text: "Disconnect to switch accounts.",
-				cls: "filen-sync-settings-card-note",
-			});
+			new Setting(section)
+				.setName(isOffline ? "Offline" : "Connected")
+				.setDesc(
+					(isOffline
+						? "You're currently offline. Background sync is paused until network restores."
+						: this.plugin.settings.rememberAuth
+							? "Derived credentials saved in SecretStorage."
+							: "Credentials available for this session only.") +
+						" Disconnect to switch accounts.",
+				)
+				.addButton((button) =>
+					button
+						.setButtonText("Disconnect")
+						.setWarning()
+						.onClick(async () => {
+							await this.plugin.clearSavedAuth();
+							this.display();
+						}),
+				);
 
 			new Setting(section)
 				.setName("Account email")
@@ -390,19 +366,15 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 				text.inputEl.cols = 40;
 			});
 
-		const note = section.createDiv({ cls: "filen-sync-settings-note" });
-		note.createEl("strong", { text: "Effective remote folder" });
-		note.createSpan({
-			text: ` ${getVaultRemoteRoot(this.plugin.settings.remoteRoot, this.plugin.settings.vaultName)}`,
-		});
+		new Setting(section)
+			.setName("Effective remote folder")
+			.setDesc(
+				getVaultRemoteRoot(this.plugin.settings.remoteRoot, this.plugin.settings.vaultName),
+			);
 
-		const conflictNote = section.createDiv({ cls: "filen-sync-settings-note" });
-		conflictNote.createEl("strong", { text: "Conflict handling" });
-		conflictNote.createSpan({ text: " Local conflict copies are kept." });
-		section.createEl("p", {
-			text: "Plugin data is ignored automatically.",
-			cls: "filen-sync-settings-note",
-		});
+		new Setting(section)
+			.setName("Conflict handling")
+			.setDesc("Local conflict copies are kept. Plugin data is ignored automatically.");
 	}
 
 	private renderAutoSyncSection(containerEl: HTMLElement): void {
@@ -626,10 +598,8 @@ const createSection = (
 	title: string,
 	description: string,
 ): HTMLElement => {
-	const section = containerEl.createDiv({ cls: "filen-sync-settings-section" });
-	section.createDiv({ text: title, cls: "filen-sync-settings-section-title" });
-	section.createEl("p", { text: description, cls: "filen-sync-settings-section-description" });
-	return section;
+	new Setting(containerEl).setName(title).setDesc(description).setHeading();
+	return containerEl;
 };
 
 const normalizeRemoteRoot = (path: string): string => {
