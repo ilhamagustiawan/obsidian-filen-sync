@@ -145,14 +145,10 @@ export default class FilenSyncPlugin extends Plugin {
 		if (!Platform.isMobile) {
 			this.registerInterval(
 				window.setInterval(() => {
-					if (
-						!this.coordinator.active &&
-						(this.statusBarState.kind === "idle" ||
-							this.statusBarState.kind === "success")
-					) {
+					if (!this.coordinator.active) {
 						this.updateStatusDisplays();
 					}
-				}, 60_000),
+				}, 1000),
 			);
 		}
 
@@ -179,6 +175,14 @@ export default class FilenSyncPlugin extends Plugin {
 			name: "Sync now",
 			callback: () => {
 				void this.syncNow();
+			},
+		});
+
+		this.addCommand({
+			id: "initial-sync",
+			name: "Initial sync",
+			callback: () => {
+				void this.initialSync();
 			},
 		});
 
@@ -535,12 +539,20 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 	}
 
+	async initialSync(): Promise<SyncRunResult> {
+		const result = await this.coordinator.runSync("Initial sync", "both", {
+			isManual: true,
+			initialSync: true,
+		});
+		if (result.kind === "applied" || result.kind === "up-to-date")
+			await this.clearReconciliationNeeded();
+		return result;
+	}
+
 	async syncNow(): Promise<SyncRunResult> {
 		const result = await this.coordinator.runSync("Sync", "both", { isManual: true });
 		if (result.kind === "applied" || result.kind === "up-to-date") {
-			this.lastSyncTimestamp = Date.now();
 			await this.clearReconciliationNeeded();
-			this.setDefaultStatus();
 		}
 		return result;
 	}
@@ -553,9 +565,7 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 		const result = await this.coordinator.runSync("Push local", "push", { isManual: true });
 		if (result.kind === "applied" || result.kind === "up-to-date") {
-			this.lastSyncTimestamp = Date.now();
 			await this.clearReconciliationNeeded();
-			this.setDefaultStatus();
 		}
 		return result;
 	}
@@ -568,9 +578,7 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 		const result = await this.coordinator.runSync("Pull remote", "pull", { isManual: true });
 		if (result.kind === "applied" || result.kind === "up-to-date") {
-			this.lastSyncTimestamp = Date.now();
 			await this.clearReconciliationNeeded();
-			this.setDefaultStatus();
 		}
 		return result;
 	}
@@ -853,6 +861,14 @@ export default class FilenSyncPlugin extends Plugin {
 		if (this.statusBarItemEl === null) return;
 		this.statusBarItemEl.empty();
 		this.statusBarItemEl.addClass("filen-sync-status-item");
+		this.statusBarItemEl.setAttr("role", "button");
+		this.statusBarItemEl.setAttr("tabindex", "0");
+		this.registerDomEvent(this.statusBarItemEl, "keydown", (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			event.preventDefault();
+			const bounds = this.statusBarItemEl?.getBoundingClientRect();
+			this.openStatusBarMenuAt(bounds?.left ?? 0, bounds?.top ?? 0);
+		});
 		this.statusBarIconEl = this.statusBarItemEl.createSpan({ cls: "filen-sync-status-icon" });
 		this.statusBarTextEl = this.statusBarItemEl.createSpan({ cls: "filen-sync-status-text" });
 		this.registerDomEvent(this.statusBarItemEl, "click", (event) => {
@@ -868,7 +884,30 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private openStatusBarMenu(event: MouseEvent): void {
+		this.buildStatusBarMenu().showAtMouseEvent(event);
+	}
+
+	private openStatusBarMenuAt(x: number, y: number): void {
+		this.buildStatusBarMenu().showAtPosition({ x, y });
+	}
+
+	private buildStatusBarMenu(): Menu {
 		const menu = new Menu();
+		menu.addItem((item) => item.setTitle(this.statusBarState.text).setDisabled(true));
+		menu.addItem((item) =>
+			item
+				.setTitle(`${this.coordinator.pendingCount} local changes pending`)
+				.setDisabled(true),
+		);
+		if (this.lastSyncTimestamp !== null)
+			menu.addItem((item) =>
+				item
+					.setTitle(
+						`Last successful sync: ${formatRelativeTime(this.lastSyncTimestamp ?? 0)}`,
+					)
+					.setDisabled(true),
+			);
+		menu.addSeparator();
 
 		if (this.statusBarState.kind === "syncing") {
 			menu.addItem((item) => {
@@ -880,7 +919,13 @@ export default class FilenSyncPlugin extends Plugin {
 			});
 		} else {
 			menu.addItem((item) => {
-				item.setTitle("Sync now");
+				item.setTitle(
+					this.statusBarState.kind === "error"
+						? "Retry now"
+						: this.statusBarState.kind === "warning"
+							? "Review and sync"
+							: "Sync now",
+				);
 				item.setIcon("refresh-cw");
 				item.onClick(() => {
 					void this.syncNow();
@@ -941,7 +986,7 @@ export default class FilenSyncPlugin extends Plugin {
 				this.openSettingsTab();
 			});
 		});
-		menu.showAtMouseEvent(event);
+		return menu;
 	}
 
 	private maybePromptForSetup(): void {
@@ -978,6 +1023,15 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private setDefaultStatus(): void {
+		if (
+			this.coordinator?.active ||
+			this.coordinator?.pendingCount > 0 ||
+			this.statusBarState.kind === "error" ||
+			this.statusBarState.kind === "warning"
+		) {
+			this.updateStatusDisplays();
+			return;
+		}
 		if (this.hasSavedAuth()) {
 			if (this.settings.syncPaused) {
 				this.setStatus(
@@ -1063,6 +1117,12 @@ export default class FilenSyncPlugin extends Plugin {
 			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			return;
 		}
+		if (this.statusBarState.kind === "pending") {
+			const tooltip = `Filen: ${this.statusBarState.text}\nClick to sync now`;
+			setTooltip(this.syncRibbonIconEl, tooltip);
+			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			return;
+		}
 
 		const tooltip =
 			this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0
@@ -1082,6 +1142,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.statusBarItemEl.removeClass(
 			"is-idle",
+			"is-pending",
 			"is-syncing",
 			"is-success",
 			"is-warning",
@@ -1105,7 +1166,7 @@ export default class FilenSyncPlugin extends Plugin {
 			return;
 		}
 
-		if (this.settings.syncPaused) {
+		if (this.settings.syncPaused && this.statusBarState.kind !== "syncing") {
 			setIcon(this.statusBarIconEl, "pause");
 			this.statusBarTextEl.setText("Filen: paused");
 			this.statusBarItemEl.addClass("is-warning");
@@ -1116,7 +1177,7 @@ export default class FilenSyncPlugin extends Plugin {
 			return;
 		}
 
-		if (this.isOffline()) {
+		if (this.isOffline() && this.statusBarState.kind !== "syncing") {
 			setIcon(this.statusBarIconEl, "cloud-off");
 			this.statusBarTextEl.setText("Filen: offline");
 			this.statusBarItemEl.addClass("is-warning");
@@ -1149,9 +1210,39 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 
 		if (this.statusBarState.kind === "error") {
-			setIcon(this.statusBarIconEl, "alert-circle");
-			this.statusBarTextEl.setText(`Filen: error`);
+			const retryAt = this.coordinator.retryAt;
+			setIcon(this.statusBarIconEl, retryAt === null ? "alert-circle" : "clock");
+			this.statusBarTextEl.setText(
+				retryAt === null
+					? "Filen: error"
+					: `Filen: Retry in ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))}s`,
+			);
 			this.statusBarItemEl.addClass("is-error");
+			const tooltip = this.buildStatusTooltip();
+			setTooltip(this.statusBarItemEl, tooltip);
+			this.statusBarItemEl.setAttr("aria-label", tooltip);
+			this.statusBarItemEl.setAttr("title", tooltip);
+			return;
+		}
+
+		if (this.statusBarState.kind === "warning" || this.statusBarState.kind === "pending") {
+			const retryAt = this.coordinator.retryAt;
+			const retry =
+				retryAt !== null
+					? `Retry in ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))}s`
+					: null;
+			setIcon(
+				this.statusBarIconEl,
+				this.statusBarState.kind === "pending"
+					? "cloud-upload"
+					: retry
+						? "clock"
+						: "alert-circle",
+			);
+			this.statusBarTextEl.setText(`Filen: ${retry ?? this.statusBarState.text}`);
+			this.statusBarItemEl.addClass(
+				this.statusBarState.kind === "pending" ? "is-pending" : "is-warning",
+			);
 			const tooltip = this.buildStatusTooltip();
 			setTooltip(this.statusBarItemEl, tooltip);
 			this.statusBarItemEl.setAttr("aria-label", tooltip);
@@ -1184,11 +1275,15 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.settings.syncPaused) {
 			lines.push("Sync paused", "Click to resume or view actions.");
+			if (this.coordinator.pendingCount > 0)
+				lines.push(`${this.coordinator.pendingCount} local changes pending.`);
 			return lines.join("\n");
 		}
 
 		if (this.isOffline()) {
 			lines.push("Offline", "Sync will resume automatically when reconnected.");
+			if (this.coordinator.pendingCount > 0)
+				lines.push(`${this.coordinator.pendingCount} local changes pending.`);
 			return lines.join("\n");
 		}
 
@@ -1217,10 +1312,22 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.statusBarState.kind === "error") {
 			lines.push("Sync error");
+			if (this.coordinator.retryAt !== null)
+				lines.push(
+					`Retry in ${Math.max(0, Math.ceil((this.coordinator.retryAt - Date.now()) / 1000))}s.`,
+				);
 			if (this.statusBarState.detail) {
 				lines.push(this.statusBarState.detail);
 			}
+			if (this.coordinator.pendingCount > 0)
+				lines.push(`${this.coordinator.pendingCount} local changes pending.`);
 			lines.push("Click to view activity log.");
+			return lines.join("\n");
+		}
+
+		if (this.statusBarState.kind === "warning" || this.statusBarState.kind === "pending") {
+			lines.push(this.statusBarState.text, this.statusBarState.detail);
+			lines.push(`Pending local changes: ${this.coordinator.pendingCount}`);
 			return lines.join("\n");
 		}
 

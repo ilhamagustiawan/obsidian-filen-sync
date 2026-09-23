@@ -51,6 +51,7 @@ export class SyncExecutor {
 		local?: LocalEntry,
 		remote?: RemoteEntry,
 		prev?: SyncedFileRecord,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<{ applied: number; conflicts: number; conflictCopy?: ConflictCopy }> {
 		switch (action.operation) {
 			case "delete-local": {
@@ -82,13 +83,13 @@ export class SyncExecutor {
 
 			case "upload": {
 				if (local === undefined) return { applied: 0, conflicts: 0 };
-				await this.pushLocal(action.path, local, remote);
+				await this.pushLocal(action.path, local, remote, onProgress);
 				return { applied: 1, conflicts: 0 };
 			}
 
 			case "download": {
 				if (remote === undefined) return { applied: 0, conflicts: 0 };
-				await this.pullRemote(action.path, remote, local);
+				await this.pullRemote(action.path, remote, local, onProgress);
 				return { applied: 1, conflicts: 0 };
 			}
 
@@ -99,7 +100,12 @@ export class SyncExecutor {
 
 			case "noop": {
 				// A freshly verified equal-content first sync establishes a trusted baseline.
-				if (local !== undefined && remote !== undefined && action.hash !== undefined) {
+				if (
+					prev === undefined &&
+					local !== undefined &&
+					remote !== undefined &&
+					action.hash !== undefined
+				) {
 					await this.config.db.setFile(action.path, {
 						path: action.path,
 						mtime: local.mtime,
@@ -125,6 +131,7 @@ export class SyncExecutor {
 		path: string,
 		local: LocalEntry,
 		remote?: RemoteEntry,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<string> {
 		const file = this.asFile(local.file);
 		assertLocalUnchanged(this.config.app, path, local);
@@ -140,6 +147,7 @@ export class SyncExecutor {
 			file.stat.mtime,
 			file.stat.ctime,
 			remote?.uuid,
+			onProgress,
 		);
 		assertLocalUnchanged(this.config.app, path, local);
 		await assertLocalBytesUnchanged(this.config.app, path, local, hash);
@@ -163,8 +171,9 @@ export class SyncExecutor {
 		path: string,
 		remote: RemoteEntry,
 		expectedLocal?: LocalEntry,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<void> {
-		const content = await this.config.remote.readFile(path, remote.uuid);
+		const content = await this.config.remote.readFile(path, remote.uuid, onProgress);
 		const hash = await sha256Hex(content);
 		const verifiedRemote = await this.config.remote.stat?.(path);
 		if (
@@ -186,7 +195,11 @@ export class SyncExecutor {
 			if (
 				expectedLocal === undefined ||
 				currentFile.stat.mtime !== expectedLocal.mtime ||
-				currentFile.stat.size !== expectedLocal.size
+				currentFile.stat.size !== expectedLocal.size ||
+				(expectedLocal.hash !== undefined &&
+					(await sha256Hex(
+						new Uint8Array(await this.config.app.vault.readBinary(currentFile)),
+					)) !== expectedLocal.hash)
 			) {
 				await this.writeLocalConflictCopy(currentFile.path);
 			}
@@ -262,6 +275,8 @@ export class SyncExecutor {
 			return false;
 		}
 
+		if (expected?.hash !== undefined)
+			await assertLocalBytesUnchanged(this.config.app, path, expected, expected.hash);
 		await this.config.app.fileManager.trashFile(file);
 		return true;
 	}

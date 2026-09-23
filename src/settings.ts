@@ -68,7 +68,7 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	hasAuth: false,
 	rememberAuth: true,
 	syncOnSave: true,
-	syncOnSaveDelaySeconds: 5,
+	syncOnSaveDelaySeconds: 2,
 	syncIntervalMinutes: 3,
 	syncStartupDelaySeconds: 0,
 	syncPaused: false,
@@ -131,7 +131,7 @@ export const FilenSyncSettings = {
 			syncOnSave: readBoolean(value.syncOnSave, DEFAULT_SETTINGS.syncOnSave),
 			syncOnSaveDelaySeconds: clampNumber(
 				readNumber(value.syncOnSaveDelaySeconds, DEFAULT_SETTINGS.syncOnSaveDelaySeconds),
-				5,
+				1,
 				30,
 			),
 			syncIntervalMinutes: readNumber(
@@ -508,7 +508,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setDesc("Delay before syncing.")
 			.addSlider((slider) =>
 				slider
-					.setLimits(5, 30, 1)
+					.setLimits(1, 30, 1)
 					.setValue(this.plugin.settings.syncOnSaveDelaySeconds)
 					.setDynamicTooltip()
 					.onChange(async (value) => {

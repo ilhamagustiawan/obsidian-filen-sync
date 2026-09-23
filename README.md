@@ -97,7 +97,7 @@ Copy the built files (`main.js`, `manifest.json`, `styles.css`) into `<vault>/.o
 4. Check the **Remote folder** (default: `/Obsidian`) and **Vault name** (default: your vault's folder name).
 5. Review **Ignore paths** for any custom vault-relative patterns.
 6. Select **Login** or **Test connection**.
-7. Run **Sync now**.
+7. Run **Initial sync** from the command palette. It checks local and remote files in full, preserves sync history, and keeps conflict and deletion safeguards. Safe to retry after a partial failure.
 
 ### Credential security
 
@@ -112,6 +112,7 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 
 | Command                                            | What it does                                                                                               |
 | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Obsidian Filen Sync: Initial sync**              | Fully verify both sides during setup or recovery; preserve existing sync history.                          |
 | **Obsidian Filen Sync: Sync now**                  | Compare local and remote changes, apply updates bidirectionally, and preserve conflict copies when needed. |
 | **Obsidian Filen Sync: Push changed local files**  | Upload changed local files to Filen without pulling remote changes or deleting local files.                |
 | **Obsidian Filen Sync: Pull changed remote files** | Download changed remote files from Filen without uploading local changes or deleting remote files.         |
@@ -128,7 +129,7 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 For newer versions of Obsidian where the status bar is minimized or absent, and on mobile devices where status bar items are not supported:
 
 - **Floating progress pill**: Automatically slides into view at the bottom of the active workspace whenever sync is running.
-- **Progress bar & stats**: Displays current file count (e.g. `3 of 10 files`), percentage, animated progress bar, and active filename.
+- **Progress bar & stats**: Displays completed changed-file count (e.g. `3 of 10 changes`), percentage, animated progress bar, and active filename.
 - **Interactive**: Click or tap the floating pill at any time to open the sync action menu or view activity logs.
 - **Smooth transitions**: Seamlessly fades in when sync begins and fades out when sync completes. Can be toggled in settings.
 
@@ -142,11 +143,12 @@ For newer versions of Obsidian where the status bar is minimized or absent, and 
 
 When visible, the status bar item reflects real-time sync state and provides quick access to common actions:
 
+- **Pending**: Local edits show a pending count immediately; successful sync shows last-sync time.
 - **Idle**: Displays last-sync relative time (e.g. `Filen: idle · 3m ago`) or a compact Obsidian Sync-style icon.
-- **Syncing**: Shows an animated spinning sync icon and live file transfer progress (e.g. `Filen: 3/10 (30%)` in full text mode).
+- **Syncing**: Shows checking phases and completed transfers; unchanged files do not count. Transfer details include bytes. The spinning icon and status bar show live progress (e.g. `Filen: 3/10 (30%)` in full text mode).
 - **Paused / Offline**: Shows warning badges when auto-sync is paused or the device is offline.
-- **Error**: Shows an alert icon if the last sync encountered an issue.
-- **Action menu**: Click or right-click the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.
+- **Review / Error**: Conflicts and required confirmation stay visible; transient failures show a retry countdown.
+- **Action menu**: Click, right-click, or press Enter/Space on the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.
 
 ### Ribbon icons
 
@@ -228,7 +230,7 @@ The sync baseline is maintained locally in IndexedDB inside the vault's plugin s
 | **Status bar indicator style**  | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
 | **Notify on background change** | Display an Obsidian notice when an auto-sync modifies vault files.                                                                        | Disabled               |
 | **Sync on file save**           | Trigger background sync when local files are edited and saved.                                                                            | Enabled                |
-| **Sync on save delay**          | Debounce delay before syncing after a save (5 to 30 seconds).                                                                             | `5` seconds            |
+| **Sync on save delay**          | Debounce delay before syncing after a save (1 to 30 seconds).                                                                             | `2` seconds            |
 | **Background sync interval**    | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
 | **Sync after startup**          | Delay in seconds after layout ready before running an initial sync (0 disables).                                                          | `0` (Disabled)         |
 | **Fast remote polling**         | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |

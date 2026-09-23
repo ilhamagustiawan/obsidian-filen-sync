@@ -26,13 +26,18 @@ export type RemoteFileVersion = {
 
 export type RemoteFs = {
 	walk(): Promise<RemoteEntry[]>;
-	readFile(path: string, expectedRemoteUuid?: string): Promise<Uint8Array>;
+	readFile(
+		path: string,
+		expectedRemoteUuid?: string,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
+	): Promise<Uint8Array>;
 	writeFile(
 		path: string,
 		bytes: Uint8Array,
 		mtime: number,
 		ctime: number,
 		expectedRemoteUuid?: string,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<RemoteEntry>;
 	rm(path: string, expectedRemoteUuid?: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
@@ -116,7 +121,11 @@ export class FilenRemoteFs implements RemoteFs {
 		return entries.sort((left, right) => left.path.localeCompare(right.path));
 	}
 
-	async readFile(path: string, expectedRemoteUuid?: string): Promise<Uint8Array> {
+	async readFile(
+		path: string,
+		expectedRemoteUuid?: string,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
+	): Promise<Uint8Array> {
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
@@ -127,15 +136,19 @@ export class FilenRemoteFs implements RemoteFs {
 			throw new Error(`Remote file changed before download: ${path}. Replan the sync.`);
 		}
 		const file = await client.cloud().getFile({ uuid });
-		return downloadFileChunks(client, {
-			uuid: file.uuid,
-			bucket: file.bucket,
-			region: file.region,
-			version: file.version,
-			size: file.size,
-			chunks: file.chunks,
-			key: file.metadataDecrypted.key,
-		});
+		return downloadFileChunks(
+			client,
+			{
+				uuid: file.uuid,
+				bucket: file.bucket,
+				region: file.region,
+				version: file.version,
+				size: file.size,
+				chunks: file.chunks,
+				key: file.metadataDecrypted.key,
+			},
+			(_done, _total, completedBytes, totalBytes) => onProgress?.(completedBytes, totalBytes),
+		);
 	}
 
 	async writeFile(
@@ -144,6 +157,7 @@ export class FilenRemoteFs implements RemoteFs {
 		mtime: number,
 		ctime: number,
 		expectedRemoteUuid?: string,
+		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<RemoteEntry> {
 		validateSyncPath(path);
 		const current = await this.stat(path);
@@ -162,7 +176,16 @@ export class FilenRemoteFs implements RemoteFs {
 
 		const parentUuid = await this.getParentUuid(parent);
 
-		const uploaded = await uploadFileChunks(client, parentUuid, fileName, bytes, mtime, ctime);
+		const uploaded = await uploadFileChunks(
+			client,
+			parentUuid,
+			fileName,
+			bytes,
+			mtime,
+			ctime,
+			undefined,
+			(_done, _total, completedBytes, totalBytes) => onProgress?.(completedBytes, totalBytes),
+		);
 		client.init(client.config);
 		configureSdkRetryBounds(client);
 		return {

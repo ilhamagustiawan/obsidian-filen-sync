@@ -8,6 +8,8 @@ import { checkBulkGuard, type BulkGuardReport, type BulkGuardThresholds } from "
 import { sha256Hex, SyncExecutor, type LocalEntry } from "./sync/executor";
 import { assertNoPathCollisions } from "./sync/path-validation";
 import { planSync } from "./sync/planner";
+import { LocalHashCache } from "./sync/local-hash-cache";
+import { mapPool } from "./sync/pool";
 import type {
 	ConflictCopy,
 	LocalFileInfo,
@@ -50,6 +52,7 @@ type SyncEngineConfig = {
 		skipSizeLargerThanMB: number;
 	};
 	remote: RemoteFs;
+	transferConcurrency?: 1 | 2;
 };
 
 type LocalScan = {
@@ -64,12 +67,18 @@ type RemoteScan = {
 
 export class SyncEngine {
 	private remoteTreeCache: RemoteTreeCache | null = null;
+	private localHashes = new LocalHashCache();
+
+	invalidateLocal(path: string): void {
+		this.localHashes.invalidate(path);
+	}
 
 	constructor(private readonly config: SyncEngineConfig) {}
 
 	close(): void {
 		this.config.remote.close();
 		this.remoteTreeCache = null;
+		this.localHashes.clear();
 	}
 
 	async testRemote(): Promise<void> {
@@ -88,7 +97,7 @@ export class SyncEngine {
 		direction: SyncDirection = "both",
 		confirmBulkOperations?: (report: BulkGuardReport) => Promise<boolean>,
 		bulkThresholds?: BulkGuardThresholds,
-		options: { isManual?: boolean } = {},
+		options: { isManual?: boolean; initialSync?: boolean } = {},
 	): Promise<SyncOutcome> {
 		await this.config.remote.mkdir("");
 		onActivity?.({ type: "connected" });
@@ -121,6 +130,7 @@ export class SyncEngine {
 				);
 			} catch (error) {
 				this.remoteTreeCache = null;
+				this.localHashes.clear();
 				if (
 					replanAttempts < maxReplanAttempts &&
 					error instanceof Error &&
@@ -147,10 +157,12 @@ export class SyncEngine {
 		onActivity?: (event: SyncActivityEvent) => void,
 		confirmBulkOperations?: (report: BulkGuardReport) => Promise<boolean>,
 		bulkThresholds?: BulkGuardThresholds,
-		options: { isManual?: boolean } = {},
+		options: { isManual?: boolean; initialSync?: boolean } = {},
 	): Promise<SyncOutcome> {
+		onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
+		const forceScan = options.isManual === true || options.initialSync === true;
 		const [local, prevRecords] = await Promise.all([
-			this.walkLocal(pathFilter),
+			this.walkLocal(pathFilter, forceScan),
 			this.config.db.getAllFiles(),
 		]);
 
@@ -160,21 +172,22 @@ export class SyncEngine {
 		// 2. Manual Sync now runs always scan in full.
 		// 3. A cache older than 30 minutes is always refreshed.
 		// 4. While cached tree is in use, remote-folder cleanup (pruning) is skipped entirely.
-		const isManual = options.isManual ?? false;
+		onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+		const isManual = forceScan;
 		const canFastPoll =
 			this.config.settings.fastRemotePolling &&
 			!isManual &&
-			typeof this.config.remote.checkEvents === "function";
+			this.config.remote.checkEvents !== undefined;
 
 		let remote: RemoteScan;
 		let remoteFromCache = false;
 		let probeHasChanges = true;
 		let newWatermark = Date.now();
 
-		if (canFastPoll) {
+		if (canFastPoll && this.config.remote.checkEvents !== undefined) {
 			const currentWatermark = this.remoteTreeCache?.eventWatermark ?? 0;
 			try {
-				const probe = await this.config.remote.checkEvents!(currentWatermark);
+				const probe = await this.config.remote.checkEvents(currentWatermark);
 				probeHasChanges = probe.hasChanges;
 				newWatermark = probe.newWatermarkMs;
 			} catch {
@@ -243,6 +256,7 @@ export class SyncEngine {
 			});
 		}
 
+		onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
 		// 1. Pure Plan Pass
 		const planResult = planSync({
 			localFiles,
@@ -263,6 +277,7 @@ export class SyncEngine {
 		);
 
 		if (bulkReport.blocked) {
+			onProgress?.({ phase: "confirming", current: 0, total: 0, path: "" });
 			if (confirmBulkOperations !== undefined) {
 				const confirmed = await confirmBulkOperations(bulkReport);
 				if (!confirmed) {
@@ -291,6 +306,7 @@ export class SyncEngine {
 			.map((a) => a.path);
 
 		if (deleteLocalPaths.length > 0 && confirmLocalDeletes !== undefined) {
+			onProgress?.({ phase: "confirming", current: 0, total: 0, path: "" });
 			const confirmed = await confirmLocalDeletes(deleteLocalPaths);
 			if (!confirmed) {
 				return {
@@ -318,15 +334,29 @@ export class SyncEngine {
 		let deletedLocal = 0;
 		let deletedRemote = 0;
 		const conflictCopies: ConflictCopy[] = [];
-		const total = planResult.actions.length;
+		const total = planResult.actions.filter((action) => action.operation !== "noop").length;
+		let completed = 0;
 
 		// Safety rail 4: skip remote folder cleanup/pruning while cached tree is in use
+		onProgress?.({ phase: "directories", current: 0, total: 0, path: "" });
 		applied += await executor.syncDirectories(local.dirs, remote.dirs, {
 			skipRemoteFolderPrune: remoteFromCache,
 		});
 
-		for (const [index, action] of planResult.actions.entries()) {
-			onProgress?.({ current: index + 1, total, path: action.path });
+		const execute = async (action: (typeof planResult.actions)[number]): Promise<void> => {
+			const report = (completedBytes?: number, totalBytes?: number): void => {
+				if (action.operation !== "noop")
+					onProgress?.({
+						phase: "transferring",
+						current: completed,
+						total,
+						path: action.path,
+						operation: action.operation,
+						completedBytes,
+						totalBytes,
+					});
+			};
+			report();
 
 			if (action.operation !== "noop") {
 				onActivity?.({
@@ -348,8 +378,17 @@ export class SyncEngine {
 				local.files.get(action.path),
 				remote.files.get(action.path),
 				filteredPrev.get(action.path),
+				report,
 			);
 
+			if (action.operation !== "noop") {
+				if (result.applied === 0)
+					throw new Error(
+						`File changed before applying ${action.path}. Replan the sync.`,
+					);
+				completed++;
+				report();
+			}
 			applied += result.applied;
 			conflicts += result.conflicts;
 			if (result.applied > 0) {
@@ -386,7 +425,30 @@ export class SyncEngine {
 			if (result.conflictCopy !== undefined) {
 				conflictCopies.push(result.conflictCopy);
 			}
+		};
+		// Keep deletes and conflicts serial. Large attachments stay serial to bound memory.
+		let batch: typeof planResult.actions = [];
+		const flush = async (): Promise<void> => {
+			await mapPool(batch, this.config.transferConcurrency ?? 2, execute);
+			batch = [];
+		};
+		for (const action of planResult.actions) {
+			const size = Math.max(
+				local.files.get(action.path)?.size ?? 0,
+				remote.files.get(action.path)?.size ?? 0,
+			);
+			if (
+				(action.operation === "upload" || action.operation === "download") &&
+				size < 8 * 1024 * 1024
+			)
+				batch.push(action);
+			else {
+				await flush();
+				await execute(action);
+			}
 		}
+		await flush();
+		if (applied > 0) this.remoteTreeCache = null;
 
 		return {
 			applied,
@@ -399,21 +461,24 @@ export class SyncEngine {
 		};
 	}
 
-	private async walkLocal(pathFilter: SyncPathFilter): Promise<LocalScan> {
+	private async walkLocal(pathFilter: SyncPathFilter, forceScan: boolean): Promise<LocalScan> {
 		const files = new Map<string, LocalEntry>();
 		const dirs = new Set<string>();
 		for (const file of this.config.app.vault.getAllLoadedFiles()) {
 			if (file.path.length === 0) continue;
 			if (file instanceof TFile) {
 				if (pathFilter.isIgnored(file.path, file.stat.size)) continue;
-				const content = await this.config.app.vault.readBinary(file);
-				const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
+				const hash = await this.localHashes.read(
+					file,
+					() => this.config.app.vault.readBinary(file),
+					forceScan,
+				);
 				files.set(file.path, {
 					path: file.path,
 					mtime: file.stat.mtime,
 					ctime: file.stat.ctime,
 					size: file.stat.size,
-					hash: await sha256Hex(bytes),
+					hash,
 					file,
 				});
 			} else if (file instanceof TFolder) {
@@ -421,6 +486,7 @@ export class SyncEngine {
 				dirs.add(file.path);
 			}
 		}
+		this.localHashes.prune(new Set(files.keys()));
 		assertNoPathCollisions([
 			...[...files.keys()].map((path) => ({ path, isDir: false })),
 			...[...dirs].map((path) => ({ path, isDir: true })),
