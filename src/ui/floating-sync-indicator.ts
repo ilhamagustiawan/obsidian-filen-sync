@@ -17,6 +17,7 @@ export class FloatingSyncIndicator {
 	private titleEl: HTMLElement | null = null;
 	private pctEl: HTMLElement | null = null;
 	private barFill: HTMLElement | null = null;
+	private row2El: HTMLElement | null = null;
 	private countEl: HTMLElement | null = null;
 	private fileEl: HTMLElement | null = null;
 	private hideTimer: number | null = null;
@@ -58,6 +59,7 @@ export class FloatingSyncIndicator {
 		this.barFill = track.createDiv({ cls: "filen-floating-pill-fill" });
 
 		const row2 = body.createDiv({ cls: "filen-floating-pill-row2" });
+		this.row2El = row2;
 		this.countEl = row2.createSpan({ cls: "filen-floating-pill-count", text: "Starting…" });
 		this.fileEl = row2.createSpan({ cls: "filen-floating-pill-file", text: "" });
 
@@ -144,9 +146,29 @@ export class FloatingSyncIndicator {
 		this.titleEl = null;
 		this.pctEl = null;
 		this.barFill = null;
+		this.row2El = null;
 		this.countEl = null;
 		this.fileEl = null;
 		this.isVisible = false;
+	}
+
+	private updateDetails(countText: string, fileText = "", titleAttr?: string): void {
+		if (!this.countEl || !this.fileEl) return;
+		this.countEl.setText(countText);
+		this.fileEl.setText(fileText);
+		if (titleAttr) {
+			this.fileEl.setAttr("title", titleAttr);
+		} else {
+			this.fileEl.removeAttribute("title");
+		}
+		if (this.row2El) {
+			const hasText = Boolean(countText.trim() || fileText.trim());
+			if (hasText) {
+				this.row2El.removeClass("is-empty");
+			} else {
+				this.row2El.addClass("is-empty");
+			}
+		}
 	}
 
 	private show(): void {
@@ -210,10 +232,7 @@ export class FloatingSyncIndicator {
 		const path = progress?.path ?? "";
 		const label = progress?.phase ? formatSyncProgress(progress) : state.text;
 		this.titleEl.setText(label);
-		this.countEl.setText(path ? formatFilename(path) : state.detail);
-		this.fileEl.setText("");
-		if (path) this.fileEl.setAttr("title", path);
-		else this.fileEl.removeAttribute("title");
+		this.updateDetails(path ? formatFilename(path) : state.detail, "", path || undefined);
 
 		if (total > 0) {
 			const boundedCurrent = Math.min(current, total);
@@ -256,9 +275,7 @@ export class FloatingSyncIndicator {
 		this.barFill.style.width = "100%";
 
 		const summary = state.text === "up to date" ? "Vault is up to date" : state.detail;
-		this.countEl.setText(summary || "Sync complete");
-		this.fileEl.setText("");
-		this.fileEl.removeAttribute("title");
+		this.updateDetails(summary || "Sync complete", "");
 
 		this.scheduleHide(2400);
 	}
@@ -286,8 +303,7 @@ export class FloatingSyncIndicator {
 		this.barFill.removeClass("is-indeterminate");
 		this.barFill.style.width = "100%";
 
-		this.countEl.setText(state.detail || "An error occurred");
-		this.fileEl.setText("Click for sync options");
+		this.updateDetails(state.detail || "An error occurred", "Click for sync options");
 
 		this.clearHideTimer();
 	}
@@ -322,8 +338,7 @@ export class FloatingSyncIndicator {
 		this.barFill.removeClass("is-indeterminate");
 		this.barFill.style.width = "100%";
 
-		this.countEl.setText(state.detail || state.text);
-		this.fileEl.setText("");
+		this.updateDetails(state.detail || state.text, "");
 
 		this.clearHideTimer();
 	}
@@ -353,7 +368,6 @@ export class FloatingSyncIndicator {
 		this.pctEl.setText("Pending");
 		this.barFill.removeClass("is-indeterminate");
 		this.barFill.style.width = "0%";
-		this.countEl.setText(state.text);
-		this.fileEl.setText(state.detail);
+		this.updateDetails(state.text, state.detail);
 	}
 }

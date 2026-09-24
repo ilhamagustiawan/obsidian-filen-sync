@@ -1915,6 +1915,9 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			updatedAt: Date.now(),
 		});
 		assert.equal(pill.hasClass("is-success"), true);
+		const successDetails = pill.children[0].children[1].children[2];
+		assert.equal(successDetails.children[0].textContent, "Vault is up to date");
+		assert.equal(successDetails.hasClass("is-empty"), false);
 
 		indicator.onStatusChange({
 			kind: "pending",
