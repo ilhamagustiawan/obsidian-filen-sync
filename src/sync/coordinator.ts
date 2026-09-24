@@ -17,6 +17,7 @@ export type StatusBarState = {
 	updatedAt: number | null;
 	progress?: SyncProgress;
 	isManual?: boolean;
+	syncCompleted?: boolean;
 };
 
 export type SyncRunResult =
@@ -315,6 +316,7 @@ export class SyncCoordinator {
 					detail: "No changes detected.",
 					updatedAt: Date.now(),
 					isManual,
+					syncCompleted: true,
 				});
 				return { kind: "up-to-date" };
 			}
@@ -343,11 +345,10 @@ export class SyncCoordinator {
 				detail: `${label}: ${summary}`,
 				updatedAt: Date.now(),
 				isManual,
+				syncCompleted: true,
 			});
 
-			if (!options.silent) {
-				new Notice(`${label}: ${summary}`);
-			} else if (result.conflicts > 0) {
+			if (result.conflicts > 0) {
 				new Notice(
 					`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`,
 				);

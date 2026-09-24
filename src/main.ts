@@ -34,6 +34,11 @@ import {
 	type SyncRunResult,
 } from "./sync/coordinator";
 import { FloatingSyncIndicator } from "./ui/floating-sync-indicator";
+import {
+	formatLastSyncSummary,
+	formatSyncProgress,
+	shouldShowFloatingIndicator,
+} from "./ui/sync-presentation";
 import { SyncNoticeController } from "./ui/sync-notice";
 import { sha256Hex } from "./sync/executor";
 
@@ -62,6 +67,7 @@ export default class FilenSyncPlugin extends Plugin {
 	private sessionAuth: FilenAuth | null = null;
 	private legacyAuthInvalid = false;
 	private lastSyncTimestamp: number | null = null;
+	private lastSyncResultSummary: string | null = null;
 	private statusBarItemEl: HTMLElement | null = null;
 	private statusBarIconEl: HTMLElement | null = null;
 	private statusBarTextEl: HTMLElement | null = null;
@@ -98,9 +104,11 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 		this.register(() => setUncertainMutationHandler(null));
 
+		this.lastSyncTimestamp = this.settings.lastSyncTimestamp;
+		this.lastSyncResultSummary = this.settings.lastSyncResultSummary;
 		this.noticeController = new SyncNoticeController(
-			() => this.settings,
 			() => this.openActivityLogs(),
+			() => this.getExactLastSyncSummary(),
 		);
 
 		this.floatingIndicator = new FloatingSyncIndicator(
@@ -118,15 +126,25 @@ export default class FilenSyncPlugin extends Plugin {
 			{
 				onStatusChange: (state) => {
 					this.statusBarState = state;
-					if (
-						state.kind === "success" ||
-						(state.kind === "idle" && state.text === "up to date")
-					) {
+					if (state.syncCompleted) {
 						this.lastSyncTimestamp = Date.now();
+						this.settings.lastSyncTimestamp = this.lastSyncTimestamp;
+						this.lastSyncResultSummary = state.detail || state.text;
+						this.settings.lastSyncResultSummary = this.lastSyncResultSummary;
+						void this.saveSettings();
 					}
 					this.updateStatusDisplays();
 					this.noticeController.onStatusChange(state);
-					this.floatingIndicator.onStatusChange(state);
+					if (
+						shouldShowFloatingIndicator(
+							Platform.isMobile,
+							this.settings.showFloatingSyncIndicator,
+						)
+					) {
+						this.floatingIndicator.onStatusChange(state);
+					} else {
+						this.floatingIndicator.refreshVisibility(false);
+					}
 				},
 				onLogActivity: (message) => {
 					this.logActivity(message);
@@ -529,14 +547,18 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	refreshFloatingIndicator(): void {
-		this.floatingIndicator.refreshVisibility();
+		const enabled = shouldShowFloatingIndicator(
+			Platform.isMobile,
+			this.settings.showFloatingSyncIndicator,
+		);
+		this.floatingIndicator.refreshVisibility(enabled);
+		if (enabled && this.coordinator.active) {
+			this.floatingIndicator.onStatusChange(this.statusBarState);
+		}
 	}
 
 	private showSyncProgressNoticeOnDemand(): void {
 		this.noticeController.showOnDemand(this.statusBarState);
-		if (this.settings.showFloatingSyncIndicator) {
-			this.floatingIndicator.onStatusChange(this.statusBarState);
-		}
 	}
 
 	async initialSync(): Promise<SyncRunResult> {
@@ -786,6 +808,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 			this.coordinator.resetOffline();
 			this.lastSyncTimestamp = Date.now();
+			this.settings.lastSyncTimestamp = this.lastSyncTimestamp;
+			this.lastSyncResultSummary = `Force uploaded ${file.path}`;
+			this.settings.lastSyncResultSummary = this.lastSyncResultSummary;
+			await this.saveSettings();
 			this.setDefaultStatus();
 			this.logActivity(`Force uploaded ${file.path}`);
 			new Notice(`Uploaded "${file.name}" to Filen.`);
@@ -899,14 +925,17 @@ export default class FilenSyncPlugin extends Plugin {
 				.setTitle(`${this.coordinator.pendingCount} local changes pending`)
 				.setDisabled(true),
 		);
-		if (this.lastSyncTimestamp !== null)
+		menu.addItem((item) => item.setTitle(this.lastSyncSummary()).setDisabled(true));
+		if (this.lastSyncResultSummary) {
 			menu.addItem((item) =>
-				item
-					.setTitle(
-						`Last successful sync: ${formatRelativeTime(this.lastSyncTimestamp ?? 0)}`,
-					)
-					.setDisabled(true),
+				item.setTitle(this.lastSyncResultSummary ?? "").setDisabled(true),
 			);
+		}
+		menu.addItem((item) => {
+			item.setTitle("Show sync progress");
+			item.setIcon("align-left");
+			item.onClick(() => this.showSyncProgressNoticeOnDemand());
+		});
 		menu.addSeparator();
 
 		if (this.statusBarState.kind === "syncing") {
@@ -1083,7 +1112,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.statusBarState.kind === "syncing") {
 			this.syncRibbonIconEl.addClass("is-syncing");
-			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
+			if (
+				this.statusBarState.progress?.phase === "transferring" &&
+				this.statusBarState.progress.total > 0
+			) {
 				const pct = Math.round(
 					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
 						100,
@@ -1139,6 +1171,11 @@ export default class FilenSyncPlugin extends Plugin {
 			this.statusBarTextEl === null
 		)
 			return;
+		if (Platform.isMobile) {
+			this.statusBarItemEl.addClass("is-mobile-hidden");
+			return;
+		}
+		this.statusBarItemEl.removeClass("is-mobile-hidden");
 
 		this.statusBarItemEl.removeClass(
 			"is-idle",
@@ -1190,17 +1227,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.statusBarState.kind === "syncing") {
 			setIcon(this.statusBarIconEl, "refresh-cw");
-			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
-				const pct = Math.round(
-					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
-						100,
-				);
-				this.statusBarTextEl.setText(
-					`Filen: ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)`,
-				);
-			} else {
-				this.statusBarTextEl.setText(`Filen ${this.statusBarState.text}`);
-			}
+			const progress = this.statusBarState.progress;
+			this.statusBarTextEl.setText(
+				`Filen: ${progress?.phase ? formatSyncProgress(progress) : this.statusBarState.text}`,
+			);
 			this.statusBarItemEl.addClass("is-syncing");
 			const tooltip = this.buildStatusTooltip();
 			setTooltip(this.statusBarItemEl, tooltip);
@@ -1265,8 +1295,23 @@ export default class FilenSyncPlugin extends Plugin {
 		this.statusBarItemEl.setAttr("title", tooltip);
 	}
 
+	private lastSyncSummary(): string {
+		return formatLastSyncSummary(this.lastSyncTimestamp, formatRelativeTime);
+	}
+
+	private getExactLastSyncSummary(): string {
+		const timestamp =
+			this.lastSyncTimestamp === null
+				? "Not synced yet"
+				: `Last synced ${new Date(this.lastSyncTimestamp).toLocaleString()}`;
+		return this.lastSyncResultSummary
+			? `${timestamp} · ${this.lastSyncResultSummary}`
+			: timestamp;
+	}
+
 	private buildStatusTooltip(): string {
-		const lines: string[] = ["Filen Sync"];
+		const lines: string[] = ["Filen Sync", this.lastSyncSummary()];
+		if (this.lastSyncResultSummary) lines.push(this.lastSyncResultSummary);
 
 		if (!this.hasSavedAuth()) {
 			lines.push("Not connected", "Click to configure account.");
@@ -1292,7 +1337,10 @@ export default class FilenSyncPlugin extends Plugin {
 				? "All files synced"
 				: this.statusBarState.text;
 			lines.push(label ? `Syncing: ${label}` : "Syncing…");
-			if (this.statusBarState.progress && this.statusBarState.progress.total > 0) {
+			if (
+				this.statusBarState.progress?.phase === "transferring" &&
+				this.statusBarState.progress.total > 0
+			) {
 				const pct = Math.round(
 					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
 						100,
@@ -1332,11 +1380,7 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 
 		// Idle / fully synced
-		if (this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0) {
-			lines.push(`Fully synced (${formatRelativeTime(this.lastSyncTimestamp)})`);
-		} else {
-			lines.push("Ready");
-		}
+		if (this.lastSyncTimestamp === null) lines.push("Ready");
 
 		if (this.statusBarState.detail && this.statusBarState.text !== "Ready") {
 			lines.push(this.statusBarState.detail);

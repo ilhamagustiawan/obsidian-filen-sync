@@ -124,28 +124,20 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 
 ## User interface
 
-### Floating sync indicator
+### Sync progress and status
 
-For newer versions of Obsidian where the status bar is minimized or absent, and on mobile devices where status bar items are not supported:
-
-- **Floating progress pill**: Automatically slides into view at the bottom of the active workspace whenever sync is running.
-- **Progress bar & stats**: Displays completed changed-file count (e.g. `3 of 10 changes`), percentage, animated progress bar, and active filename.
-- **Interactive**: Click or tap the floating pill at any time to open the sync action menu or view activity logs.
-- **Smooth transitions**: Seamlessly fades in when sync begins and fades out when sync completes. Can be toggled in settings.
-
-### Progress notice banner
-
-- **Live progress banner**: Shows a notification banner with a progress bar, percentage, and current transferring file while syncing.
-- **Configurable**: Choose to show the banner when files are transferring (recommended), on every sync run, for manual sync only, or never.
-- **Actionable on error**: If a sync fails, the notice presents an immediate **View logs →** button to inspect the root cause.
+- **Desktop status bar**: A compact Filen icon uses the native Obsidian status bar area. Hover or focus to see the current phase, completed/total changed files, active file, and last successful sync. Select it to open sync actions and details.
+- **Mobile fallback**: When enabled, a compact single-line indicator appears at the bottom of the workspace. It is delayed briefly to avoid flashing during quick syncs; select it to open actions. Errors and conflicts stay visible until state changes.
+- **On-demand details**: Automatic progress banners are disabled. Select **Show sync progress** from the status menu, or select the sync ribbon icon during an active run, to open detailed progress. Error details retain a **View logs →** action.
+- **Last sync**: The status tooltip, menu, and on-demand details show a relative last-sync time; details include the exact local timestamp. Failed or skipped attempts do not change it.
 
 ### Status bar
 
 When visible, the status bar item reflects real-time sync state and provides quick access to common actions:
 
-- **Pending**: Local edits show a pending count immediately; successful sync shows last-sync time.
-- **Idle**: Displays last-sync relative time (e.g. `Filen: idle · 3m ago`) or a compact Obsidian Sync-style icon.
-- **Syncing**: Shows checking phases and completed transfers; unchanged files do not count. Transfer details include bytes. The spinning icon and status bar show live progress (e.g. `Filen: 3/10 (30%)` in full text mode).
+- **Pending**: Local edits show a pending count immediately; last successful sync remains available in the tooltip and menu.
+- **Idle**: Uses a compact Obsidian Sync-style icon by default, or icon and text when selected in settings.
+- **Syncing**: Shows scan/planning phases and completed changed-file counts only when a valid transfer total is known; reaching the transfer total does not imply the full sync has finished.
 - **Paused / Offline**: Shows warning badges when auto-sync is paused or the device is offline.
 - **Review / Error**: Conflicts and required confirmation stay visible; transient failures show a retry countdown.
 - **Action menu**: Click, right-click, or press Enter/Space on the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.

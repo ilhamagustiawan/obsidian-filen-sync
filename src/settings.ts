@@ -49,6 +49,8 @@ export type FilenSyncSettings = {
 	statusBarIndicatorStyle: "icon" | "full";
 	syncProgressNoticeMode: SyncProgressNoticeMode;
 	showFloatingSyncIndicator: boolean;
+	lastSyncTimestamp: number | null;
+	lastSyncResultSummary: string | null;
 	fastRemotePolling: boolean;
 	skipLargeFiles: boolean;
 	skipSizeLargerThanMB: number;
@@ -74,8 +76,10 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	syncPaused: false,
 	notifyOnBackgroundChange: false,
 	statusBarIndicatorStyle: "icon",
-	syncProgressNoticeMode: "transfers_only",
+	syncProgressNoticeMode: "never",
 	showFloatingSyncIndicator: true,
+	lastSyncTimestamp: null,
+	lastSyncResultSummary: null,
 	fastRemotePolling: true,
 	skipLargeFiles: true,
 	skipSizeLargerThanMB: 50,
@@ -101,10 +105,7 @@ const clampNumber = (value: number, min: number, max: number): number =>
 const readStringArray = (value: unknown): string[] =>
 	Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
-const readSyncProgressNoticeMode = (value: unknown): SyncProgressNoticeMode => {
-	if (value === "always" || value === "manual_only" || value === "never") return value;
-	return "transfers_only";
-};
+const readSyncProgressNoticeMode = (_value: unknown): SyncProgressNoticeMode => "never";
 
 export const FilenSyncSettings = {
 	fromSaved(value: unknown): FilenSyncSettings {
@@ -153,6 +154,17 @@ export const FilenSyncSettings = {
 				value.showFloatingSyncIndicator,
 				DEFAULT_SETTINGS.showFloatingSyncIndicator,
 			),
+			lastSyncTimestamp:
+				typeof value.lastSyncTimestamp === "number" &&
+				Number.isFinite(value.lastSyncTimestamp) &&
+				value.lastSyncTimestamp > 0
+					? value.lastSyncTimestamp
+					: null,
+			lastSyncResultSummary:
+				typeof value.lastSyncResultSummary === "string" &&
+				value.lastSyncResultSummary.trim().length > 0
+					? value.lastSyncResultSummary
+					: null,
 			fastRemotePolling: readBoolean(
 				value.fastRemotePolling,
 				DEFAULT_SETTINGS.fastRemotePolling,
@@ -398,10 +410,8 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(section)
-			.setName("Floating sync indicator")
-			.setDesc(
-				"Show a floating progress indicator at the bottom of the workspace while syncing. Recommended for newer Obsidian versions and mobile where the status bar is minimized or absent.",
-			)
+			.setName("Mobile sync indicator")
+			.setDesc("Show a compact progress indicator at the bottom of the workspace on mobile.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.showFloatingSyncIndicator)
@@ -409,25 +419,6 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 						this.plugin.settings.showFloatingSyncIndicator = value;
 						await this.plugin.saveSettings();
 						this.plugin.refreshFloatingIndicator();
-					}),
-			);
-
-		new Setting(section)
-			.setName("Sync progress notice")
-			.setDesc(
-				"Display a notification banner with a progress bar and active file details while syncing.",
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("transfers_only", "When files are syncing (recommended)")
-					.addOption("always", "Always (every sync run)")
-					.addOption("manual_only", "Manual sync only")
-					.addOption("never", "Never")
-					.setValue(this.plugin.settings.syncProgressNoticeMode)
-					.onChange(async (value) => {
-						this.plugin.settings.syncProgressNoticeMode =
-							value as SyncProgressNoticeMode;
-						await this.plugin.saveSettings();
 					}),
 			);
 

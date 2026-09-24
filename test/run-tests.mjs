@@ -1210,12 +1210,12 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 		// Defaults to "icon" (native Obsidian Sync style)
 		assert.equal(DEFAULT_SETTINGS.statusBarIndicatorStyle, "icon");
 		assert.equal(DEFAULT_SETTINGS.reconciliationNeeded, false);
-		assert.equal(DEFAULT_SETTINGS.syncProgressNoticeMode, "transfers_only");
+		assert.equal(DEFAULT_SETTINGS.syncProgressNoticeMode, "never");
 		assert.equal(DEFAULT_SETTINGS.showFloatingSyncIndicator, true);
 
 		const parsedEmpty = FilenSyncSettings.fromSaved({});
 		assert.equal(parsedEmpty.statusBarIndicatorStyle, "icon");
-		assert.equal(parsedEmpty.syncProgressNoticeMode, "transfers_only");
+		assert.equal(parsedEmpty.syncProgressNoticeMode, "never");
 		assert.equal(parsedEmpty.showFloatingSyncIndicator, true);
 
 		const parsedFull = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "full" });
@@ -1224,24 +1224,25 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 		const parsedInvalid = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "invalid" });
 		assert.equal(parsedInvalid.statusBarIndicatorStyle, "icon");
 
+		for (const legacyMode of ["always", "manual_only", "never", "transfers_only", "invalid"]) {
+			assert.equal(
+				FilenSyncSettings.fromSaved({ syncProgressNoticeMode: legacyMode })
+					.syncProgressNoticeMode,
+				"never",
+			);
+		}
 		assert.equal(
-			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "always" })
-				.syncProgressNoticeMode,
-			"always",
+			FilenSyncSettings.fromSaved({ lastSyncTimestamp: 123 }).lastSyncTimestamp,
+			123,
 		);
 		assert.equal(
-			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "manual_only" })
-				.syncProgressNoticeMode,
-			"manual_only",
+			FilenSyncSettings.fromSaved({ lastSyncTimestamp: -1 }).lastSyncTimestamp,
+			null,
 		);
 		assert.equal(
-			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "never" }).syncProgressNoticeMode,
-			"never",
-		);
-		assert.equal(
-			FilenSyncSettings.fromSaved({ syncProgressNoticeMode: "invalid" })
-				.syncProgressNoticeMode,
-			"transfers_only",
+			FilenSyncSettings.fromSaved({ lastSyncResultSummary: "2 applied" })
+				.lastSyncResultSummary,
+			"2 applied",
 		);
 		assert.equal(
 			FilenSyncSettings.fromSaved({ showFloatingSyncIndicator: false })
@@ -1650,6 +1651,8 @@ test("Legacy credentials migration removes plaintext auth from disk without rese
 
 test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibility, and lifecycles", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "filen-ui-test-"));
+	const originalSetTimeout = globalThis.setTimeout;
+	const originalClearTimeout = globalThis.clearTimeout;
 	try {
 		const stub = join(dir, "obsidian-stub.mjs");
 		const outfileNotice = join(dir, "sync-notice.mjs");
@@ -1769,6 +1772,16 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 
 		globalThis.__createMockElement = (tag, cls) => new MockElement(tag, cls);
 		globalThis.__testActiveNotices = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const indicatorTimers = new Map();
+		let nextIndicatorTimer = 1;
+		globalThis.setTimeout = (fn, ms) => {
+			const id = nextIndicatorTimer++;
+			indicatorTimers.set(id, { fn, ms });
+			return id;
+		};
+		globalThis.clearTimeout = (id) => indicatorTimers.delete(id);
 		globalThis.window = globalThis;
 		globalThis.document = {
 			createDocumentFragment: () => new MockElement("fragment"),
@@ -1785,13 +1798,13 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		};
 		let logsOpened = false;
 		const controller = new SyncNoticeController(
-			() => settings,
 			() => {
 				logsOpened = true;
 			},
+			() => "Not synced yet",
 		);
 
-		// 1. transfers_only mode with no transfers (total = 0, isManual = false)
+		// Automatic sync progress never creates a notice, regardless of legacy settings.
 		controller.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
@@ -1800,13 +1813,7 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			isManual: false,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		assert.equal(
-			globalThis.__testActiveNotices.length,
-			0,
-			"No notice for background scan with 0 transfers",
-		);
-
-		// 2. transfers_only mode with transfers (>0)
+		assert.equal(globalThis.__testActiveNotices.length, 0, "Automatic progress stays quiet");
 		controller.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
@@ -1817,12 +1824,19 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		});
 		assert.equal(
 			globalThis.__testActiveNotices.length,
-			1,
-			"Notice created when transfers detected",
+			0,
+			"Transfers stay quiet automatically",
 		);
-		assert.equal(globalThis.__testActiveNotices[0].hidden, false);
 
-		// 3. Success transitions the active notice
+		// An explicit details request keeps the detailed renderer available.
+		controller.showOnDemand({
+			kind: "syncing",
+			text: "Syncing…",
+			detail: "1/5 · note.md",
+			updatedAt: Date.now(),
+			progress: { current: 1, total: 5, path: "note.md" },
+		});
+		assert.equal(globalThis.__testActiveNotices.length, 1);
 		controller.onStatusChange({
 			kind: "success",
 			text: "Sync complete",
@@ -1830,21 +1844,8 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			updatedAt: Date.now(),
 		});
 		assert.equal(globalThis.__testActiveNotices[0].noticeEl.hasClass("is-success"), true);
-
 		controller.closeNotice();
 		assert.equal(globalThis.__testActiveNotices[0].hidden, true);
-
-		// 4. mode = "never"
-		settings.syncProgressNoticeMode = "never";
-		controller.onStatusChange({
-			kind: "syncing",
-			text: "Syncing…",
-			detail: "1/1 · note.md",
-			updatedAt: Date.now(),
-			isManual: true,
-			progress: { current: 1, total: 1, path: "note.md" },
-		});
-		assert.equal(globalThis.__testActiveNotices.length, 1, "No new notice when mode is never");
 
 		// Test FloatingSyncIndicator
 		settings.showFloatingSyncIndicator = true;
@@ -1876,8 +1877,9 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			"Indicator remains hidden during quiet background scan",
 		);
 		assert.equal(pill.hasClass("is-syncing"), false);
+		const [initialShowTimer] = [...indicatorTimers].find(([, timer]) => timer.ms === 300);
 
-		// Manual sync: should become visible
+		// Manual sync becomes visible after the anti-flash delay.
 		indicator.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
@@ -1886,7 +1888,23 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			isManual: true,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		assert.equal(pill.hasClass("is-hidden"), false, "Pill is visible for manual sync");
+		indicator.onStatusChange({
+			kind: "syncing",
+			text: "Downloading…",
+			detail: "1/2 · note.md",
+			updatedAt: Date.now(),
+			isManual: true,
+			progress: { current: 1, total: 2, path: "note.md", phase: "transferring" },
+		});
+		assert.equal(
+			[...indicatorTimers].find(([, timer]) => timer.ms === 300)?.[0],
+			initialShowTimer,
+			"Progress updates do not restart the anti-flash delay",
+		);
+		const showTimer = indicatorTimers.get(initialShowTimer);
+		indicatorTimers.delete(initialShowTimer);
+		showTimer.fn();
+		assert.equal(pill.hasClass("is-hidden"), false, "Pill is visible after 300 ms");
 		assert.equal(pill.hasClass("is-syncing"), true);
 
 		// Success
@@ -1910,11 +1928,14 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 
 		indicator.onStatusChange({
 			kind: "warning",
-			text: "Confirmation needed",
-			detail: "Review local deletions.",
+			text: "2 conflict(s) to review",
+			detail: "Conflict copies were saved in the vault.",
 			updatedAt: Date.now(),
 		});
 		assert.equal(pill.hasClass("is-warning"), true);
+		const visibleStatus = pill.children[0].children[1].children[0];
+		assert.equal(visibleStatus.children[0].textContent, "2 conflict(s) to review");
+		assert.equal(visibleStatus.children[1].textContent, "Review");
 		assert.equal(indicator.hideTimer, null, "Actionable warning stays visible");
 
 		// Cleanup
@@ -1925,6 +1946,8 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		delete globalThis.__testActiveNotices;
 		delete globalThis.document;
 		delete globalThis.window;
+		globalThis.setTimeout = originalSetTimeout;
+		globalThis.clearTimeout = originalClearTimeout;
 		await rm(dir, { recursive: true, force: true });
 	}
 });

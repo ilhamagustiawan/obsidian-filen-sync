@@ -1,5 +1,4 @@
 import { Notice, setIcon } from "obsidian";
-import type { FilenSyncSettings } from "../settings";
 import type { StatusBarState } from "../sync/coordinator";
 
 const formatFilename = (path: string): string => {
@@ -20,62 +19,39 @@ export class SyncNoticeController {
 	private fileEl: HTMLElement | null = null;
 	private dismissTimer: number | null = null;
 	private wasManual = false;
+	private onDemand = false;
 
 	constructor(
-		private readonly getSettings: () => FilenSyncSettings,
 		private readonly onOpenLogs: () => void,
+		private readonly getLastSyncSummary: () => string,
 	) {}
 
 	onStatusChange(state: StatusBarState): void {
-		const settings = this.getSettings();
-		const mode = settings.syncProgressNoticeMode;
-
-		if (mode === "never") {
+		if (!this.onDemand) {
 			this.closeNotice();
 			return;
 		}
-
-		if (state.kind === "syncing") {
-			if (state.isManual) {
-				this.wasManual = true;
-			}
-
-			const isManual = state.isManual ?? this.wasManual;
-			const total = state.progress?.total ?? 0;
-			const hasTransfers = total > 0;
-
-			let shouldShow = false;
-			if (mode === "always") {
-				shouldShow = true;
-			} else if (mode === "manual_only") {
-				shouldShow = isManual;
-			} else if (mode === "transfers_only") {
-				shouldShow = isManual || hasTransfers;
-			}
-
-			if (!shouldShow) return;
-
-			this.ensureNoticeCreated();
-			this.renderSyncing(state);
-			return;
-		}
-
-		// When not syncing, if a notice was active, show the terminal state
-		if (this.activeNotice !== null) {
-			if (state.kind === "success") {
-				this.renderSuccess(state);
-			} else if (state.kind === "error") {
-				this.renderError(state);
-			} else if (state.kind === "warning") {
-				this.renderWarning(state);
-			} else {
-				this.closeNotice();
-			}
-			this.wasManual = false;
-		}
+		this.renderState(state);
+		this.appendLastSyncSummary();
+		if (state.kind !== "syncing") this.onDemand = false;
 	}
 
 	showOnDemand(state: StatusBarState): void {
+		this.onDemand = true;
+		this.ensureNoticeCreated();
+		this.renderState(state);
+		this.appendLastSyncSummary();
+		if (state.kind !== "syncing") this.onDemand = false;
+	}
+
+	private appendLastSyncSummary(): void {
+		if (!this.countEl) return;
+		this.countEl.setText(
+			[this.countEl.textContent, this.getLastSyncSummary()].filter(Boolean).join(" · "),
+		);
+	}
+
+	private renderState(state: StatusBarState): void {
 		this.ensureNoticeCreated();
 		if (state.kind === "syncing") {
 			this.renderSyncing(state);
@@ -85,6 +61,8 @@ export class SyncNoticeController {
 			this.renderError(state);
 		} else if (state.kind === "warning") {
 			this.renderWarning(state);
+		} else {
+			this.renderReady(state);
 		}
 	}
 
@@ -102,6 +80,7 @@ export class SyncNoticeController {
 		this.countEl = null;
 		this.fileEl = null;
 		this.wasManual = false;
+		this.onDemand = false;
 	}
 
 	private clearDismissTimer(): void {
@@ -157,6 +136,27 @@ export class SyncNoticeController {
 		this.noticeEl.addClass("filen-sync-progress-notice");
 	}
 
+	private renderReady(state: StatusBarState): void {
+		if (
+			!this.noticeEl ||
+			!this.iconSpan ||
+			!this.titleEl ||
+			!this.badgeEl ||
+			!this.countEl ||
+			!this.fileEl
+		)
+			return;
+		this.clearDismissTimer();
+		this.noticeEl.removeClass("is-syncing", "is-error", "is-warning");
+		this.noticeEl.addClass("is-success");
+		setIcon(this.iconSpan, "refresh-cw");
+		this.iconSpan.removeClass("filen-notice-spin");
+		this.titleEl.setText("Filen Sync details");
+		this.badgeEl.setText("Ready");
+		this.countEl.setText(state.detail || state.text);
+		this.fileEl.setText("");
+	}
+
 	private renderSyncing(state: StatusBarState): void {
 		this.clearDismissTimer();
 		if (
@@ -179,7 +179,7 @@ export class SyncNoticeController {
 
 		this.titleEl.setText("Filen Sync");
 
-		const total = state.progress?.total ?? 0;
+		const total = state.progress?.phase === "transferring" ? state.progress.total : 0;
 		const current = state.progress?.current ?? 0;
 		const path = state.progress?.path ?? "";
 
@@ -236,7 +236,7 @@ export class SyncNoticeController {
 		this.fileEl.setText("");
 		this.fileEl.removeAttribute("title");
 
-		this.scheduleDismiss(2800);
+		if (!this.onDemand) this.scheduleDismiss(2800);
 	}
 
 	private renderError(state: StatusBarState): void {
@@ -276,7 +276,7 @@ export class SyncNoticeController {
 			this.onOpenLogs();
 		});
 
-		this.scheduleDismiss(6000);
+		if (!this.onDemand) this.scheduleDismiss(6000);
 	}
 
 	private renderWarning(state: StatusBarState): void {
@@ -307,6 +307,6 @@ export class SyncNoticeController {
 		this.fileEl.setText("");
 		this.fileEl.removeAttribute("title");
 
-		this.scheduleDismiss(3500);
+		if (!this.onDemand) this.scheduleDismiss(3500);
 	}
 }

@@ -2,6 +2,7 @@ import type { App } from "obsidian";
 import { setIcon } from "obsidian";
 import type { FilenSyncSettings } from "../settings";
 import type { StatusBarState } from "../sync/coordinator";
+import { formatSyncProgress } from "./sync-presentation";
 
 const formatFilename = (path: string): string => {
 	if (!path) return "";
@@ -19,6 +20,8 @@ export class FloatingSyncIndicator {
 	private countEl: HTMLElement | null = null;
 	private fileEl: HTMLElement | null = null;
 	private hideTimer: number | null = null;
+	private showTimer: number | null = null;
+	private latestState: StatusBarState | null = null;
 	private isVisible = false;
 	private wasManual = false;
 
@@ -38,6 +41,9 @@ export class FloatingSyncIndicator {
 		const parent = this.app.workspace.containerEl ?? document.body;
 		const pill = parent.createDiv({ cls: "filen-floating-pill is-hidden" });
 		this.pillEl = pill;
+		pill.setAttr("role", "button");
+		pill.setAttr("tabindex", "0");
+		pill.setAttr("aria-live", "polite");
 
 		const content = pill.createDiv({ cls: "filen-floating-pill-content" });
 		this.iconSpan = content.createSpan({ cls: "filen-floating-pill-icon" });
@@ -60,68 +66,75 @@ export class FloatingSyncIndicator {
 			e.stopPropagation();
 			this.onOpenMenu(e);
 		});
+		pill.addEventListener("keydown", (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			event.preventDefault();
+			event.stopPropagation();
+			const bounds = pill.getBoundingClientRect();
+			this.onOpenMenu(new MouseEvent("click", { clientX: bounds.left, clientY: bounds.top }));
+		});
 	}
 
 	onStatusChange(state: StatusBarState): void {
-		const settings = this.getSettings();
-		if (!settings.showFloatingSyncIndicator) {
+		if (!this.getSettings().showFloatingSyncIndicator) {
 			this.hideImmediate();
 			return;
 		}
-
-		if (this.pillEl === null) {
-			this.initialize();
-		}
+		if (this.pillEl === null) this.initialize();
+		this.latestState = state;
 
 		if (state.kind === "syncing") {
-			if (state.isManual) {
-				this.wasManual = true;
-			}
-
-			const isManual = state.isManual ?? this.wasManual;
-			const total = state.progress?.total ?? 0;
-			const hasTransfers = total > 0;
-
-			// Show if manual sync or if transfers are occurring
-			if (!isManual && !hasTransfers) {
+			if (state.isManual) this.wasManual = true;
+			this.clearHideTimer();
+			if (this.isVisible) {
+				this.renderSyncing(state);
 				return;
 			}
-
-			this.clearHideTimer();
-			this.renderSyncing(state);
-			this.show();
+			if (this.showTimer === null) {
+				this.showTimer = window.setTimeout(() => {
+					this.showTimer = null;
+					if (this.latestState?.kind !== "syncing") return;
+					this.renderSyncing(this.latestState);
+					this.show();
+				}, 300);
+			}
 			return;
 		}
 
+		this.clearShowTimer();
 		if (state.kind === "pending") {
 			this.clearHideTimer();
 			this.renderPending(state);
+			this.setAccessibilityLabel(state);
 			this.show();
+			this.wasManual = false;
 			return;
 		}
-
-		if (this.isVisible) {
-			if (state.kind === "success") {
-				this.renderSuccess(state);
-			} else if (state.kind === "error") {
-				this.renderError(state);
-			} else if (state.kind === "warning") {
-				this.renderWarning(state);
-			} else {
-				this.scheduleHide(1000);
-			}
+		if (state.kind === "error" || state.kind === "warning") {
+			this.clearHideTimer();
+			if (state.kind === "error") this.renderError(state);
+			else this.renderWarning(state);
+			this.setAccessibilityLabel(state);
+			this.show();
 			this.wasManual = false;
+			return;
 		}
+		if (state.kind === "success" && (this.isVisible || this.wasManual)) {
+			this.renderSuccess(state);
+			this.setAccessibilityLabel(state);
+			this.show();
+		} else if (this.isVisible) {
+			this.scheduleHide(1000);
+		}
+		this.wasManual = false;
 	}
 
-	refreshVisibility(): void {
-		const settings = this.getSettings();
-		if (!settings.showFloatingSyncIndicator) {
-			this.hideImmediate();
-		}
+	refreshVisibility(enabled = this.getSettings().showFloatingSyncIndicator): void {
+		if (!enabled) this.hideImmediate();
 	}
 
 	destroy(): void {
+		this.clearShowTimer();
 		this.clearHideTimer();
 		if (this.pillEl) {
 			this.pillEl.remove();
@@ -134,7 +147,6 @@ export class FloatingSyncIndicator {
 		this.countEl = null;
 		this.fileEl = null;
 		this.isVisible = false;
-		this.wasManual = false;
 	}
 
 	private show(): void {
@@ -144,12 +156,19 @@ export class FloatingSyncIndicator {
 	}
 
 	private hideImmediate(): void {
+		this.clearShowTimer();
 		this.clearHideTimer();
 		if (this.pillEl) {
 			this.pillEl.addClass("is-hidden");
 		}
 		this.isVisible = false;
-		this.wasManual = false;
+	}
+
+	private clearShowTimer(): void {
+		if (this.showTimer !== null) {
+			window.clearTimeout(this.showTimer);
+			this.showTimer = null;
+		}
 	}
 
 	private clearHideTimer(): void {
@@ -185,34 +204,32 @@ export class FloatingSyncIndicator {
 
 		setIcon(this.iconSpan, "refresh-cw");
 
-		const total = state.progress?.total ?? 0;
-		const current = state.progress?.current ?? 0;
-		const path = state.progress?.path ?? "";
+		const progress = state.progress;
+		const total = progress?.phase === "transferring" ? (progress.total ?? 0) : 0;
+		const current = progress?.current ?? 0;
+		const path = progress?.path ?? "";
+		const label = progress?.phase ? formatSyncProgress(progress) : state.text;
+		this.titleEl.setText(label);
+		this.countEl.setText(path ? formatFilename(path) : state.detail);
+		this.fileEl.setText("");
+		if (path) this.fileEl.setAttr("title", path);
+		else this.fileEl.removeAttribute("title");
 
 		if (total > 0) {
-			const pct = Math.min(100, Math.max(0, Math.round((current / total) * 100)));
-			this.titleEl.setText("Filen Sync");
-			this.pctEl.setText(`${pct}%`);
+			const boundedCurrent = Math.min(current, total);
+			const pct = Math.round((boundedCurrent / total) * 100);
+			this.pctEl.setText(`${boundedCurrent}/${total}`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
-			this.countEl.setText(
-				`${current} of ${total} changes${state.progress?.totalBytes === undefined ? "" : ` · ${((state.progress.completedBytes ?? 0) / 1048576).toFixed(1)}/${(state.progress.totalBytes / 1048576).toFixed(1)} MB`}`,
-			);
 		} else {
-			this.titleEl.setText("Filen Sync");
 			this.pctEl.setText("");
 			this.barFill.addClass("is-indeterminate");
 			this.barFill.style.width = "40%";
-			this.countEl.setText(state.text);
 		}
-
-		if (path) {
-			this.fileEl.setText(formatFilename(path));
-			this.fileEl.setAttr("title", path);
-		} else {
-			this.fileEl.setText(state.detail && state.detail !== "Starting..." ? state.detail : "");
-			this.fileEl.removeAttribute("title");
-		}
+		this.pillEl.setAttr(
+			"aria-label",
+			`${label}${path ? `: ${path}` : ""}. Click for sync options.`,
+		);
 	}
 
 	private renderSuccess(state: StatusBarState): void {
@@ -293,8 +310,15 @@ export class FloatingSyncIndicator {
 
 		setIcon(this.iconSpan, "pause");
 
-		this.titleEl.setText("Filen Sync");
-		this.pctEl.setText("Paused");
+		this.titleEl.setText(state.text);
+		const warningLabel = state.text.toLowerCase();
+		this.pctEl.setText(
+			/confirmation|conflict|review/u.test(warningLabel)
+				? "Review"
+				: warningLabel.includes("offline")
+					? "Offline"
+					: "Paused",
+		);
 		this.barFill.removeClass("is-indeterminate");
 		this.barFill.style.width = "100%";
 
@@ -302,6 +326,13 @@ export class FloatingSyncIndicator {
 		this.fileEl.setText("");
 
 		this.clearHideTimer();
+	}
+
+	private setAccessibilityLabel(state: StatusBarState): void {
+		this.pillEl?.setAttr(
+			"aria-label",
+			`${state.text}${state.detail ? `: ${state.detail}` : ""}. Select for sync options.`,
+		);
 	}
 
 	private renderPending(state: StatusBarState): void {

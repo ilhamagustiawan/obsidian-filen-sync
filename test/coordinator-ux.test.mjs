@@ -33,8 +33,9 @@ async function fixture(run) {
 		const stub = join(dir, "obsidian.mjs");
 		await writeFile(
 			stub,
-			"export class TFile {} export class TFolder {} export class Notice {} export const normalizePath=p=>p;",
+			"export class TFile {} export class TFolder {} export class Notice { constructor(message) { (globalThis.__coordinatorNotices ??= []).push(message); } } export const normalizePath=p=>p;",
 		);
+		globalThis.__coordinatorNotices = [];
 		const outfile = join(dir, "coordinator.mjs");
 		await build({
 			stdin: {
@@ -99,9 +100,17 @@ async function fixture(run) {
 			close: () => {},
 		};
 		coordinator.setupAutoSync(() => true);
-		await run({ coordinator, events, states, file, timers });
+		await run({
+			coordinator,
+			events,
+			states,
+			file,
+			timers,
+			notices: globalThis.__coordinatorNotices,
+		});
 	} finally {
 		coordinator?.close();
+		delete globalThis.__coordinatorNotices;
 		globalThis.window = oldWindow;
 		globalThis.document = oldDocument;
 		await rm(dir, { recursive: true, force: true });
@@ -153,4 +162,31 @@ test("success adds no cooldown; later edit waits only for debounce", () =>
 		events.get("modify")(file);
 		assert.ok([...timers.values()].some((t) => t.ms === 2000));
 		assert.ok([...timers.values()].every((t) => t.ms < 30000));
+	}));
+test("successful syncs are timestampable without success-toast duplication", () =>
+	fixture(async ({ coordinator, states, notices }) => {
+		const result = await coordinator.runSync("Sync", "both", { isManual: true });
+		assert.equal(result.kind, "up-to-date");
+		assert.equal(states.at(-1).syncCompleted, true);
+		assert.deepEqual(notices, []);
+
+		coordinator.syncEngine.sync = async () => ({ applied: 1, conflicts: 1 });
+		await coordinator.runSync("Sync", "both", { isManual: true });
+		assert.equal(states.at(-1).syncCompleted, true);
+		assert.equal(notices.length, 1, "conflicts remain actionable");
+	}));
+test("failed and skipped attempts do not mark a successful completion", () =>
+	fixture(async ({ coordinator, states }) => {
+		coordinator.syncEngine.sync = async () => {
+			throw new Error("offline");
+		};
+		await coordinator.runSync("Sync", "both", { isManual: true });
+		assert.equal(states.at(-1).kind, "error");
+		assert.notEqual(states.at(-1).syncCompleted, true);
+
+		coordinator.isSyncing = true;
+		const stateCount = states.length;
+		const result = await coordinator.runSync("Sync", "both", { isManual: true });
+		assert.equal(result.kind, "skipped");
+		assert.equal(states.length, stateCount);
 	}));
