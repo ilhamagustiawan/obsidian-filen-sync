@@ -243,9 +243,9 @@
 /* Floating sync pill */
 .filen-floating-pill {
 	position: fixed;
-	bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-	left: 50%;
-	transform: translateX(-50%) translateY(0);
+	top: calc(16px + env(safe-area-inset-top, 0px));
+	right: calc(16px + env(safe-area-inset-right, 0px));
+	transform: translateY(0);
 	z-index: var(--layer-notice, 60);
 	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
@@ -254,7 +254,7 @@
 	padding: 8px 14px;
 	min-width: 0;
 	max-width: calc(
-		100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)
+		100vw - 32px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)
 	);
 	box-sizing: border-box;
 	cursor: pointer;
@@ -274,7 +274,7 @@
 
 .filen-floating-pill.is-hidden {
 	opacity: 0;
-	transform: translateX(-50%) translateY(20px);
+	transform: translateY(-8px);
 	pointer-events: none;
 }
 
