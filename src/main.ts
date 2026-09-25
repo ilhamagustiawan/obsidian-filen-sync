@@ -725,6 +725,7 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 
 		this.forceSyncInProgress = true;
+		this.coordinator.recordSyncStart();
 		this.setStatus("Syncing…", "syncing", `Preparing to upload ${file.path}...`);
 		try {
 			await this.prepareSyncTarget(true);
@@ -1149,12 +1150,6 @@ export default class FilenSyncPlugin extends Plugin {
 			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			return;
 		}
-		if (this.statusBarState.kind === "pending") {
-			const tooltip = `Filen: ${this.statusBarState.text}\nClick to sync now`;
-			setTooltip(this.syncRibbonIconEl, tooltip);
-			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			return;
-		}
 
 		const tooltip =
 			this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0
@@ -1255,24 +1250,15 @@ export default class FilenSyncPlugin extends Plugin {
 			return;
 		}
 
-		if (this.statusBarState.kind === "warning" || this.statusBarState.kind === "pending") {
+		if (this.statusBarState.kind === "warning") {
 			const retryAt = this.coordinator.retryAt;
 			const retry =
 				retryAt !== null
 					? `Retry in ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))}s`
 					: null;
-			setIcon(
-				this.statusBarIconEl,
-				this.statusBarState.kind === "pending"
-					? "cloud-upload"
-					: retry
-						? "clock"
-						: "alert-circle",
-			);
+			setIcon(this.statusBarIconEl, retry ? "clock" : "alert-circle");
 			this.statusBarTextEl.setText(`Filen: ${retry ?? this.statusBarState.text}`);
-			this.statusBarItemEl.addClass(
-				this.statusBarState.kind === "pending" ? "is-pending" : "is-warning",
-			);
+			this.statusBarItemEl.addClass("is-warning");
 			const tooltip = this.buildStatusTooltip();
 			setTooltip(this.statusBarItemEl, tooltip);
 			this.statusBarItemEl.setAttr("aria-label", tooltip);
@@ -1373,9 +1359,11 @@ export default class FilenSyncPlugin extends Plugin {
 			return lines.join("\n");
 		}
 
-		if (this.statusBarState.kind === "warning" || this.statusBarState.kind === "pending") {
+		if (this.statusBarState.kind === "warning") {
 			lines.push(this.statusBarState.text, this.statusBarState.detail);
-			lines.push(`Pending local changes: ${this.coordinator.pendingCount}`);
+			if (this.coordinator.pendingCount > 0) {
+				lines.push(`Pending local changes: ${this.coordinator.pendingCount}`);
+			}
 			return lines.join("\n");
 		}
 
@@ -1395,7 +1383,9 @@ export default class FilenSyncPlugin extends Plugin {
 		if (this.settings.syncPaused) return "paused";
 		const parts: string[] = [];
 		if (this.settings.syncOnSave)
-			parts.push(`on save (${this.settings.syncOnSaveDelaySeconds}s delay)`);
+			parts.push(
+				`on save (${this.settings.syncOnSaveDelaySeconds}s delay, min ${this.settings.minimumAutoSyncIntervalSeconds}s gap)`,
+			);
 		if (this.settings.syncIntervalMinutes > 0)
 			parts.push(`every ${this.settings.syncIntervalMinutes} min`);
 		if (this.settings.syncStartupDelaySeconds > 0)

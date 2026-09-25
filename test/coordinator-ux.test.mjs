@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 async function fixture(run) {
+	await mkdir(resolve("tmp"), { recursive: true });
 	const dir = await mkdtemp(resolve("tmp/coordinator-ux-"));
 	const oldWindow = globalThis.window;
 	const oldDocument = globalThis.document;
@@ -63,6 +64,7 @@ async function fixture(run) {
 		const settings = {
 			syncOnSave: true,
 			syncOnSaveDelaySeconds: 2,
+			minimumAutoSyncIntervalSeconds: 10,
 			syncPaused: false,
 			syncIntervalMinutes: 3,
 			syncStartupDelaySeconds: 0,
@@ -116,17 +118,18 @@ async function fixture(run) {
 		await rm(dir, { recursive: true, force: true });
 	}
 }
-test("pending changes deduplicate, show immediately, and clear after success", () =>
+test("pending changes deduplicate, keep status neutral idle, and clear after success", () =>
 	fixture(async ({ coordinator, events, states, file }) => {
 		events.get("modify")(file);
 		events.get("modify")(file);
 		assert.equal(coordinator.pendingCount, 1);
-		assert.equal(states.at(-1).kind, "pending");
+		assert.equal(states.at(-1).kind, "idle");
+		assert.equal(states.at(-1).text, "Ready");
 		await coordinator.runSync("Sync", "both", { isManual: true });
 		assert.equal(coordinator.pendingCount, 0);
 		assert.equal(states.at(-1).kind, "success");
 	}));
-test("edit during sync stays queued and cannot announce success", () =>
+test("edit during sync stays queued and leaves status in neutral idle", () =>
 	fixture(async ({ coordinator, events, states, file }) => {
 		events.get("modify")(file);
 		coordinator.syncEngine.sync = async () => {
@@ -135,7 +138,7 @@ test("edit during sync stays queued and cannot announce success", () =>
 		};
 		await coordinator.runSync("Auto-sync", "both", { silent: true, autoSync: true });
 		assert.equal(coordinator.pendingCount, 1);
-		assert.equal(states.at(-1).kind, "pending");
+		assert.equal(states.at(-1).kind, "idle");
 	}));
 test("confirmation warning survives edits and stops automatic retries", () =>
 	fixture(async ({ coordinator, events, states, file }) => {
@@ -156,12 +159,45 @@ test("confirmation warning survives edits and stops automatic retries", () =>
 		await coordinator.runSync("Sync", "both", { isManual: true });
 		assert.equal(states.at(-1).kind, "success");
 	}));
-test("success adds no cooldown; later edit waits only for debounce", () =>
+test("minimumAutoSyncIntervalSeconds enforces minimum gap, while manual sync bypasses it", () =>
 	fixture(async ({ coordinator, events, file, timers }) => {
 		await coordinator.runSync("Auto-sync", "both", { silent: true, autoSync: true });
 		events.get("modify")(file);
+		// Cooldown is 10s default; edit immediately after sync should wait ~10s, not just 2s debounce
+		const scheduledMs = [...timers.values()].map((t) => t.ms);
+		assert.ok(
+			scheduledMs.some((ms) => ms >= 8000 && ms <= 10000),
+			`expected ~10s cooldown, got: ${scheduledMs.join(", ")}`,
+		);
+
+		// Manual sync bypasses the cooldown immediately
+		const manualResult = await coordinator.runSync("Sync", "both", { isManual: true });
+		assert.equal(manualResult.kind, "up-to-date");
+	}));
+test("repeated saves reset edit debounce when cooldown has expired", () =>
+	fixture(async ({ coordinator, events, file, timers }) => {
+		// Simulate last sync being long in the past (cooldown expired)
+		coordinator.lastSyncStartAt = Date.now() - 30_000;
+		coordinator.nextAutoSyncAllowedAt = 0;
+		events.get("modify")(file);
 		assert.ok([...timers.values()].some((t) => t.ms === 2000));
-		assert.ok([...timers.values()].every((t) => t.ms < 30000));
+		timers.clear();
+		events.get("modify")(file);
+		assert.ok([...timers.values()].some((t) => t.ms === 2000));
+	}));
+test("failure backoff wins when longer than normal minimum gap", () =>
+	fixture(async ({ coordinator, events, file, timers }) => {
+		coordinator.syncEngine.sync = async () => {
+			throw new Error("network connection failed");
+		};
+		await coordinator.runSync("Auto-sync", "both", { silent: true, autoSync: true });
+		assert.ok(coordinator.retryAt !== null, "retryAt should be set after failure");
+		events.get("modify")(file);
+		const scheduledMs = [...timers.values()].map((t) => t.ms);
+		assert.ok(
+			scheduledMs.some((ms) => ms >= 25000),
+			`expected backoff wait >= 25s, got: ${scheduledMs.join(", ")}`,
+		);
 	}));
 test("successful syncs are timestampable without success-toast duplication", () =>
 	fixture(async ({ coordinator, states, notices }) => {

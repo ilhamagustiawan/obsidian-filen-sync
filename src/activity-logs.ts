@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import { Modal, Notice } from "obsidian";
+import { Modal } from "obsidian";
 
 export const MAX_ACTIVITY_LOG_ENTRIES = 500;
 
@@ -10,6 +10,29 @@ export type ActivityLogEntry = {
 	message: string;
 	kind: ActivityLogKind;
 };
+
+export type ActivityLogFilter = "all" | "activity" | "issues";
+
+export const filterActivityLogs = (
+	entries: readonly ActivityLogEntry[],
+	filter: ActivityLogFilter = "all",
+	search = "",
+): ActivityLogEntry[] => {
+	const query = search.trim().toLowerCase();
+	return [...entries]
+		.filter((entry) => {
+			const isIssue = entry.kind !== "general";
+			return (
+				(filter === "all" || (filter === "issues" ? isIssue : !isIssue)) &&
+				(entry.message.toLowerCase().includes(query) ||
+					formatActivityLogTimestamp(entry.at).toLowerCase().includes(query))
+			);
+		})
+		.sort((a, b) => b.at - a.at);
+};
+
+export const summarizeActivityLogs = (visible: number, total: number): string =>
+	`Showing ${visible} of ${total}`;
 
 export type ActivityLogHost = {
 	getActivityLogs(): readonly ActivityLogEntry[];
@@ -28,7 +51,7 @@ export const formatActivityLogTimestamp = (epochMs: number): string => {
 	const day = pad2(date.getDate());
 	const hours = pad2(date.getHours());
 	const minutes = pad2(date.getMinutes());
-	return `${year}-${month}-${day} ${hours}:${minutes}`;
+	return `${year}-${month}-${day} ${hours}:${minutes}:${pad2(date.getSeconds())}`;
 };
 
 export const readActivityLogs = (value: unknown): ActivityLogEntry[] => {
@@ -79,6 +102,9 @@ export const inferActivityLogKind = (message: string): ActivityLogKind => {
 export class ActivityLogModal extends Modal {
 	private unsubscribe: (() => void) | null = null;
 	private listEl: HTMLElement | null = null;
+	private summaryEl: HTMLElement | null = null;
+	private filter: ActivityLogFilter = "all";
+	private search = "";
 
 	constructor(
 		app: App,
@@ -105,15 +131,47 @@ export class ActivityLogModal extends Modal {
 		});
 
 		const actions = this.contentEl.createDiv({ cls: "filen-sync-activity-log-actions" });
-		const copyButton = actions.createEl("button", { text: "Copy logs" });
-		copyButton.addEventListener("click", () => {
-			void this.copyLogs();
-		});
-
 		const clearButton = actions.createEl("button", { text: "Clear logs" });
 		clearButton.addClass("mod-warning");
 		clearButton.addEventListener("click", () => {
-			void this.clearLogs();
+			void this.host.clearActivityLogs();
+		});
+		const filters = this.contentEl.createDiv({
+			cls: "filen-sync-activity-log-filters",
+			attr: { role: "group", "aria-label": "Filter activity logs" },
+		});
+		for (const [value, label] of [
+			["all", "All"],
+			["activity", "Activity"],
+			["issues", "Issues"],
+		] as const) {
+			const button = filters.createEl("button", {
+				text: label,
+				cls: "filen-sync-activity-log-filter",
+			});
+			button.setAttr("aria-pressed", String(this.filter === value));
+			if (this.filter === value) button.addClass("is-active");
+			button.addEventListener("click", () => {
+				this.filter = value;
+				this.renderLogs();
+			});
+		}
+		const search = this.contentEl.createDiv({ cls: "filen-sync-activity-log-search" });
+		const input = search.createEl("input", {
+			attr: {
+				type: "search",
+				placeholder: "Search activity",
+				"aria-label": "Search activity logs",
+			},
+		});
+		input.value = this.search;
+		input.addEventListener("input", () => {
+			this.search = input.value;
+			this.renderLogs();
+		});
+		this.summaryEl = this.contentEl.createDiv({
+			cls: "filen-sync-activity-log-summary",
+			attr: { "aria-live": "polite" },
 		});
 
 		this.listEl = this.contentEl.createDiv({ cls: "filen-sync-activity-log-list" });
@@ -125,106 +183,41 @@ export class ActivityLogModal extends Modal {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.listEl = null;
+		this.summaryEl = null;
 		this.contentEl.empty();
 	}
 
 	private renderLogs(): void {
 		if (this.listEl === null) return;
 		this.listEl.empty();
-		const logs = [...this.host.getActivityLogs()].reverse();
-		if (logs.length === 0) {
+		const allLogs = this.host.getActivityLogs();
+		const logs = filterActivityLogs(allLogs, this.filter, this.search);
+		this.summaryEl?.setText(summarizeActivityLogs(logs.length, allLogs.length));
+		if (allLogs.length === 0 || logs.length === 0) {
 			this.listEl.createDiv({
 				cls: "filen-sync-activity-log-empty",
-				text: "No activity yet.",
+				text:
+					allLogs.length === 0 ? "No activity yet." : "No activity matches your filters.",
 			});
 			return;
 		}
 
 		for (const entry of logs) {
-			this.listEl.createDiv({
-				cls: "filen-sync-activity-log-line",
-				text: formatActivityLogEntry(entry),
+			const row = this.listEl.createDiv({
+				cls: `filen-sync-activity-log-row is-${entry.kind}`,
 			});
+			const meta = row.createDiv({ cls: "filen-sync-activity-log-row-meta" });
+			meta.createEl("time", {
+				text: formatActivityLogTimestamp(entry.at),
+				attr: { datetime: new Date(entry.at).toISOString(), "aria-label": "Timestamp" },
+				cls: "filen-sync-activity-log-time",
+			});
+			meta.createSpan({
+				text: entry.kind,
+				cls: `filen-sync-activity-log-kind is-${entry.kind}`,
+			});
+			row.createDiv({ text: entry.message, cls: "filen-sync-activity-log-message" });
 		}
-	}
-
-	private async copyLogs(): Promise<void> {
-		const text = this.host.getActivityLogs().map(formatActivityLogEntry).join("\n");
-		if (text.length === 0) {
-			new Notice("No activity logs to copy.");
-			return;
-		}
-
-		try {
-			await navigator.clipboard.writeText(text);
-			new Notice("Activity logs copied.");
-		} catch (error) {
-			console.error("Filen Sync: failed to copy activity logs", error);
-			new Notice("Could not copy activity logs.");
-		}
-	}
-
-	private clearLogs(): void {
-		void confirmAction(
-			this.app,
-			"Clear activity logs?",
-			"This removes recent sync activity from plugin settings.",
-			"Clear logs",
-		).then(async (confirmed) => {
-			if (!confirmed) return;
-			await this.host.clearActivityLogs();
-			new Notice("Activity logs cleared.");
-		});
-	}
-}
-
-const confirmAction = (
-	app: App,
-	title: string,
-	message: string,
-	confirmText: string,
-): Promise<boolean> =>
-	new Promise((resolve) => {
-		new ConfirmModal(app, title, message, confirmText, resolve).open();
-	});
-
-class ConfirmModal extends Modal {
-	private resolved = false;
-
-	constructor(
-		app: App,
-		private readonly title: string,
-		private readonly message: string,
-		private readonly confirmText: string,
-		private readonly resolve: (confirmed: boolean) => void,
-	) {
-		super(app);
-	}
-
-	onOpen(): void {
-		this.contentEl.createEl("h2", { text: this.title });
-		this.contentEl.createEl("p", { text: this.message });
-		const btns = this.contentEl.createDiv({ cls: "modal-button-container" });
-		const cancel = btns.createEl("button", { text: "Cancel" });
-		cancel.addEventListener("click", () => {
-			this.finish(false);
-		});
-		const confirm = btns.createEl("button", { text: this.confirmText });
-		confirm.addClass("mod-warning");
-		confirm.addEventListener("click", () => {
-			this.finish(true);
-		});
-	}
-
-	onClose(): void {
-		if (!this.resolved) this.resolve(false);
-		this.contentEl.empty();
-	}
-
-	private finish(confirmed: boolean): void {
-		this.resolved = true;
-		this.resolve(confirmed);
-		this.close();
 	}
 }
 

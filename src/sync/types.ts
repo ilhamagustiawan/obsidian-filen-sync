@@ -72,6 +72,7 @@ export type SyncProgress = {
 
 export type SyncActivityEvent =
 	| { type: "connected" }
+	| { type: "diagnostic"; message: string }
 	| { type: "operation-planned"; operation: SyncOperation; path: string; detail: string }
 	| { type: "operation-start"; operation: SyncOperation; path: string; detail: string }
 	| { type: "operation-complete"; operation: SyncOperation; path: string; detail: string }

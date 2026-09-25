@@ -135,7 +135,7 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 
 When visible, the status bar item reflects real-time sync state and provides quick access to common actions:
 
-- **Pending**: Local edits show a pending count immediately; last successful sync remains available in the tooltip and menu.
+- **Idle / Queued changes**: Shows a quiet, neutral idle status when ready or when local changes are queued for auto-sync. The opened sync menu reports the exact pending change count without noisy indicator flashing outside the menu.
 - **Idle**: Uses a compact Obsidian Sync-style icon by default, or icon and text when selected in settings.
 - **Syncing**: Shows scan/planning phases and completed changed-file counts only when a valid transfer total is known; reaching the transfer total does not imply the full sync has finished.
 - **Paused / Offline**: Shows warning badges when auto-sync is paused or the device is offline.
@@ -166,12 +166,14 @@ The version history modal allows inspecting and recovering previous file revisio
 
 ### Activity logs
 
-The activity log modal displays recent events (up to 500 entries) categorized by type:
+The activity log modal displays recent events (up to 500 entries) in a structured, diagnostic view:
 
-- Connection and network status
-- Scanned, uploaded, downloaded, and deleted files
-- Conflict warnings and resolution notices
-- Buttons to copy logs to the clipboard or clear the log history
+- **Timestamps & badges**: Clear local timestamps (`YYYY-MM-DD HH:mm:ss`) with category badges (**General**, **Error**, **Conflict**, **Skipped**, **Account**, **Network**).
+- **Fast filtering**: Quickly toggle between **All**, **Activity** (routine operations and successful transfers), and **Issues** (conflicts, errors, skipped files, and network/account notices).
+- **Instant search**: Case-insensitive search filter by file path, event message, or timestamp.
+- **Summary**: Live "Showing N of M" counter indicating visible vs total logged entries.
+- **Immediate clear**: Clear log history directly with the **Clear logs** button.
+- **Noise reduction**: Clean signal without duplicate lifecycle spam — raw edit events, routine connection success, and automatic no-op sync passes are omitted, logging concise past-tense transfer entries and aggregate outcomes.
 
 ## Remote layout
 
@@ -214,20 +216,20 @@ The sync baseline is maintained locally in IndexedDB inside the vault's plugin s
 
 ### Auto-sync & UI
 
-| Setting                         | Description                                                                                                                               | Default                |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| **Auto-sync paused**            | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
-| **Floating sync indicator**     | Show a floating progress indicator at the top right of the workspace during sync.                                                         | Enabled                |
-| **Sync progress notice**        | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
-| **Status bar indicator style**  | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
-| **Notify on background change** | Display an Obsidian notice when an auto-sync modifies vault files.                                                                        | Disabled               |
-| **Sync on file save**           | Trigger background sync when local files are edited and saved.                                                                            | Enabled                |
-| **Sync on save delay**          | Debounce delay before syncing after a save (1 to 30 seconds).                                                                             | `2` seconds            |
-| **Background sync interval**    | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
-| **Sync after startup**          | Delay in seconds after layout ready before running an initial sync (0 disables).                                                          | `0` (Disabled)         |
-| **Fast remote polling**         | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |
-| **Skip large files**            | Skip transferring files larger than the specified threshold.                                                                              | Enabled                |
-| **Skip size threshold**         | Maximum file size in megabytes before skipping (1 to 1000 MB).                                                                            | `50` MB                |
+| Setting                        | Description                                                                                                                               | Default                |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| **Auto-sync paused**           | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
+| **Floating sync indicator**    | Show a floating progress indicator at the top right of the workspace during sync.                                                         | Enabled                |
+| **Sync progress notice**       | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
+| **Status bar indicator style** | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
+| **Sync on file save**          | Batch file changes after the save delay; automatic runs also respect the minimum gap below.                                               | Enabled                |
+| **Sync on save delay**         | Wait this long after the latest save before syncing (1 to 30 seconds).                                                                    | `2` seconds            |
+| **Minimum automatic sync gap** | Wait at least this long between automatic sync starts (5 to 120 seconds). Manual sync is immediate.                                       | `10` seconds           |
+| **Background sync interval**   | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
+| **Sync after startup**         | Delay in seconds after layout ready before running an initial sync (0 disables).                                                          | `0` (Disabled)         |
+| **Fast remote polling**        | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |
+| **Skip large files**           | Skip transferring files larger than the specified threshold.                                                                              | Enabled                |
+| **Skip size threshold**        | Maximum file size in megabytes before skipping (1 to 1000 MB).                                                                            | `50` MB                |
 
 ## Ignore rules
 
@@ -247,6 +249,7 @@ Add custom vault-relative paths or glob patterns in **Settings → Obsidian File
 - **Local delete confirmation**: When remote deletions would remove local files, a confirmation modal details the affected files. Approved local deletions move to the Obsidian system trash.
 - **Remote trash**: Remote deletions move files to Filen's cloud trash rather than permanently deleting them.
 - **Pre-mutation revalidation**: Files are re-read and re-hashed immediately before upload to guarantee that in-progress edits are not corrupted. Remote entries are verified by UUID and hash before deletion or replacement.
+- **Session-only scoped scanning**: Save-triggered automatic runs use cached scan snapshots and path hints to refresh and plan only changed candidate files without scanning the rest of the vault. If any condition is uncertain (such as remote cloud changes, stale local/remote caches, folder operations, or interval/manual sync), the engine automatically falls back to full reconciliation.
 - **Transfer recovery & reconciliation**: If a transfer times out or is aborted with an uncertain outcome, the plugin marks reconciliation as required, pauses automatic sync, and prevents force uploads until a full two-way sync reconciles state safely.
 - **Target identity binding**: Baselines are isolated by `(vaultId, userId, remoteRootUuid)`. Switching Filen accounts or changing the remote folder automatically re-binds cleanly without corrupting previous baselines.
 

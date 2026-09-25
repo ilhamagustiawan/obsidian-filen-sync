@@ -35,8 +35,6 @@ export type SyncRunResult =
 	| { kind: "cancelled"; reason: string }
 	| { kind: "failed"; message: string };
 
-type LocalFileActivityAction = "created" | "modified" | "deleted" | "renamed";
-
 const AUTO_SYNC_FAILURE_BASE_BACKOFF_MS = 30_000;
 const AUTO_SYNC_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
 const ERROR_NOTICE_THROTTLE_MS = 15 * 60_000;
@@ -62,6 +60,8 @@ export class SyncCoordinator {
 	private autoSyncDomCleanup: (() => void)[] = [];
 	private pendingAutoSync = false;
 	private nextAutoSyncAllowedAt = 0;
+	private lastSyncStartAt = 0;
+	private pendingAutoSyncRequiresFullScan = false;
 	private autoSyncTransientFailureCount = 0;
 	private pendingPaths = new Map<string, number>();
 	private changeRevision = 0;
@@ -89,6 +89,14 @@ export class SyncCoordinator {
 		return this.autoSyncTransientFailureCount > 0 ? this.nextAutoSyncAllowedAt : null;
 	}
 
+	recordSyncStart(): void {
+		this.lastSyncStartAt = Date.now();
+		this.nextAutoSyncAllowedAt = Math.max(
+			this.nextAutoSyncAllowedAt,
+			this.lastSyncStartAt + (this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000,
+		);
+	}
+
 	private publishStatus(state: StatusBarState): void {
 		this.lastStatus = state;
 		this.callbacks.onStatusChange(state);
@@ -103,9 +111,9 @@ export class SyncCoordinator {
 			return;
 		if (this.pendingCount > 0)
 			this.publishStatus({
-				kind: "pending",
-				text: `${this.pendingCount} change${this.pendingCount === 1 ? "" : "s"} pending`,
-				detail: "Local changes waiting to sync.",
+				kind: "idle",
+				text: "Ready",
+				detail: "Local changes are queued for automatic sync.",
 				updatedAt: Date.now(),
 			});
 	}
@@ -198,6 +206,7 @@ export class SyncCoordinator {
 			autoSync?: boolean;
 			isManual?: boolean;
 			initialSync?: boolean;
+			fullScan?: boolean;
 		} = {},
 	): Promise<SyncRunResult> {
 		if (this.isSyncing) {
@@ -218,7 +227,11 @@ export class SyncCoordinator {
 		}
 
 		const pendingAtStart = new Map(this.pendingPaths);
+		const scanHints =
+			options.autoSync && options.fullScan !== true ? [...pendingAtStart.keys()] : undefined;
 		this.pendingAutoSync = false;
+		this.pendingAutoSyncRequiresFullScan = false;
+		this.recordSyncStart();
 		if (this.debounceTimer !== null) {
 			window.clearTimeout(this.debounceTimer);
 			this.debounceTimer = null;
@@ -233,7 +246,7 @@ export class SyncCoordinator {
 			isManual,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		this.callbacks.onLogActivity(`${label} started`);
+		if (isManual) this.callbacks.onLogActivity(`${label} started`);
 
 		try {
 			await this.callbacks.prepareTarget?.();
@@ -278,7 +291,12 @@ export class SyncCoordinator {
 				direction,
 				confirmBulk,
 				undefined,
-				{ isManual, initialSync: options.initialSync },
+				{
+					isManual,
+					initialSync: options.initialSync,
+					fullScan: options.fullScan ?? isManual,
+					scanHints,
+				},
 			);
 
 			// Reaching here means remote access succeeded
@@ -306,14 +324,14 @@ export class SyncCoordinator {
 				}
 
 			if (result.applied === 0 && result.conflicts === 0) {
-				this.callbacks.onLogActivity("Fully synced");
+				if (isManual) this.callbacks.onLogActivity("Sync complete: up to date");
 				this.publishStatus({
-					kind: this.pendingCount > 0 ? "pending" : "success",
-					text:
+					kind: this.pendingCount > 0 ? "idle" : "success",
+					text: "up to date",
+					detail:
 						this.pendingCount > 0
-							? `${this.pendingCount} changes pending`
-							: "up to date",
-					detail: "No changes detected.",
+							? "Local changes are queued for automatic sync."
+							: "No changes detected.",
 					updatedAt: Date.now(),
 					isManual,
 					syncCompleted: true,
@@ -326,22 +344,10 @@ export class SyncCoordinator {
 			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
 			const summary = parts.join(", ");
 
-			this.callbacks.onLogActivity(
-				result.conflicts > 0 ? `Sync complete with ${summary}` : "Fully synced",
-			);
+			this.callbacks.onLogActivity(`Sync complete: ${summary}`);
 			this.publishStatus({
-				kind:
-					result.conflicts > 0
-						? "warning"
-						: this.pendingCount > 0
-							? "pending"
-							: "success",
-				text:
-					result.conflicts > 0
-						? `${result.conflicts} conflict(s) to review`
-						: this.pendingCount > 0
-							? `${this.pendingCount} changes pending`
-							: summary,
+				kind: result.conflicts > 0 ? "warning" : this.pendingCount > 0 ? "idle" : "success",
+				text: result.conflicts > 0 ? `${result.conflicts} conflict(s) to review` : summary,
 				detail: `${label}: ${summary}`,
 				updatedAt: Date.now(),
 				isManual,
@@ -352,11 +358,6 @@ export class SyncCoordinator {
 				new Notice(
 					`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`,
 				);
-			}
-
-			// Background change notice (off by default)
-			if (options.autoSync && this.settings.notifyOnBackgroundChange && result.applied > 0) {
-				new Notice(formatBackgroundChangeNotice(result));
 			}
 
 			return {
@@ -423,20 +424,21 @@ export class SyncCoordinator {
 		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } =
 			this.settings;
 
-		const handleVaultChange =
-			(action: LocalFileActivityAction) => (file: TAbstractFile, oldPath?: string) => {
-				this.syncEngine?.invalidateLocal(file.path);
-				if (oldPath !== undefined) this.syncEngine?.invalidateLocal(oldPath);
-				this.logLocalFileActivity(action, file, oldPath);
-				if (!this.shouldAutoSyncForFileEvent(file, oldPath)) return;
-				this.pendingPaths.set(file.path, ++this.changeRevision);
-				if (oldPath !== undefined) this.pendingPaths.set(oldPath, this.changeRevision);
-				this.lastEditAt = Date.now();
-				this.publishPending();
-				if (!syncOnSave || this.settings.syncPaused) return;
-				this.callbacks.onLogActivity(`Auto-sync scheduled in ${syncOnSaveDelaySeconds}s`);
-				this.scheduleAutoSync(syncOnSaveDelaySeconds * 1000, hasSavedAuth);
-			};
+		const handleVaultChange = (_action: string) => (file: TAbstractFile, oldPath?: string) => {
+			this.syncEngine?.invalidateLocal(file.path);
+			if (oldPath !== undefined) this.syncEngine?.invalidateLocal(oldPath);
+			if (!this.shouldAutoSyncForFileEvent(file, oldPath)) return;
+			this.pendingPaths.set(file.path, ++this.changeRevision);
+			if (oldPath !== undefined) this.pendingPaths.set(oldPath, this.changeRevision);
+			this.lastEditAt = Date.now();
+			this.publishPending();
+			if (!syncOnSave || this.settings.syncPaused) return;
+			this.scheduleAutoSync(
+				syncOnSaveDelaySeconds * 1000,
+				hasSavedAuth,
+				!(file instanceof TFile),
+			);
+		};
 		this.vaultEventRefs.push(this.app.vault.on("modify", handleVaultChange("modified")));
 		this.vaultEventRefs.push(this.app.vault.on("create", handleVaultChange("created")));
 		this.vaultEventRefs.push(this.app.vault.on("delete", handleVaultChange("deleted")));
@@ -447,21 +449,21 @@ export class SyncCoordinator {
 		if (syncOnSave || syncIntervalMinutes > 0) {
 			this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
 				if (document.visibilityState === "visible")
-					this.scheduleAutoSync(1000, hasSavedAuth);
+					this.scheduleAutoSync(1000, hasSavedAuth, true);
 			});
 			this.registerAutoSyncDomEvent(window, "focus", () => {
-				this.scheduleAutoSync(1000, hasSavedAuth);
+				this.scheduleAutoSync(1000, hasSavedAuth, true);
 			});
 			this.registerAutoSyncDomEvent(window, "online", () => {
 				this.resetOffline();
-				this.scheduleAutoSync(1000, hasSavedAuth);
+				this.scheduleAutoSync(1000, hasSavedAuth, true);
 			});
 		}
 
 		if (syncIntervalMinutes > 0) {
 			this.intervalId = window.setInterval(
 				() => {
-					this.requestAutoSync(hasSavedAuth);
+					this.requestAutoSync(hasSavedAuth, true);
 				},
 				syncIntervalMinutes * 60 * 1000,
 			);
@@ -470,7 +472,7 @@ export class SyncCoordinator {
 		if (syncStartupDelaySeconds > 0) {
 			this.startupTimerId = window.setTimeout(() => {
 				this.startupTimerId = null;
-				this.requestAutoSync(hasSavedAuth);
+				this.requestAutoSync(hasSavedAuth, true);
 			}, syncStartupDelaySeconds * 1000);
 		}
 	}
@@ -500,7 +502,7 @@ export class SyncCoordinator {
 		this.setupAutoSync(hasSavedAuth);
 		this.publishPending();
 		if (this.pendingCount > 0 && !this.settings.syncPaused && this.settings.syncOnSave)
-			this.scheduleAutoSync(this.settings.syncOnSaveDelaySeconds * 1000, hasSavedAuth);
+			this.scheduleAutoSync(this.settings.syncOnSaveDelaySeconds * 1000, hasSavedAuth, false);
 	}
 
 	async toggleSyncOnSave(hasSavedAuth: () => boolean): Promise<void> {
@@ -518,12 +520,14 @@ export class SyncCoordinator {
 		new Notice(`Auto-sync ${this.settings.syncPaused ? "paused" : "resumed"}.`);
 	}
 
-	private scheduleAutoSync(delayMs: number, hasSavedAuth: () => boolean): void {
+	private scheduleAutoSync(delayMs: number, hasSavedAuth: () => boolean, fullScan = true): void {
 		this.pendingAutoSync = true;
+		this.pendingAutoSyncRequiresFullScan ||= fullScan;
 		this.scheduleQueuedAutoSync(delayMs, hasSavedAuth);
 	}
 
-	private requestAutoSync(hasSavedAuth: () => boolean): void {
+	private requestAutoSync(hasSavedAuth: () => boolean, fullScan = true): void {
+		this.pendingAutoSyncRequiresFullScan ||= fullScan;
 		if (!this.hasAutoSyncEnabled() || this.confirmationRequired) return;
 		if (!hasSavedAuth()) return;
 		const browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
@@ -547,7 +551,11 @@ export class SyncCoordinator {
 			return;
 		}
 		this.pendingAutoSync = false;
-		void this.runSync("Auto-sync", "both", { silent: true, autoSync: true });
+		void this.runSync("Auto-sync", "both", {
+			silent: true,
+			autoSync: true,
+			fullScan: this.pendingAutoSyncRequiresFullScan,
+		});
 	}
 
 	private runPendingAutoSync(): void {
@@ -580,7 +588,7 @@ export class SyncCoordinator {
 		if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
 		this.debounceTimer = window.setTimeout(() => {
 			this.debounceTimer = null;
-			this.requestAutoSync(hasSavedAuth);
+			this.requestAutoSync(hasSavedAuth, this.pendingAutoSyncRequiresFullScan);
 		}, waitMs);
 	}
 
@@ -590,13 +598,20 @@ export class SyncCoordinator {
 
 	private resetAutoSyncBackoff(): void {
 		this.autoSyncTransientFailureCount = 0;
-		this.nextAutoSyncAllowedAt = 0;
+		this.nextAutoSyncAllowedAt = Math.max(
+			0,
+			this.lastSyncStartAt + (this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000,
+		);
 	}
 
 	private bumpAutoSyncBackoff(error: unknown): void {
 		this.autoSyncTransientFailureCount += 1;
 		const delayMs = getAutoSyncBackoffMs(error, this.autoSyncTransientFailureCount);
-		this.setAutoSyncCooldown(delayMs);
+		const minGapMs = (this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000;
+		this.nextAutoSyncAllowedAt = Math.max(
+			this.lastSyncStartAt + minGapMs,
+			Date.now() + delayMs,
+		);
 	}
 
 	private hasAutoSyncEnabled(): boolean {
@@ -605,49 +620,6 @@ export class SyncCoordinator {
 			(this.settings.syncOnSave ||
 				this.settings.syncIntervalMinutes > 0 ||
 				this.settings.syncStartupDelaySeconds > 0)
-		);
-	}
-
-	private logLocalFileActivity(
-		action: LocalFileActivityAction,
-		file: TAbstractFile,
-		oldPath?: string,
-	): void {
-		if (
-			this.isSyncing ||
-			!(file instanceof TFile) ||
-			!this.shouldLogFileActivity(file, oldPath)
-		)
-			return;
-		switch (action) {
-			case "created":
-				this.callbacks.onLogActivity(`Local created ${file.path}`);
-				return;
-			case "modified":
-				this.callbacks.onLogActivity(`Local changed ${file.path}`);
-				return;
-			case "deleted":
-				this.callbacks.onLogActivity(`Local deleted ${file.path}`);
-				return;
-			case "renamed":
-				this.callbacks.onLogActivity(
-					oldPath !== undefined
-						? `Local renamed ${oldPath} → ${file.path}`
-						: `Local renamed ${file.path}`,
-				);
-				return;
-		}
-	}
-
-	private shouldLogFileActivity(file: TFile, oldPath?: string): boolean {
-		const pathFilter = createSyncPathFilter({
-			configDir: this.app.vault.configDir,
-			pluginId: this.pluginId,
-			ignorePatterns: this.settings.ignorePatterns,
-		});
-		return (
-			!pathFilter.isIgnored(file.path) &&
-			(oldPath === undefined || !pathFilter.isIgnored(oldPath))
 		);
 	}
 
@@ -685,46 +657,23 @@ export class SyncCoordinator {
 		switch (event.type) {
 			case "connected":
 				this.resetOffline();
-				this.callbacks.onLogActivity("Connected to server. Detecting changes...");
-				return;
-			case "operation-planned":
-				this.logPlannedSyncOperation(event.operation, event.path, event.detail);
-				return;
-			case "operation-start":
-				this.callbacks.onLogActivity(
-					syncOperationStartMessage(event.operation, event.path),
-				);
 				return;
 			case "operation-complete":
 				this.callbacks.onLogActivity(
 					syncOperationCompleteMessage(event.operation, event.path),
 				);
 				return;
+			case "diagnostic":
+				this.callbacks.onLogActivity(event.message);
+				return;
 			case "accepted":
-				this.callbacks.onLogActivity(`Accepted ${event.path}`);
+				if (event.operation === "noop" && event.path.length > 0) {
+					this.callbacks.onLogActivity(event.path);
+				}
 				return;
-		}
-	}
-
-	private logPlannedSyncOperation(operation: SyncOperation, path: string, detail: string): void {
-		switch (operation) {
-			case "download":
-				this.callbacks.onLogActivity(`Server pushed ${path}`);
+			case "operation-planned":
+			case "operation-start":
 				return;
-			case "upload":
-				this.callbacks.onLogActivity(`Local changed ${path}`);
-				return;
-			case "delete-local":
-				this.callbacks.onLogActivity(`Server deleted ${path}`);
-				return;
-			case "delete-remote":
-				this.callbacks.onLogActivity(`Local deleted ${path}`);
-				return;
-			case "conflict":
-				this.callbacks.onLogActivity(`Conflict detected ${path}`);
-				return;
-			default:
-				if (detail.length > 0) this.callbacks.onLogActivity(`${detail} ${path}`);
 		}
 	}
 }
@@ -756,37 +705,20 @@ function isTransientError(error: unknown): boolean {
 	return transientPatterns.some((pattern) => lower.includes(pattern));
 }
 
-const syncOperationStartMessage = (operation: SyncOperation, path: string): string => {
-	switch (operation) {
-		case "upload":
-			return `Uploading file ${path}`;
-		case "download":
-			return `Downloading file ${path}`;
-		case "delete-local":
-			return `Deleting local file ${path}`;
-		case "delete-remote":
-			return `Deleting remote file ${path}`;
-		case "conflict":
-			return `Resolving conflict ${path}`;
-		default:
-			return `Syncing ${path}`;
-	}
-};
-
 const syncOperationCompleteMessage = (operation: SyncOperation, path: string): string => {
 	switch (operation) {
 		case "upload":
-			return `Uploading complete ${path}`;
+			return `Uploaded ${path}`;
 		case "download":
-			return `Downloading complete ${path}`;
+			return `Downloaded ${path}`;
 		case "delete-local":
-			return `Local delete complete ${path}`;
+			return `Deleted locally ${path}`;
 		case "delete-remote":
-			return `Remote delete complete ${path}`;
+			return `Deleted remotely ${path}`;
 		case "conflict":
 			return `Conflict resolved ${path}`;
 		default:
-			return `Sync complete ${path}`;
+			return `Synced ${path}`;
 	}
 };
 
@@ -855,33 +787,6 @@ export function isNetworkClassError(error: unknown): boolean {
 		"504",
 	];
 	return patterns.some((p) => lower.includes(p));
-}
-
-export function formatBackgroundChangeNotice(outcome: {
-	uploaded?: number;
-	downloaded?: number;
-	deletedLocal?: number;
-	deletedRemote?: number;
-	applied: number;
-}): string {
-	const uploaded = outcome.uploaded ?? 0;
-	const downloaded = outcome.downloaded ?? 0;
-	const deleted = (outcome.deletedLocal ?? 0) + (outcome.deletedRemote ?? 0);
-
-	const parts: string[] = [];
-	if (downloaded > 0) {
-		parts.push(`${downloaded} file${downloaded > 1 ? "s" : ""} updated from the cloud`);
-	}
-	if (uploaded > 0) {
-		parts.push(`${uploaded} file${uploaded > 1 ? "s" : ""} uploaded`);
-	}
-	if (deleted > 0) {
-		parts.push(`${deleted} file${deleted > 1 ? "s" : ""} deleted`);
-	}
-	if (parts.length > 0) {
-		return parts.join(", ");
-	}
-	return `${outcome.applied} file${outcome.applied > 1 ? "s" : ""} updated`;
 }
 
 function progressLabel(progress: SyncProgress): string {

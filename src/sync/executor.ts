@@ -13,6 +13,18 @@ export type LocalEntry = {
 	file: TAbstractFile;
 };
 
+export type ExecutionResult = {
+	applied: number;
+	conflicts: number;
+	conflictCopy?: ConflictCopy;
+	localFile?: LocalEntry;
+	remoteFile?: RemoteEntry;
+	deletedLocalPath?: string;
+	deletedRemotePath?: string;
+	conflictLocalFile?: LocalEntry;
+	conflictRemoteFile?: RemoteEntry;
+};
+
 export type SyncExecutorConfig = {
 	app: App;
 	db: SyncDb;
@@ -52,14 +64,18 @@ export class SyncExecutor {
 		remote?: RemoteEntry,
 		prev?: SyncedFileRecord,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
-	): Promise<{ applied: number; conflicts: number; conflictCopy?: ConflictCopy }> {
+	): Promise<ExecutionResult> {
 		switch (action.operation) {
 			case "delete-local": {
 				const deleted = await this.deleteLocal(action.path, local);
 				if (deleted && prev !== undefined) {
 					await this.config.db.deleteFile(action.path);
 				}
-				return { applied: deleted ? 1 : 0, conflicts: 0 };
+				return {
+					applied: deleted ? 1 : 0,
+					conflicts: 0,
+					deletedLocalPath: deleted ? action.path : undefined,
+				};
 			}
 
 			case "delete-remote": {
@@ -78,24 +94,42 @@ export class SyncExecutor {
 				if (prev !== undefined) {
 					await this.config.db.deleteFile(action.path);
 				}
-				return { applied: 1, conflicts: 0 };
+				return { applied: 1, conflicts: 0, deletedRemotePath: action.path };
 			}
 
 			case "upload": {
 				if (local === undefined) return { applied: 0, conflicts: 0 };
-				await this.pushLocal(action.path, local, remote, onProgress);
-				return { applied: 1, conflicts: 0 };
+				const uploadResult = await this.pushLocal(action.path, local, remote, onProgress);
+				return {
+					applied: 1,
+					conflicts: 0,
+					localFile: uploadResult.local,
+					remoteFile: uploadResult.remote,
+				};
 			}
 
 			case "download": {
 				if (remote === undefined) return { applied: 0, conflicts: 0 };
-				await this.pullRemote(action.path, remote, local, onProgress);
-				return { applied: 1, conflicts: 0 };
+				const pullResult = await this.pullRemote(action.path, remote, local, onProgress);
+				return {
+					applied: 1,
+					conflicts: 0,
+					localFile: pullResult.local,
+					remoteFile: pullResult.remote,
+				};
 			}
 
 			case "conflict": {
-				const conflictCopy = await this.resolveConflict(action, local, remote);
-				return { applied: 1, conflicts: 1, conflictCopy };
+				const conflictRes = await this.resolveConflict(action, local, remote);
+				return {
+					applied: 1,
+					conflicts: 1,
+					conflictCopy: conflictRes.conflictCopy,
+					localFile: conflictRes.localFile,
+					remoteFile: conflictRes.remoteFile,
+					conflictLocalFile: conflictRes.conflictLocalFile,
+					conflictRemoteFile: conflictRes.conflictRemoteFile,
+				};
 			}
 
 			case "noop": {
@@ -132,7 +166,7 @@ export class SyncExecutor {
 		local: LocalEntry,
 		remote?: RemoteEntry,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
-	): Promise<string> {
+	): Promise<{ hash: string; local: LocalEntry; remote: RemoteEntry }> {
 		const file = this.asFile(local.file);
 		assertLocalUnchanged(this.config.app, path, local);
 		const content = await this.config.app.vault.readBinary(file);
@@ -164,7 +198,23 @@ export class SyncExecutor {
 			lastKnownSide: "local",
 		});
 
-		return hash;
+		const updatedLocal: LocalEntry = {
+			...local,
+			mtime: file.stat.mtime,
+			ctime: file.stat.ctime,
+			size: bytes.byteLength,
+			hash,
+		};
+		const updatedRemote: RemoteEntry = {
+			path,
+			mtime: file.stat.mtime,
+			size: bytes.byteLength,
+			isDir: false,
+			uuid: uploaded.uuid,
+			remoteHash: uploaded.remoteHash,
+		};
+
+		return { hash, local: updatedLocal, remote: updatedRemote };
 	}
 
 	private async pullRemote(
@@ -172,7 +222,7 @@ export class SyncExecutor {
 		remote: RemoteEntry,
 		expectedLocal?: LocalEntry,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
-	): Promise<void> {
+	): Promise<{ local: LocalEntry; remote: RemoteEntry }> {
 		const content = await this.config.remote.readFile(path, remote.uuid, onProgress);
 		const hash = await sha256Hex(content);
 		const verifiedRemote = await this.config.remote.stat?.(path);
@@ -226,40 +276,73 @@ export class SyncExecutor {
 			lastSyncAt: Date.now(),
 			lastKnownSide: "remote",
 		});
+
+		const writtenFile = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
+		const updatedLocal: LocalEntry = {
+			path,
+			mtime: remote.mtime,
+			ctime: remote.mtime,
+			size: content.byteLength,
+			hash,
+			file: writtenFile ?? expectedLocal?.file ?? currentFile ?? null!,
+		};
+		const updatedRemote: RemoteEntry = {
+			...remote,
+			remoteHash: remote.remoteHash ?? verifiedRemote?.remoteHash,
+		};
+		return { local: updatedLocal, remote: updatedRemote };
 	}
 
 	private async resolveConflict(
 		action: PlannedAction,
 		local?: LocalEntry,
 		remote?: RemoteEntry,
-	): Promise<ConflictCopy | undefined> {
+	): Promise<{
+		conflictCopy?: ConflictCopy;
+		localFile?: LocalEntry;
+		remoteFile?: RemoteEntry;
+		conflictLocalFile?: LocalEntry;
+		conflictRemoteFile?: RemoteEntry;
+	}> {
 		if (local !== undefined && remote !== undefined) {
 			if (action.conflictWinner === "local") {
 				// Local wins: save remote as conflict copy, upload local
-				const copyPath = await this.writeRemoteConflictCopy(action.path, remote);
-				await this.pushLocal(action.path, local, remote);
-				return { originalPath: action.path, copyPath };
+				const copyInfo = await this.writeRemoteConflictCopy(action.path, remote);
+				const pushRes = await this.pushLocal(action.path, local, remote);
+				return {
+					conflictCopy: { originalPath: action.path, copyPath: copyInfo.copyPath },
+					localFile: pushRes.local,
+					remoteFile: pushRes.remote,
+					conflictLocalFile: copyInfo.local,
+				};
 			} else {
 				// Remote wins: save local as conflict copy, download remote
-				const copyPath = await this.writeLocalConflictCopy(local.path);
-				await this.pullRemote(action.path, remote, local);
-				return copyPath ? { originalPath: action.path, copyPath } : undefined;
+				const copyInfo = await this.writeLocalConflictCopy(local.path);
+				const pullRes = await this.pullRemote(action.path, remote, local);
+				return {
+					conflictCopy: copyInfo
+						? { originalPath: action.path, copyPath: copyInfo.copyPath }
+						: undefined,
+					localFile: pullRes.local,
+					remoteFile: pullRes.remote,
+					conflictLocalFile: copyInfo?.local,
+				};
 			}
 		}
 
 		if (local !== undefined) {
 			// Remote deleted, local changed: re-upload local
-			await this.pushLocal(action.path, local);
-			return undefined;
+			const pushRes = await this.pushLocal(action.path, local);
+			return { localFile: pushRes.local, remoteFile: pushRes.remote };
 		}
 
 		if (remote !== undefined) {
 			// Local deleted, remote changed: restore remote
-			await this.pullRemote(action.path, remote);
-			return undefined;
+			const pullRes = await this.pullRemote(action.path, remote);
+			return { localFile: pullRes.local, remoteFile: pullRes.remote };
 		}
 
-		return undefined;
+		return {};
 	}
 
 	private async deleteLocal(path: string, expected?: LocalEntry): Promise<boolean> {
@@ -281,7 +364,9 @@ export class SyncExecutor {
 		return true;
 	}
 
-	private async writeLocalConflictCopy(path: string): Promise<string | null> {
+	private async writeLocalConflictCopy(
+		path: string,
+	): Promise<{ copyPath: string; local: LocalEntry } | null> {
 		const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 		if (!(file instanceof TFile)) return null;
 		const copyPath = conflictCopyPath(file.path, this.config.deviceId, Date.now(), "local");
@@ -291,10 +376,26 @@ export class SyncExecutor {
 			mtime: file.stat.mtime,
 			ctime: file.stat.ctime,
 		});
-		return copyPath;
+		const copyFile = this.config.app.vault.getAbstractFileByPath(normalizePath(copyPath));
+		const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
+		const hash = await sha256Hex(bytes);
+		return {
+			copyPath,
+			local: {
+				path: copyPath,
+				mtime: file.stat.mtime,
+				ctime: file.stat.ctime,
+				size: bytes.byteLength,
+				hash,
+				file: copyFile ?? file,
+			},
+		};
 	}
 
-	private async writeRemoteConflictCopy(path: string, remote: RemoteEntry): Promise<string> {
+	private async writeRemoteConflictCopy(
+		path: string,
+		remote: RemoteEntry,
+	): Promise<{ copyPath: string; local: LocalEntry }> {
 		const bytes = await this.config.remote.readFile(path, remote.uuid);
 		const copyPath = conflictCopyPath(path, this.config.deviceId, Date.now(), "remote");
 		await ensureLocalFolder(this.config.app, copyPath);
@@ -302,7 +403,19 @@ export class SyncExecutor {
 			mtime: remote.mtime,
 			ctime: remote.mtime,
 		});
-		return copyPath;
+		const copyFile = this.config.app.vault.getAbstractFileByPath(normalizePath(copyPath));
+		const hash = await sha256Hex(bytes);
+		return {
+			copyPath,
+			local: {
+				path: copyPath,
+				mtime: remote.mtime,
+				ctime: remote.mtime,
+				size: bytes.byteLength,
+				hash,
+				file: copyFile ?? (null as unknown as TAbstractFile),
+			},
+		};
 	}
 
 	private asFile(file: TAbstractFile): TFile {

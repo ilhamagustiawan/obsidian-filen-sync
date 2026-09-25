@@ -838,7 +838,7 @@ test("fast remote polling obeys safety rails and reuses cached tree only when sa
 	}
 });
 
-test("formatRelativeTime and formatBackgroundChangeNotice produce correct strings", async () => {
+test("formatRelativeTime and isNetworkClassError produce correct results", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "filen-formatters-test-"));
 	try {
 		const stub = join(dir, "obsidian-stub.mjs");
@@ -867,25 +867,11 @@ test("formatRelativeTime and formatBackgroundChangeNotice produce correct string
 				},
 			],
 		});
-		const { formatBackgroundChangeNotice, isNetworkClassError, formatRelativeTime } =
-			await import(pathToFileURL(outfile).href);
-
-		// 1. formatBackgroundChangeNotice
-		assert.equal(
-			formatBackgroundChangeNotice({ downloaded: 2, applied: 2 }),
-			"2 files updated from the cloud",
-		);
-		assert.equal(formatBackgroundChangeNotice({ uploaded: 1, applied: 1 }), "1 file uploaded");
-		assert.equal(
-			formatBackgroundChangeNotice({ downloaded: 3, uploaded: 1, applied: 4 }),
-			"3 files updated from the cloud, 1 file uploaded",
-		);
-		assert.equal(
-			formatBackgroundChangeNotice({ deletedLocal: 1, deletedRemote: 1, applied: 2 }),
-			"2 files deleted",
+		const { isNetworkClassError, formatRelativeTime } = await import(
+			pathToFileURL(outfile).href
 		);
 
-		// 2. isNetworkClassError
+		// 1. isNetworkClassError
 		assert.equal(isNetworkClassError(new Error("fetch failed")), true);
 		assert.equal(isNetworkClassError(new Error("connect ECONNREFUSED 127.0.0.1:443")), true);
 		assert.equal(isNetworkClassError(new Error("ETIMEDOUT")), true);
@@ -893,7 +879,7 @@ test("formatRelativeTime and formatBackgroundChangeNotice produce correct string
 		assert.equal(isNetworkClassError(new Error("Invalid password")), false);
 		assert.equal(isNetworkClassError(new Error("Vault path collision")), false);
 
-		// 3. formatRelativeTime
+		// 2. formatRelativeTime
 		const now = 1000000;
 		assert.equal(formatRelativeTime(now - 10_000, now), "just now");
 		assert.equal(formatRelativeTime(now - 60_000, now), "1 minute ago");
@@ -980,7 +966,6 @@ test("SyncCoordinator offline awareness and error notice throttling", async () =
 				syncOnSave: true,
 				syncIntervalMinutes: 5,
 				syncStartupDelaySeconds: 0,
-				notifyOnBackgroundChange: true,
 			},
 			() => ({ checkConnect: async () => {}, close: () => {} }),
 			() => ({}),
@@ -1212,11 +1197,33 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 		assert.equal(DEFAULT_SETTINGS.reconciliationNeeded, false);
 		assert.equal(DEFAULT_SETTINGS.syncProgressNoticeMode, "never");
 		assert.equal(DEFAULT_SETTINGS.showFloatingSyncIndicator, true);
+		assert.equal(DEFAULT_SETTINGS.minimumAutoSyncIntervalSeconds, 10);
+		assert.equal("notifyOnBackgroundChange" in DEFAULT_SETTINGS, false);
 
 		const parsedEmpty = FilenSyncSettings.fromSaved({});
 		assert.equal(parsedEmpty.statusBarIndicatorStyle, "icon");
 		assert.equal(parsedEmpty.syncProgressNoticeMode, "never");
 		assert.equal(parsedEmpty.showFloatingSyncIndicator, true);
+		assert.equal(parsedEmpty.minimumAutoSyncIntervalSeconds, 10);
+		assert.equal("notifyOnBackgroundChange" in parsedEmpty, false);
+
+		assert.equal(
+			FilenSyncSettings.fromSaved({ minimumAutoSyncIntervalSeconds: 1 })
+				.minimumAutoSyncIntervalSeconds,
+			5,
+			"clamps lower bound to 5s",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ minimumAutoSyncIntervalSeconds: 300 })
+				.minimumAutoSyncIntervalSeconds,
+			120,
+			"clamps upper bound to 120s",
+		);
+		assert.equal(
+			FilenSyncSettings.fromSaved({ minimumAutoSyncIntervalSeconds: 30 })
+				.minimumAutoSyncIntervalSeconds,
+			30,
+		);
 
 		const parsedFull = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "full" });
 		assert.equal(parsedFull.statusBarIndicatorStyle, "full");

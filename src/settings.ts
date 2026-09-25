@@ -42,10 +42,10 @@ export type FilenSyncSettings = {
 	rememberAuth: boolean;
 	syncOnSave: boolean;
 	syncOnSaveDelaySeconds: number;
+	minimumAutoSyncIntervalSeconds: number;
 	syncIntervalMinutes: number;
 	syncStartupDelaySeconds: number;
 	syncPaused: boolean;
-	notifyOnBackgroundChange: boolean;
 	statusBarIndicatorStyle: "icon" | "full";
 	syncProgressNoticeMode: SyncProgressNoticeMode;
 	showFloatingSyncIndicator: boolean;
@@ -71,10 +71,10 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	rememberAuth: true,
 	syncOnSave: true,
 	syncOnSaveDelaySeconds: 2,
+	minimumAutoSyncIntervalSeconds: 10,
 	syncIntervalMinutes: 3,
 	syncStartupDelaySeconds: 0,
 	syncPaused: false,
-	notifyOnBackgroundChange: false,
 	statusBarIndicatorStyle: "icon",
 	syncProgressNoticeMode: "never",
 	showFloatingSyncIndicator: true,
@@ -135,6 +135,14 @@ export const FilenSyncSettings = {
 				1,
 				30,
 			),
+			minimumAutoSyncIntervalSeconds: clampNumber(
+				readNumber(
+					value.minimumAutoSyncIntervalSeconds,
+					DEFAULT_SETTINGS.minimumAutoSyncIntervalSeconds,
+				),
+				5,
+				120,
+			),
 			syncIntervalMinutes: readNumber(
 				value.syncIntervalMinutes,
 				DEFAULT_SETTINGS.syncIntervalMinutes,
@@ -144,10 +152,6 @@ export const FilenSyncSettings = {
 				DEFAULT_SETTINGS.syncStartupDelaySeconds,
 			),
 			syncPaused: readBoolean(value.syncPaused, DEFAULT_SETTINGS.syncPaused),
-			notifyOnBackgroundChange: readBoolean(
-				value.notifyOnBackgroundChange,
-				DEFAULT_SETTINGS.notifyOnBackgroundChange,
-			),
 			statusBarIndicatorStyle: value.statusBarIndicatorStyle === "full" ? "full" : "icon",
 			syncProgressNoticeMode: readSyncProgressNoticeMode(value.syncProgressNoticeMode),
 			showFloatingSyncIndicator: readBoolean(
@@ -443,22 +447,10 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(section)
-			.setName("Notify when a background sync changes files")
-			.setDesc(
-				"Show a notice when an automatic background sync updates, uploads, or deletes files.",
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.notifyOnBackgroundChange)
-					.onChange(async (value) => {
-						this.plugin.settings.notifyOnBackgroundChange = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(section)
 			.setName("Sync on file save")
-			.setDesc("Sync after file changes.")
+			.setDesc(
+				"Batch file changes after the save delay; automatic runs also respect the minimum gap below.",
+			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.syncOnSave).onChange(async (value) => {
 					this.plugin.settings.syncOnSave = value;
@@ -470,7 +462,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const delaySetting = new Setting(section);
 		delaySetting
 			.setName(`Sync on save delay (${this.plugin.settings.syncOnSaveDelaySeconds} sec)`)
-			.setDesc("Delay before syncing.")
+			.setDesc("Wait this long after the latest save before syncing.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(1, 30, 1)
@@ -483,6 +475,30 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 						this.plugin.refreshAutoSync();
 					}),
 			);
+
+		new Setting(section)
+			.setName("Minimum automatic sync gap")
+			.setDesc(
+				"Wait at least this long between automatic sync starts. Manual sync is immediate.",
+			)
+			.addText((text) => {
+				text.setPlaceholder("10")
+					.setValue(String(this.plugin.settings.minimumAutoSyncIntervalSeconds))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (Number.isFinite(parsed)) {
+							this.plugin.settings.minimumAutoSyncIntervalSeconds = clampNumber(
+								parsed,
+								5,
+								120,
+							);
+							await this.plugin.saveSettings();
+						}
+					});
+				text.inputEl.addEventListener("blur", () => {
+					text.setValue(String(this.plugin.settings.minimumAutoSyncIntervalSeconds));
+				});
+			});
 
 		const intervalSetting = new Setting(section);
 		intervalSetting
