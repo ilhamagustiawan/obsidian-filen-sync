@@ -43,84 +43,17 @@ export class SyncNoticeController {
 			this.renderState(state);
 			this.appendLastSyncSummary();
 			this.onDemand = false;
+			this.scheduleDismiss(3000);
 			return;
 		}
 
-		const allowMobile = this.isMobile() && this.isEnabled();
-		if (!allowMobile) {
-			this.closeNotice();
-			return;
-		}
-
-		// Mobile automatic mode
-		this.mode = "compact";
-
-		if (state.kind === "syncing") {
-			if (state.isManual) this.wasManual = true;
-			this.clearDismissTimer();
-
-			if (this.isVisible) {
-				this.coalesceSyncRender(state);
-				return;
-			}
-
-			if (this.showTimer === null) {
-				this.showTimer = window.setTimeout(() => {
-					this.showTimer = null;
-					if (this.latestState?.kind !== "syncing") return;
-					this.ensureNoticeCreated("compact");
-					this.renderState(this.latestState);
-					this.lastRenderTime = Date.now();
-					this.isVisible = true;
-				}, 300);
-			}
-			return;
-		}
-
-		this.clearShowTimer();
-		this.clearCoalesceTimer();
-		this.pendingSyncState = null;
-
-		if (state.kind === "pending") {
-			this.clearDismissTimer();
-			this.ensureNoticeCreated("compact");
-			this.renderPending(state);
-			this.isVisible = true;
-			this.wasManual = false;
-			return;
-		}
-
-		if (state.kind === "error" || state.kind === "warning") {
-			this.clearDismissTimer();
-			this.ensureNoticeCreated("compact");
-			if (state.kind === "error") this.renderError(state);
-			else this.renderWarning(state);
-			this.isVisible = true;
-			this.wasManual = false;
-			return;
-		}
-
-		if (state.kind === "success") {
-			if (this.isVisible || this.wasManual) {
-				this.ensureNoticeCreated("compact");
-				this.renderSuccess(state);
-				this.isVisible = true;
-				this.scheduleDismiss(2400);
-			} else {
-				this.closeNotice();
-			}
-			this.wasManual = false;
-			return;
-		}
-
-		if (state.kind === "idle") {
-			this.closeNotice();
-		}
+		// Automatic compact notices are retired; ribbon icon is the only automatic mobile status surface.
 	}
 
 	showOnDemand(state: StatusBarState): void {
 		this.clearShowTimer();
 		this.clearCoalesceTimer();
+		this.clearDismissTimer();
 		this.pendingSyncState = null;
 		this.onDemand = true;
 		this.mode = "detailed";
@@ -129,11 +62,14 @@ export class SyncNoticeController {
 		this.renderState(state);
 		this.appendLastSyncSummary();
 		this.isVisible = true;
-		if (state.kind !== "syncing") this.onDemand = false;
+		if (state.kind !== "syncing") {
+			this.onDemand = false;
+			this.scheduleDismiss(4000);
+		}
 	}
 
-	refreshVisibility(enabled = this.isEnabled()): void {
-		if (!enabled && !this.onDemand) {
+	refreshVisibility(_enabled?: boolean): void {
+		if (!this.onDemand) {
 			this.closeNotice();
 		}
 	}
@@ -528,11 +464,14 @@ export class SyncNoticeController {
 		this.noticeEl.removeClass("is-syncing", "is-success", "is-error", "is-pending");
 		this.noticeEl.addClass("is-warning");
 
-		setIcon(this.iconSpan, "pause");
+		const isConflict =
+			state.text.toLowerCase().includes("conflict") ||
+			(state.detail ?? "").toLowerCase().includes("conflict");
+		setIcon(this.iconSpan, isConflict ? "alert-triangle" : "pause");
 		this.iconSpan.removeClass("filen-notice-spin");
 
 		this.titleEl.setText("Filen Sync");
-		this.badgeEl.setText("Paused");
+		this.badgeEl.setText(isConflict ? "Conflict" : "Paused");
 		this.barFill.removeClass("is-indeterminate");
 		this.barFill.style.width = "100%";
 
@@ -542,7 +481,7 @@ export class SyncNoticeController {
 
 		this.noticeEl.setAttr(
 			"aria-label",
-			`Filen Sync: Paused. ${state.detail || state.text}. Tap for options.`,
+			`Filen Sync: ${isConflict ? "Conflict" : "Paused"}. ${state.detail || state.text}. Tap for options.`,
 		);
 
 		// Actionable warnings remain persistent in compact mode, auto-dismiss in detailed mode

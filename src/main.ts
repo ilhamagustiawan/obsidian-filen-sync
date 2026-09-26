@@ -33,13 +33,10 @@ import {
 	type StatusBarState,
 	type SyncRunResult,
 } from "./sync/coordinator";
-import {
-	formatLastSyncSummary,
-	formatSyncProgress,
-	shouldShowMobileSyncIndicator,
-} from "./ui/sync-presentation";
+import { formatLastSyncSummary, formatSyncProgress } from "./ui/sync-presentation";
 import { SyncNoticeController } from "./ui/sync-notice";
 import { sha256Hex } from "./sync/executor";
+import { getOriginalPathFromConflictPath } from "./sync/conflict-utils";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -155,13 +152,33 @@ export default class FilenSyncPlugin extends Plugin {
 			);
 		}
 
-		this.syncRibbonIconEl = this.addRibbonIcon("refresh-cw", "Filen: sync now", () => {
-			if (this.coordinator.active) {
-				this.showSyncProgressNoticeOnDemand();
-			} else {
-				void this.syncNow();
-			}
-		});
+		this.syncRibbonIconEl = this.addRibbonIcon(
+			"refresh-cw",
+			"Filen: sync menu",
+			(evt: MouseEvent) => {
+				if (Platform.isMobile) {
+					const bounds = this.syncRibbonIconEl?.getBoundingClientRect();
+					if (evt && evt.clientX && evt.clientY) {
+						this.openStatusBarMenu(evt);
+					} else if (bounds) {
+						this.openStatusBarMenuAt(bounds.left, bounds.bottom);
+					} else {
+						this.openStatusBarMenu(evt);
+					}
+					return;
+				}
+				if (this.coordinator.active) {
+					this.showSyncProgressNoticeOnDemand();
+				} else if (
+					this.statusBarState.kind === "warning" ||
+					this.coordinator.conflictCount > 0
+				) {
+					this.openStatusBarMenu(evt);
+				} else {
+					void this.syncNow();
+				}
+			},
+		);
 		this.syncRibbonIconEl.addClass("filen-sync-ribbon-sync");
 
 		const activityLogsRibbonIcon = this.addRibbonIcon(
@@ -178,6 +195,25 @@ export default class FilenSyncPlugin extends Plugin {
 			name: "Sync now",
 			callback: () => {
 				void this.syncNow();
+			},
+		});
+
+		this.addCommand({
+			id: "review-conflicts",
+			name: "Review conflict files",
+			checkCallback: (checking: boolean) => {
+				const conflicts = this.coordinator?.getConflictFiles() ?? [];
+				if (checking) {
+					return conflicts.length > 0;
+				}
+				const first = conflicts[0];
+				if (first) {
+					void this.app.workspace.getLeaf(false).openFile(first);
+					new Notice(
+						`Opened ${first.name} (${conflicts.length} conflict file(s) in vault).`,
+					);
+				}
+				return true;
 			},
 		});
 
@@ -531,14 +567,7 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	refreshFloatingIndicator(): void {
-		const enabled = shouldShowMobileSyncIndicator(
-			Platform.isMobile,
-			this.settings.showFloatingSyncIndicator,
-		);
-		this.noticeController.refreshVisibility(enabled);
-		if (enabled && this.coordinator.active) {
-			this.noticeController.onStatusChange(this.statusBarState);
-		}
+		// Automatic mobile indicator retired in favor of quiet ribbon icon
 	}
 
 	private showSyncProgressNoticeOnDemand(): void {
@@ -904,7 +933,45 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private buildStatusBarMenu(): Menu {
 		const menu = new Menu();
-		menu.addItem((item) => item.setTitle(this.statusBarState.text).setDisabled(true));
+		const conflictFiles = this.coordinator?.getConflictFiles() ?? [];
+		if (conflictFiles.length > 0) {
+			menu.addItem((item) =>
+				item
+					.setTitle(`⚠️ ${conflictFiles.length} conflict(s) to review`)
+					.setIcon("alert-circle")
+					.setDisabled(true),
+			);
+			for (const file of conflictFiles.slice(0, 5)) {
+				const originalPath = getOriginalPathFromConflictPath(file.path);
+				const originalName = originalPath.split("/").pop() ?? originalPath;
+				menu.addItem((item) => {
+					item.setTitle(`Review: ${originalName} (conflict copy)`);
+					item.setIcon("alert-triangle");
+					item.onClick(async () => {
+						await this.app.workspace.getLeaf(false).openFile(file);
+					});
+				});
+			}
+			if (conflictFiles.length > 5) {
+				menu.addItem((item) =>
+					item
+						.setTitle(`…and ${conflictFiles.length - 5} more conflict file(s)`)
+						.setDisabled(true),
+				);
+			}
+			menu.addSeparator();
+		}
+
+		if (this.coordinator.isReplanHeld) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Sync needs review — select Sync now")
+					.setIcon("alert-circle")
+					.setDisabled(true),
+			);
+		} else {
+			menu.addItem((item) => item.setTitle(this.statusBarState.text).setDisabled(true));
+		}
 		menu.addItem((item) =>
 			item
 				.setTitle(`${this.coordinator.pendingCount} local changes pending`)
@@ -933,13 +1000,13 @@ export default class FilenSyncPlugin extends Plugin {
 			});
 		} else {
 			menu.addItem((item) => {
-				item.setTitle(
-					this.statusBarState.kind === "error"
+				const title =
+					this.coordinator.isReplanHeld || this.statusBarState.kind === "error"
 						? "Retry now"
 						: this.statusBarState.kind === "warning"
 							? "Review and sync"
-							: "Sync now",
-				);
+							: "Sync now";
+				item.setTitle(title);
 				item.setIcon("refresh-cw");
 				item.onClick(() => {
 					void this.syncNow();
@@ -1093,10 +1160,17 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private updateRibbonIcon(): void {
 		if (this.syncRibbonIconEl === null) return;
-		this.syncRibbonIconEl.removeClass("is-syncing", "is-error", "is-warning");
+		this.syncRibbonIconEl.removeClass(
+			"is-syncing",
+			"is-error",
+			"is-warning",
+			"is-pending",
+			"is-success",
+		);
 
 		if (this.statusBarState.kind === "syncing") {
 			this.syncRibbonIconEl.addClass("is-syncing");
+			setIcon(this.syncRibbonIconEl, "refresh-cw");
 			if (
 				this.statusBarState.progress?.phase === "transferring" &&
 				this.statusBarState.progress.total > 0
@@ -1108,20 +1182,30 @@ export default class FilenSyncPlugin extends Plugin {
 				const pathDetail = this.statusBarState.progress.path
 					? ` · ${this.statusBarState.progress.path.split("/").pop()}`
 					: "";
-				const tooltip = `Filen: Syncing ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)${pathDetail}\nClick for sync details`;
+				const tooltip = `Filen: Syncing ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)${pathDetail}\nSelect to open sync menu`;
 				setTooltip(this.syncRibbonIconEl, tooltip);
 				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			} else {
-				const tooltip = `Filen: ${this.statusBarState.text}\nClick for sync details`;
+				const tooltip = `Filen: ${this.statusBarState.text}\nSelect to open sync menu`;
 				setTooltip(this.syncRibbonIconEl, tooltip);
 				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			}
 			return;
 		}
 
+		if (this.coordinator.isReplanHeld) {
+			this.syncRibbonIconEl.addClass("is-error");
+			setIcon(this.syncRibbonIconEl, "alert-circle");
+			const tooltip = "Filen: Sync needs review — select Sync now\nSelect to open sync menu";
+			setTooltip(this.syncRibbonIconEl, tooltip);
+			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			return;
+		}
+
 		if (this.statusBarState.kind === "error") {
 			this.syncRibbonIconEl.addClass("is-error");
-			const tooltip = `Filen: Sync failed (${this.statusBarState.detail})\nClick to retry sync`;
+			setIcon(this.syncRibbonIconEl, "alert-circle");
+			const tooltip = `Filen: Sync failed (${this.statusBarState.detail})\nSelect to open sync menu`;
 			setTooltip(this.syncRibbonIconEl, tooltip);
 			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			return;
@@ -1129,16 +1213,32 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (this.statusBarState.kind === "warning") {
 			this.syncRibbonIconEl.addClass("is-warning");
-			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}`;
+			setIcon(
+				this.syncRibbonIconEl,
+				this.statusBarState.text.toLowerCase().includes("offline")
+					? "cloud-off"
+					: "alert-circle",
+			);
+			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}\nSelect to open sync menu`;
 			setTooltip(this.syncRibbonIconEl, tooltip);
 			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 			return;
 		}
 
+		if (this.statusBarState.kind === "pending" || this.coordinator.retryAt !== null) {
+			this.syncRibbonIconEl.addClass("is-pending");
+			setIcon(this.syncRibbonIconEl, "clock");
+			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}\nSelect to open sync menu`;
+			setTooltip(this.syncRibbonIconEl, tooltip);
+			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+			return;
+		}
+
+		setIcon(this.syncRibbonIconEl, "refresh-cw");
 		const tooltip =
 			this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0
-				? `Filen: Up to date (${formatRelativeTime(this.lastSyncTimestamp)})\nClick to sync now`
-				: "Filen: Sync now";
+				? `Filen: Up to date (${formatRelativeTime(this.lastSyncTimestamp)})\nSelect to open sync menu`
+				: "Filen: Select to open sync menu";
 		setTooltip(this.syncRibbonIconEl, tooltip);
 		this.syncRibbonIconEl.setAttr("aria-label", tooltip);
 	}

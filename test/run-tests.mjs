@@ -832,7 +832,7 @@ test("fast remote polling obeys safety rails and reuses cached tree only when sa
 		await engine.sync(undefined, undefined, undefined, "both", undefined, undefined, {
 			isManual: false,
 		});
-		assert.equal(walkCount, 4, "expired cache (>30m) forced full remote walk");
+		assert.equal(walkCount, 4, "expired cache (>5m) forced full remote walk");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -849,6 +849,7 @@ test("formatRelativeTime and isNetworkClassError produce correct results", async
 			export class TFile {}
 			export class TFolder {}
 			export class Notice {}
+			export const Platform = { isMobile: false };
 			export const normalizePath = (p) => p;
 			`,
 		);
@@ -907,6 +908,7 @@ test("SyncCoordinator offline awareness and error notice throttling", async () =
 			`
 			export class TFile {}
 			export class TFolder {}
+			export const Platform = { isMobile: false };
 			export class Notice {
 				constructor(message) {
 					globalThis.__testNotices.push(message);
@@ -1558,6 +1560,191 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 			),
 			/Remote identity unavailable.*Replan the sync/u,
 		);
+
+		// delete-remote passes expected remote identity, hash and version to rm
+		let passedExpectedOptions;
+		mockRemote.rm = async (p, uuid, opts) => {
+			passedExpectedOptions = opts;
+		};
+		// vault returns null for deleted-local.md
+		await executor.execute(
+			{ path: "deleted-local.md", operation: "delete-remote", detail: "delete" },
+			undefined,
+			{
+				path: "deleted-local.md",
+				mtime: 1000,
+				size: 25,
+				isDir: false,
+				uuid: "u1",
+				remoteHash: "hash-1",
+				version: 2,
+			},
+			{
+				path: "deleted-local.md",
+				mtime: 1000,
+				ctime: 1000,
+				size: 25,
+				hash: "h1",
+				lastSyncAt: 1,
+				lastKnownSide: "both",
+			},
+		);
+		assert.deepEqual(passedExpectedOptions, { remoteHash: "hash-1", version: 2 });
+
+		// delete-local should verify remote absence via fresh server stat
+		let trashedFile = false;
+		mockApp.fileManager = {
+			trashFile: async () => {
+				trashedFile = true;
+			},
+		};
+		// If remote file reappeared, delete-local aborts and replans without trashing
+		mockRemote.stat = async () => ({
+			uuid: "reappeared-uuid",
+			path: "note.md",
+			mtime: 1000,
+			size: 25,
+			isDir: false,
+		});
+		await assert.rejects(
+			executor.execute(
+				{ path: "note.md", operation: "delete-local", detail: "delete" },
+				{ path: "note.md", mtime: 2000, ctime: 2000, size: 25, file: fakeTFile },
+				undefined,
+				{
+					path: "note.md",
+					mtime: 1000,
+					ctime: 1000,
+					size: 25,
+					hash: "h1",
+					lastSyncAt: 1,
+					lastKnownSide: "both",
+				},
+			),
+			/Remote file reappeared before local deletion.*Replan the sync/u,
+		);
+		assert.equal(trashedFile, false, "Local file was not trashed when remote reappeared");
+
+		// If remote stat probe fails, delete-local aborts without trashing
+		mockRemote.stat = async () => {
+			throw new Error("Remote probe network failure");
+		};
+		await assert.rejects(
+			executor.execute(
+				{ path: "note.md", operation: "delete-local", detail: "delete" },
+				{ path: "note.md", mtime: 2000, ctime: 2000, size: 25, file: fakeTFile },
+				undefined,
+				{
+					path: "note.md",
+					mtime: 1000,
+					ctime: 1000,
+					size: 25,
+					hash: "h1",
+					lastSyncAt: 1,
+					lastKnownSide: "both",
+				},
+			),
+			/Remote probe network failure/u,
+		);
+		assert.equal(trashedFile, false, "Local file was not trashed when remote probe failed");
+
+		// If remote stat confirms absent (null), delete-local trashes file
+		mockRemote.stat = async () => null;
+		const deleteResult = await executor.execute(
+			{ path: "note.md", operation: "delete-local", detail: "delete" },
+			{ path: "note.md", mtime: 2000, ctime: 2000, size: 25, file: fakeTFile },
+			undefined,
+			{
+				path: "note.md",
+				mtime: 1000,
+				ctime: 1000,
+				size: 25,
+				hash: "h1",
+				lastSyncAt: 1,
+				lastKnownSide: "both",
+			},
+		);
+		assert.equal(trashedFile, true, "Local file was trashed after verified remote absence");
+		assert.equal(deleteResult.applied, 1);
+
+		// pushLocal updates DB baseline upon remote.writeFile success even if concurrent local edit triggers replan
+		const concurrentTFile = new TFile("typing.md", 1000, 20);
+		const concurrentEntry = {
+			path: "typing.md",
+			mtime: 1000,
+			ctime: 1000,
+			size: 20,
+			file: concurrentTFile,
+		};
+		let savedBaselineRecord;
+		mockDb.setFile = async (p, record) => {
+			savedBaselineRecord = record;
+		};
+		mockApp.vault.getAbstractFileByPath = () => concurrentTFile;
+		mockApp.vault.readBinary = async () => new Uint8Array([1, 2, 3]);
+		mockRemote.writeFile = async () => {
+			// User types in note while upload is in flight
+			concurrentTFile.stat.mtime = 3000;
+			return {
+				uuid: "uploaded-uuid",
+				remoteHash: "uploaded-hash",
+				size: 3,
+				path: "typing.md",
+				mtime: 1000,
+				isDir: false,
+			};
+		};
+
+		await assert.rejects(
+			executor.execute(
+				{ path: "typing.md", operation: "upload", detail: "upload" },
+				concurrentEntry,
+			),
+			/Local file changed during sync.*Replan the sync/u,
+		);
+
+		assert.ok(savedBaselineRecord, "Baseline was saved to DB upon successful upload");
+		assert.equal(savedBaselineRecord.remoteUuid, "uploaded-uuid");
+		assert.equal(savedBaselineRecord.mtime, 1000);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("conflict-utils correctly formats, identifies, and parses conflict file paths", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "filen-conflict-utils-test-"));
+	try {
+		const outfile = join(dir, "conflict-utils.mjs");
+		await build({
+			entryPoints: ["src/sync/conflict-utils.ts"],
+			outfile,
+			bundle: true,
+			format: "esm",
+			platform: "node",
+		});
+		const { conflictCopyPath, isConflictFilePath, getOriginalPathFromConflictPath } =
+			await import(pathToFileURL(outfile).href);
+
+		const generated = conflictCopyPath(
+			"Daily/2026/09/2026-09-26.md",
+			"2dc80003-d5b9-47d3-8a26-78e15a005f73",
+			1790437810707,
+			"remote",
+		);
+		assert.equal(
+			generated,
+			"Daily/2026/09/2026-09-26.sync-conflict-remote-2dc80003-d5b9-47d3-8a26-78e15a005f73-1790437810707.md",
+		);
+
+		assert.equal(isConflictFilePath(generated), true);
+		assert.equal(isConflictFilePath("Daily/2026/09/2026-09-26.md"), false);
+		assert.equal(getOriginalPathFromConflictPath(generated), "Daily/2026/09/2026-09-26.md");
+
+		// Extensionless file
+		const extless = conflictCopyPath("todo", "dev1", 12345, "local");
+		assert.equal(extless, "todo.sync-conflict-local-dev1-12345");
+		assert.equal(isConflictFilePath(extless), true);
+		assert.equal(getOriginalPathFromConflictPath(extless), "todo");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -1847,7 +2034,7 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 		desktopController.closeNotice();
 		assert.equal(globalThis.__testActiveNotices[0].hidden, true);
 
-		// Mobile controller: automatic progress shows compact notice after anti-flash delay
+		// Mobile controller: automatic progress suppressed; only shows detailed notice on explicit demand
 		globalThis.__testActiveNotices = [];
 		let mobileMenuOpened = false;
 		let mobileEnabled = true;
@@ -1863,7 +2050,7 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 			() => mobileEnabled,
 		);
 
-		// Background scan with 0 transfers: delayed anti-flash timer
+		// Background scan: no notice created automatically
 		mobileController.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
@@ -1872,11 +2059,13 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 			isManual: false,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		assert.equal(globalThis.__testActiveNotices.length, 0, "No notice before anti-flash delay");
-		const [initialShowTimer] = [...indicatorTimers].find(([, timer]) => timer.ms === 300);
-		assert.ok(initialShowTimer, "Anti-flash 300ms timer scheduled");
+		assert.equal(
+			globalThis.__testActiveNotices.length,
+			0,
+			"No notice automatically created on mobile",
+		);
 
-		// Progress update during anti-flash delay does not restart timer
+		// Progress update: still no notice created automatically
 		mobileController.onStatusChange({
 			kind: "syncing",
 			text: "Downloading…",
@@ -1886,22 +2075,34 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 			progress: { current: 1, total: 2, path: "note.md", phase: "transferring" },
 		});
 		assert.equal(
-			[...indicatorTimers].find(([, timer]) => timer.ms === 300)?.[0],
-			initialShowTimer,
-			"Progress updates do not restart the anti-flash delay",
+			globalThis.__testActiveNotices.length,
+			0,
+			"No notice during automatic transfer",
 		);
 
-		// Fire anti-flash timer
-		const showTimer = indicatorTimers.get(initialShowTimer);
-		indicatorTimers.delete(initialShowTimer);
-		showTimer.fn();
-
-		assert.equal(globalThis.__testActiveNotices.length, 1, "Notice visible after 300 ms");
+		// Explicit on-demand request: shows detailed notice
+		mobileController.showOnDemand({
+			kind: "syncing",
+			text: "Downloading…",
+			detail: "1/2 · note.md",
+			updatedAt: Date.now(),
+			isManual: true,
+			progress: { current: 1, total: 2, path: "note.md", phase: "transferring" },
+		});
+		assert.equal(
+			globalThis.__testActiveNotices.length,
+			1,
+			"Notice visible after on-demand request",
+		);
 		const mobileNotice = globalThis.__testActiveNotices[0];
-		assert.equal(mobileNotice.noticeEl.hasClass("filen-notice-compact"), true);
+		assert.equal(
+			mobileNotice.noticeEl.hasClass("filen-notice-compact"),
+			false,
+			"On-demand notice is detailed",
+		);
 		assert.equal(mobileNotice.noticeEl.hasClass("is-syncing"), true);
 
-		// Success
+		// Success while on-demand notice is open
 		mobileController.onStatusChange({
 			kind: "success",
 			text: "up to date",
@@ -1909,24 +2110,6 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 			updatedAt: Date.now(),
 		});
 		assert.equal(mobileNotice.noticeEl.hasClass("is-success"), true);
-
-		// Pending
-		mobileController.onStatusChange({
-			kind: "pending",
-			text: "2 changes pending",
-			detail: "Local changes waiting to sync.",
-			updatedAt: Date.now(),
-		});
-		assert.equal(mobileNotice.noticeEl.hasClass("is-pending"), true);
-
-		// Warning
-		mobileController.onStatusChange({
-			kind: "warning",
-			text: "2 conflict(s) to review",
-			detail: "Conflict copies were saved in the vault.",
-			updatedAt: Date.now(),
-		});
-		assert.equal(mobileNotice.noticeEl.hasClass("is-warning"), true);
 
 		// Cleanup
 		mobileController.closeNotice();

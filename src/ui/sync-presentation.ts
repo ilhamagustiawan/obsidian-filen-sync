@@ -1,12 +1,12 @@
 import type { SyncProgress } from "../sync/types";
 
-export const shouldShowMobileSyncIndicator = (isMobile: boolean, enabled: boolean): boolean =>
-	isMobile && enabled;
+export const shouldShowMobileSyncIndicator = (_isMobile = false, _enabled = false): boolean =>
+	false;
 
 export const shouldShowFloatingIndicator = shouldShowMobileSyncIndicator;
 
-export const shouldShowAutomaticProgressNotice = (isMobile = false, enabled = false): boolean =>
-	isMobile && enabled;
+export const shouldShowAutomaticProgressNotice = (_isMobile = false, _enabled = false): boolean =>
+	false;
 
 export function formatBytes(bytes: number): string {
 	if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";

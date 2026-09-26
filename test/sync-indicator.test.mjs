@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 let presentation;
-test("sync presentation routes overlays only to enabled mobile fallback", async () => {
+test("sync presentation disables automatic mobile overlays in favor of quiet ribbon icon", async () => {
+	await mkdir(resolve("tmp"), { recursive: true });
 	const dir = await mkdtemp(resolve("tmp/sync-indicator-"));
 	try {
 		const outfile = join(dir, "sync-presentation.mjs");
@@ -19,10 +20,10 @@ test("sync presentation routes overlays only to enabled mobile fallback", async 
 		});
 		presentation = await import(pathToFileURL(outfile).href);
 		assert.equal(presentation.shouldShowMobileSyncIndicator(false, true), false);
-		assert.equal(presentation.shouldShowMobileSyncIndicator(true, true), true);
+		assert.equal(presentation.shouldShowMobileSyncIndicator(true, true), false);
 		assert.equal(presentation.shouldShowMobileSyncIndicator(true, false), false);
 		assert.equal(presentation.shouldShowAutomaticProgressNotice(false, true), false);
-		assert.equal(presentation.shouldShowAutomaticProgressNotice(true, true), true);
+		assert.equal(presentation.shouldShowAutomaticProgressNotice(true, true), false);
 		assert.equal(presentation.shouldShowAutomaticProgressNotice(true, false), false);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
@@ -82,7 +83,7 @@ test("last sync summary distinguishes never synced from a prior success", () => 
 	);
 });
 
-test("SyncNoticeController supports compact mobile mode with anti-flash delay and 10 Hz coalescing", async () => {
+test("SyncNoticeController suppresses automatic mobile notices and renders only on explicit demand", async () => {
 	const dir = await mkdtemp(resolve("tmp/sync-notice-test-"));
 	const originalSetTimeout = globalThis.setTimeout;
 	const originalClearTimeout = globalThis.clearTimeout;
@@ -227,10 +228,10 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 				menuOpened = true;
 			},
 			() => true, // isMobile = true
-			() => mobileEnabled,
+			() => true,
 		);
 
-		// When mobile sync indicator is disabled, automatic syncing shows no notice.
+		// 1. Automatic syncing never shows a notice on mobile or desktop
 		controller.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
@@ -238,16 +239,29 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 			updatedAt: Date.now(),
 			progress: { current: 0, total: 10, path: "a.md", phase: "transferring" },
 		});
-		assert.equal(globalThis.__testActiveNotices.length, 0);
+		assert.equal(globalThis.__testActiveNotices.length, 0, "No notice on automatic syncing");
 
-		// Enable mobile sync indicator
-		mobileEnabled = true;
-
-		// 1. Anti-flash delay: initial syncing queues a 300 ms timer without immediately mounting a Notice
 		controller.onStatusChange({
+			kind: "error",
+			text: "Sync failed",
+			detail: "Network error",
+			updatedAt: Date.now(),
+		});
+		assert.equal(globalThis.__testActiveNotices.length, 0, "No notice on automatic error");
+
+		controller.onStatusChange({
+			kind: "success",
+			text: "Sync complete",
+			detail: "Up to date",
+			updatedAt: Date.now(),
+		});
+		assert.equal(globalThis.__testActiveNotices.length, 0, "No notice on automatic completion");
+
+		// 2. Explicit on-demand progress request mounts detailed notice
+		controller.showOnDemand({
 			kind: "syncing",
 			text: "Syncing…",
-			detail: "Scanning…",
+			detail: "Transferring…",
 			updatedAt: Date.now(),
 			progress: {
 				current: 0,
@@ -258,35 +272,21 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 				totalBytes: 8192,
 			},
 		});
-		assert.equal(
-			globalThis.__testActiveNotices.length,
-			0,
-			"No notice immediately due to anti-flash delay",
-		);
-		const antiFlashTimerEntry = [...activeTimers.entries()].find(([, t]) => t.ms === 300);
-		assert.ok(antiFlashTimerEntry, "300ms anti-flash timer exists");
 
-		// Fire 300ms timer
-		activeTimers.delete(antiFlashTimerEntry[0]);
-		antiFlashTimerEntry[1].fn();
-
-		assert.equal(globalThis.__testActiveNotices.length, 1, "Notice mounted after 300ms");
+		assert.equal(globalThis.__testActiveNotices.length, 1, "Detailed notice mounted on demand");
 		const notice = globalThis.__testActiveNotices[0];
-		assert.ok(notice.noticeEl.hasClass("filen-notice-compact"), "Has compact class for mobile");
-		assert.equal(notice.noticeEl.getAttr("role"), "button", "Accessible button role");
+		assert.equal(
+			notice.noticeEl.hasClass("filen-notice-compact"),
+			false,
+			"Detailed mode is not compact",
+		);
 
-		// Click calls onOpenMenu
-		notice.noticeEl.trigger("click");
-		assert.equal(menuOpened, true, "Tapping compact notice opens menu");
-
-		// 2. Truthful live work while file is in flight at 0/294
+		// Truthful live work while file is in flight at 0/294
 		const countEl = notice.noticeEl.children[0].children[2].children[0];
 		assert.match(countEl.textContent, /0 of 294/);
 		assert.match(countEl.textContent, /1\.0 KB\/8\.0 KB/);
 
-		// 3. Coalescing to 10 Hz (100 ms)
-		// Send 10 rapid progress updates
-		const renderCountBefore = notice.noticeEl.children[0].children[2].children[0].textContent;
+		// 3. Coalescing to 10 Hz (100 ms) while on-demand notice is active
 		for (let i = 1; i <= 5; i++) {
 			controller.onStatusChange({
 				kind: "syncing",
@@ -303,7 +303,6 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 				},
 			});
 		}
-		// A 100ms coalesce timer must be active
 		const coalesceEntry = [...activeTimers.entries()].find(([, t]) => t.ms <= 100);
 		assert.ok(coalesceEntry, "100ms coalesce timer active");
 
@@ -316,20 +315,7 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 		});
 		assert.ok(notice.noticeEl.hasClass("is-success"), "Terminal state rendered immediately");
 
-		// On-demand expansion to detailed mode
-		controller.showOnDemand({
-			kind: "syncing",
-			text: "Syncing…",
-			detail: "Scanning…",
-			updatedAt: Date.now(),
-			progress: { current: 5, total: 10, path: "test.md", phase: "transferring" },
-		});
-		assert.ok(
-			!globalThis.__testActiveNotices.at(-1).noticeEl.hasClass("filen-notice-compact"),
-			"Detailed mode does not have compact class",
-		);
-
-		// Scanning phase: title is "Filen Sync", count shows phase label, file is empty (no duplicate text)
+		// Scanning phase on-demand: title is "Filen Sync", count shows phase label, file is empty
 		controller.showOnDemand({
 			kind: "syncing",
 			text: "Checking local files…",

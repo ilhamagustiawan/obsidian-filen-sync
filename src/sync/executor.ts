@@ -2,6 +2,7 @@ import type { App, TAbstractFile } from "obsidian";
 import { TFile, normalizePath } from "obsidian";
 import type { SyncDb } from "../db";
 import type { RemoteEntry, RemoteFs } from "../fs-remote";
+import { conflictCopyPath } from "./conflict-utils";
 import { sha256Hex } from "./content-hash";
 import type { ConflictCopy, PlannedAction, SyncedFileRecord } from "./types";
 
@@ -68,6 +69,14 @@ export class SyncExecutor {
 	): Promise<ExecutionResult> {
 		switch (action.operation) {
 			case "delete-local": {
+				if (this.config.remote.stat) {
+					const remoteStat = await this.config.remote.stat(action.path);
+					if (remoteStat !== null) {
+						throw new Error(
+							`Remote file reappeared before local deletion: ${action.path}. Replan the sync.`,
+						);
+					}
+				}
 				const deleted = await this.deleteLocal(action.path, local);
 				if (deleted && prev !== undefined) {
 					await this.config.db.deleteFile(action.path);
@@ -91,7 +100,10 @@ export class SyncExecutor {
 						`Remote identity unavailable for deletion: ${action.path}. Replan the sync.`,
 					);
 				}
-				await this.config.remote.rm(action.path, remote.uuid);
+				await this.config.remote.rm(action.path, remote.uuid, {
+					remoteHash: remote.remoteHash,
+					version: remote.version,
+				});
 				if (prev !== undefined) {
 					await this.config.db.deleteFile(action.path);
 				}
@@ -184,13 +196,11 @@ export class SyncExecutor {
 			remote?.uuid,
 			onProgress,
 		);
-		assertLocalUnchanged(this.config.app, path, local);
-		await assertLocalBytesUnchanged(this.config.app, path, local, hash);
 
 		await this.config.db.setFile(path, {
 			path: local.path,
-			mtime: file.stat.mtime,
-			ctime: file.stat.ctime,
+			mtime: local.mtime,
+			ctime: local.ctime,
 			size: bytes.byteLength,
 			hash,
 			remoteUuid: uploaded.uuid,
@@ -198,6 +208,9 @@ export class SyncExecutor {
 			lastSyncAt: Date.now(),
 			lastKnownSide: "local",
 		});
+
+		assertLocalUnchanged(this.config.app, path, local);
+		await assertLocalBytesUnchanged(this.config.app, path, local, hash);
 
 		const updatedLocal: LocalEntry = {
 			...local,
@@ -460,23 +473,6 @@ const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
 	new Uint8Array(buffer).set(bytes);
 	return buffer;
 };
-
-const conflictCopyPath = (
-	path: string,
-	deviceId: string,
-	timestamp: number,
-	side: "local" | "remote",
-): string => {
-	const normalized = normalizePath(path);
-	const dotIndex = normalized.lastIndexOf(".");
-	const suffix = `.sync-conflict-${side}-${safePathSegment(deviceId)}-${timestamp}`;
-	return dotIndex <= 0
-		? `${normalized}${suffix}`
-		: `${normalized.slice(0, dotIndex)}${suffix}${normalized.slice(dotIndex)}`;
-};
-
-const safePathSegment = (value: string): string =>
-	value.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
 
 const sortDirs = (dirs: Set<string>): string[] =>
 	[...dirs].sort((l, r) => l.split("/").length - r.split("/").length || l.localeCompare(r));

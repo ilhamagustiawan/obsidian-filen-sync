@@ -595,7 +595,7 @@ test("narrow pass falls back to full scan when local scan snapshot is missing or
 	assert.equal(new TextDecoder().decode(s.cloud.get("a.md").content), "a-mod");
 });
 
-test("narrow pass falls back to full scan when remote tree cache is stale (>30m)", async (t) => {
+test("narrow pass falls back to full scan when remote tree cache is stale (>5m)", async (t) => {
 	let now = 3_000_000;
 	t.mock.method(Date, "now", () => now);
 

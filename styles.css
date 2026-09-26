@@ -93,12 +93,24 @@
 	animation: filen-sync-spin 1.2s linear infinite;
 }
 
+.filen-sync-ribbon-sync.is-pending {
+	color: var(--interactive-accent);
+}
+
 .filen-sync-ribbon-sync.is-error {
 	color: var(--text-error);
 }
 
 .filen-sync-ribbon-sync.is-warning {
 	color: var(--text-warning);
+}
+
+.is-mobile .filen-sync-ribbon-sync {
+	min-width: 44px;
+	min-height: 44px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 }
 
 /* Sync progress Notice */
@@ -1255,7 +1267,8 @@
 @media (prefers-reduced-motion: reduce) {
 	.filen-notice-bar-fill,
 	.filen-notice-icon.filen-notice-spin svg,
-	.filen-sync-status-item.is-syncing svg {
+	.filen-sync-status-item.is-syncing svg,
+	.filen-sync-ribbon-sync.is-syncing svg {
 		animation: none !important;
 		transition: none !important;
 	}

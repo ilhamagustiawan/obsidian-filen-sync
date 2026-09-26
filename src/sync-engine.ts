@@ -32,7 +32,7 @@ export type {
 	SyncProgress,
 };
 
-export const REMOTE_TREE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+export const REMOTE_TREE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 export const LOCAL_SCAN_SNAPSHOT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 type RemoteTreeCache = {

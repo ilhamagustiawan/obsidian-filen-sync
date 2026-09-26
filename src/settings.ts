@@ -414,21 +414,6 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(section)
-			.setName("Mobile sync indicator")
-			.setDesc(
-				"Display a compact sync progress notice on mobile screens during synchronization.",
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.showFloatingSyncIndicator)
-					.onChange(async (value) => {
-						this.plugin.settings.showFloatingSyncIndicator = value;
-						await this.plugin.saveSettings();
-						this.plugin.refreshFloatingIndicator();
-					}),
-			);
-
-		new Setting(section)
 			.setName("Status bar indicator style")
 			.setDesc(
 				"Choose whether the status bar item displays a compact icon or includes text and progress (when the status bar is visible).",

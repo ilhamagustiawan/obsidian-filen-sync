@@ -1,11 +1,12 @@
 import type { App, EventRef, TAbstractFile } from "obsidian";
-import { Notice, TFile, TFolder } from "obsidian";
+import { Notice, Platform, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "../db";
 import type { FilenRemoteFs } from "../fs-remote";
 import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { SyncEngine } from "../sync-engine";
 import type { BulkGuardReport } from "./bulk-guard";
+import { isConflictFilePath } from "./conflict-utils";
 import type {
 	SyncActivityEvent,
 	SyncDirection,
@@ -81,6 +82,8 @@ export class SyncCoordinator {
 	private lastSyncStartAt = 0;
 	private pendingAutoSyncRequiresFullScan = false;
 	private autoSyncTransientFailureCount = 0;
+	private autoSyncReplanRetryCount = 0;
+	private isReplanRetryHeld = false;
 	private pendingPaths = new Map<string, number>();
 	private changeRevision = 0;
 	private lastEditAt = 0;
@@ -104,7 +107,15 @@ export class SyncCoordinator {
 	}
 
 	get retryAt(): number | null {
-		return this.autoSyncTransientFailureCount > 0 ? this.nextAutoSyncAllowedAt : null;
+		if (this.isReplanRetryHeld) return null;
+		if (this.autoSyncTransientFailureCount > 0 || this.autoSyncReplanRetryCount > 0) {
+			return this.nextAutoSyncAllowedAt;
+		}
+		return null;
+	}
+
+	get isReplanHeld(): boolean {
+		return this.isReplanRetryHeld;
 	}
 
 	recordSyncStart(): void {
@@ -120,20 +131,53 @@ export class SyncCoordinator {
 		this.callbacks.onStatusChange(state);
 	}
 
+	getConflictFiles(): TFile[] {
+		return (this.app.vault.getFiles?.() ?? []).filter((f) => isConflictFilePath(f.path));
+	}
+
+	get conflictCount(): number {
+		return this.getConflictFiles().length;
+	}
+
 	private publishPending(): void {
+		if (this.isSyncing || this.isReplanRetryHeld) return;
+		const conflictCount = this.conflictCount;
+		if (conflictCount > 0) {
+			this.publishStatus({
+				kind: "warning",
+				text: `${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`,
+				detail:
+					this.pendingCount > 0
+						? `${this.pendingCount} local changes pending · ${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`
+						: `${conflictCount} conflict(s) to review in vault.`,
+				updatedAt: Date.now(),
+			});
+			return;
+		}
 		if (
-			this.isSyncing ||
-			this.lastStatus?.kind === "warning" ||
-			this.lastStatus?.kind === "error"
+			this.lastStatus?.kind === "warning" &&
+			!this.lastStatus.text.toLowerCase().includes("conflict")
 		)
 			return;
-		if (this.pendingCount > 0)
+		if (this.lastStatus?.kind === "error") return;
+		if (this.pendingCount > 0) {
 			this.publishStatus({
 				kind: "idle",
 				text: "Ready",
 				detail: "Local changes are queued for automatic sync.",
 				updatedAt: Date.now(),
 			});
+		} else if (
+			this.lastStatus?.kind === "warning" &&
+			this.lastStatus.text.toLowerCase().includes("conflict")
+		) {
+			this.publishStatus({
+				kind: "idle",
+				text: "up to date",
+				detail: "All conflicts resolved and files up to date.",
+				updatedAt: Date.now(),
+			});
+		}
 	}
 
 	get active(): boolean {
@@ -336,12 +380,31 @@ export class SyncCoordinator {
 			}
 
 			this.resetAutoSyncBackoff();
+			this.autoSyncReplanRetryCount = 0;
+			this.isReplanRetryHeld = false;
 			if (direction !== "pull")
 				for (const [path, revision] of pendingAtStart) {
 					if (this.pendingPaths.get(path) === revision) this.pendingPaths.delete(path);
 				}
 
-			if (result.applied === 0 && result.conflicts === 0) {
+			const conflictCount = this.conflictCount;
+			const hasConflicts = result.conflicts > 0 || conflictCount > 0;
+			const effectiveConflicts = Math.max(result.conflicts, conflictCount);
+
+			if (result.conflicts > 0) {
+				const details = result.conflictCopies?.length
+					? result.conflictCopies.map((c) => c.originalPath).join(", ")
+					: `${result.conflicts} file(s)`;
+				new Notice(
+					`Filen Sync: Conflict detected in ${details} — conflict copy saved in vault. Review in sync menu.`,
+					10000,
+				);
+				this.callbacks.onLogActivity(
+					`Conflict detected: ${details} — review conflict copies in sync menu.`,
+				);
+			}
+
+			if (result.applied === 0 && !hasConflicts) {
 				if (isManual)
 					this.callbacks.onLogActivity(
 						`Sync complete: up to date${formatTimingSummary(result.timing)}`,
@@ -362,26 +425,20 @@ export class SyncCoordinator {
 
 			const parts: string[] = [];
 			if (result.applied > 0) parts.push(`${result.applied} applied`);
-			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
+			if (effectiveConflicts > 0) parts.push(`${effectiveConflicts} conflict(s)`);
 			const summary = parts.join(", ");
 
 			this.callbacks.onLogActivity(
 				`Sync complete: ${summary}${formatTimingSummary(result.timing)}`,
 			);
 			this.publishStatus({
-				kind: result.conflicts > 0 ? "warning" : this.pendingCount > 0 ? "idle" : "success",
-				text: result.conflicts > 0 ? `${result.conflicts} conflict(s) to review` : summary,
+				kind: hasConflicts ? "warning" : this.pendingCount > 0 ? "idle" : "success",
+				text: hasConflicts ? `${effectiveConflicts} conflict(s) to review` : summary,
 				detail: `${label}: ${summary}`,
 				updatedAt: Date.now(),
 				isManual,
 				syncCompleted: true,
 			});
-
-			if (result.conflicts > 0) {
-				new Notice(
-					`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`,
-				);
-			}
 
 			return {
 				kind: "applied",
@@ -405,13 +462,56 @@ export class SyncCoordinator {
 				this.consecutiveNetworkFailures = 0;
 			}
 
+			const replanRace = options.autoSync && isReplanError(error);
+			if (replanRace) {
+				if (this.autoSyncReplanRetryCount < 3) {
+					this.autoSyncReplanRetryCount += 1;
+					this.pendingAutoSync = true;
+					this.pendingAutoSyncRequiresFullScan = true;
+					const replanBackoffMs = 1000 * Math.pow(2, this.autoSyncReplanRetryCount);
+					const minGapMs = (this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000;
+					this.nextAutoSyncAllowedAt = Math.max(
+						this.lastSyncStartAt + minGapMs,
+						Date.now() + replanBackoffMs,
+					);
+					this.publishStatus({
+						kind: "pending",
+						text: "Sync pending",
+						detail: `Changes detected during sync (${this.autoSyncReplanRetryCount}/3); retrying...`,
+						updatedAt: Date.now(),
+						isManual: false,
+					});
+					return { kind: "failed", message };
+				}
+				this.isReplanRetryHeld = true;
+				this.publishStatus({
+					kind: "error",
+					text: "Sync needs review — select Sync now",
+					detail: "Concurrent changes detected repeatedly. Select Sync now to resolve.",
+					updatedAt: Date.now(),
+					isManual: false,
+				});
+				this.callbacks.onLogActivity(
+					"Sync held: concurrent changes detected repeatedly. Select Sync now to resolve.",
+				);
+				if (!Platform.isMobile) {
+					this.showThrottledNotice(
+						"Filen Sync: Sync needs review — select Sync now",
+						false,
+					);
+				}
+				return { kind: "failed", message };
+			}
+
 			if (options.autoSync && isTransientError(error)) {
 				this.pendingAutoSync = true;
 				this.bumpAutoSyncBackoff(error);
 			}
 			this.publishStatus({
 				kind: "error",
-				text: `${label} failed`,
+				text: this.isReplanRetryHeld
+					? "Sync needs review — select Sync now"
+					: `${label} failed`,
 				detail: message,
 				updatedAt: Date.now(),
 				isManual,
@@ -420,7 +520,9 @@ export class SyncCoordinator {
 			if (!options.silent) {
 				new Notice(`${label} failed: ${message}`);
 			} else if (options.autoSync) {
-				this.showThrottledNotice(`Filen auto-sync failed: ${message}`, false);
+				if (!Platform.isMobile) {
+					this.showThrottledNotice(`Filen auto-sync failed: ${message}`, false);
+				}
 			}
 
 			console.error(`Filen Sync: ${label} failed`, error);
@@ -447,15 +549,25 @@ export class SyncCoordinator {
 		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } =
 			this.settings;
 
-		const handleVaultChange = (_action: string) => (file: TAbstractFile, oldPath?: string) => {
+		const handleVaultChange = (action: string) => (file: TAbstractFile, oldPath?: string) => {
 			this.syncEngine?.invalidateLocal(file.path);
 			if (oldPath !== undefined) this.syncEngine?.invalidateLocal(oldPath);
+			if (action === "deleted" || action === "renamed") {
+				if (
+					isConflictFilePath(file.path) ||
+					(oldPath !== undefined && isConflictFilePath(oldPath))
+				) {
+					this.publishPending();
+				}
+			}
 			if (!this.shouldAutoSyncForFileEvent(file, oldPath)) return;
 			this.pendingPaths.set(file.path, ++this.changeRevision);
 			if (oldPath !== undefined) this.pendingPaths.set(oldPath, this.changeRevision);
 			this.lastEditAt = Date.now();
-			this.publishPending();
-			if (!syncOnSave || this.settings.syncPaused) return;
+			if (!this.isReplanRetryHeld) {
+				this.publishPending();
+			}
+			if (!syncOnSave || this.settings.syncPaused || this.isReplanRetryHeld) return;
 			this.scheduleAutoSync(
 				syncOnSaveDelaySeconds * 1000,
 				hasSavedAuth,
@@ -544,6 +656,7 @@ export class SyncCoordinator {
 	}
 
 	private scheduleAutoSync(delayMs: number, hasSavedAuth: () => boolean, fullScan = true): void {
+		if (this.isReplanRetryHeld) return;
 		this.pendingAutoSync = true;
 		this.pendingAutoSyncRequiresFullScan ||= fullScan;
 		this.scheduleQueuedAutoSync(delayMs, hasSavedAuth);
@@ -551,6 +664,7 @@ export class SyncCoordinator {
 
 	private requestAutoSync(hasSavedAuth: () => boolean, fullScan = true): void {
 		this.pendingAutoSyncRequiresFullScan ||= fullScan;
+		if (this.isReplanRetryHeld) return;
 		if (!this.hasAutoSyncEnabled() || this.confirmationRequired) return;
 		if (!hasSavedAuth()) return;
 		const browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
@@ -583,6 +697,7 @@ export class SyncCoordinator {
 
 	private runPendingAutoSync(): void {
 		if (
+			this.isReplanRetryHeld ||
 			!this.pendingAutoSync ||
 			!this.hasAutoSyncEnabled() ||
 			this.autoSyncHasSavedAuth === null
@@ -597,6 +712,7 @@ export class SyncCoordinator {
 
 	private scheduleQueuedAutoSync(delayMs: number, hasSavedAuth: () => boolean): void {
 		if (
+			this.isReplanRetryHeld ||
 			!this.pendingAutoSync ||
 			!this.hasAutoSyncEnabled() ||
 			!hasSavedAuth() ||
@@ -621,6 +737,7 @@ export class SyncCoordinator {
 
 	private resetAutoSyncBackoff(): void {
 		this.autoSyncTransientFailureCount = 0;
+		this.autoSyncReplanRetryCount = 0;
 		this.nextAutoSyncAllowedAt = Math.max(
 			0,
 			this.lastSyncStartAt + (this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000,
@@ -657,9 +774,9 @@ export class SyncCoordinator {
 				: undefined,
 		});
 		if (
-			pathFilter.isIgnored(file.path, file instanceof TFile ? file.stat.size : undefined) &&
+			pathFilter.isIgnored(file.path, file instanceof TFile ? file.stat?.size : undefined) &&
 			(oldPath === undefined ||
-				pathFilter.isIgnored(oldPath, file instanceof TFile ? file.stat.size : undefined))
+				pathFilter.isIgnored(oldPath, file instanceof TFile ? file.stat?.size : undefined))
 		) {
 			return false;
 		}
@@ -739,7 +856,7 @@ const syncOperationCompleteMessage = (operation: SyncOperation, path: string): s
 		case "delete-remote":
 			return `Deleted remotely ${path}`;
 		case "conflict":
-			return `Conflict resolved ${path}`;
+			return `Conflict copy created for ${path}`;
 		default:
 			return `Synced ${path}`;
 	}
@@ -829,4 +946,9 @@ function progressLabel(progress: SyncProgress): string {
 		default:
 			return "Syncing…";
 	}
+}
+
+export function isReplanError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes("Replan the sync") || message.includes("Changes detected during sync");
 }

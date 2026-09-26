@@ -12,6 +12,7 @@ export type RemoteEntry = {
 	isDir: boolean;
 	uuid?: string;
 	remoteHash?: string;
+	version?: number;
 };
 
 export type RemoteTargetIdentity = { userId: number; rootUuid: string };
@@ -40,7 +41,11 @@ export type RemoteFs = {
 		expectedRemoteUuid?: string,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<RemoteEntry>;
-	rm(path: string, expectedRemoteUuid?: string): Promise<void>;
+	rm(
+		path: string,
+		expectedRemoteUuid?: string,
+		expectedOptions?: { remoteHash?: string; version?: number },
+	): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	checkConnect(): Promise<void>;
 	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
@@ -166,6 +171,10 @@ export class FilenRemoteFs implements RemoteFs {
 						? (item as { uuid: string }).uuid
 						: undefined,
 				remoteHash,
+				version:
+					typeof (item as { version?: unknown }).version === "number"
+						? (item as { version: number }).version
+						: undefined,
 			});
 		}
 
@@ -239,11 +248,11 @@ export class FilenRemoteFs implements RemoteFs {
 			const existing = await client
 				.cloud()
 				.fileExists({ name: fileName, parent: parentUuid });
+			const exists = existing?.exists === true;
+			const remoteUuid = exists ? existing?.uuid : undefined;
 			if (
-				(expectedRemoteUuid === undefined && existing) ||
-				(expectedRemoteUuid !== undefined &&
-					(!existing ||
-						(typeof existing === "object" && existing.uuid !== expectedRemoteUuid)))
+				(expectedRemoteUuid === undefined && exists) ||
+				(expectedRemoteUuid !== undefined && (!exists || remoteUuid !== expectedRemoteUuid))
 			) {
 				throw new Error(`Remote file changed before upload: ${path}. Replan the sync.`);
 			}
@@ -289,14 +298,24 @@ export class FilenRemoteFs implements RemoteFs {
 		};
 	}
 
-	async rm(path: string, expectedRemoteUuid?: string): Promise<void> {
+	async rm(
+		path: string,
+		expectedRemoteUuid?: string,
+		expectedOptions?: { remoteHash?: string; version?: number },
+	): Promise<void> {
 		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const current = await this.stat(path);
 		if (
 			current === null ||
-			(expectedRemoteUuid !== undefined && current.uuid !== expectedRemoteUuid)
+			(expectedRemoteUuid !== undefined && current.uuid !== expectedRemoteUuid) ||
+			(expectedOptions?.remoteHash !== undefined &&
+				current.remoteHash !== undefined &&
+				current.remoteHash !== expectedOptions.remoteHash) ||
+			(expectedOptions?.version !== undefined &&
+				current.version !== undefined &&
+				current.version !== expectedOptions.version)
 		) {
 			throw new Error(`Remote file changed before deletion: ${path}. Replan the sync.`);
 		}
@@ -472,6 +491,7 @@ export class FilenRemoteFs implements RemoteFs {
 			isDir: false,
 			uuid: file.uuid,
 			remoteHash,
+			version: typeof file.version === "number" ? file.version : undefined,
 		};
 	}
 
