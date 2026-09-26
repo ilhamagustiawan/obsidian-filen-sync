@@ -42,6 +42,14 @@ export type ConflictCopy = {
 	copyPath: string;
 };
 
+export type SyncTimingSummary = {
+	totalMs: number;
+	scanMs?: number;
+	planMs?: number;
+	transferMs?: number;
+	firstTransferMs?: number;
+};
+
 export type SyncOutcome = {
 	applied: number;
 	conflicts: number;
@@ -52,6 +60,7 @@ export type SyncOutcome = {
 	deletedRemote?: number;
 	cancelled?: boolean;
 	cancelReason?: string;
+	timing?: SyncTimingSummary;
 };
 
 export type SyncProgress = {

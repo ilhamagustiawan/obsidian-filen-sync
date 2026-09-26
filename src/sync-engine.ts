@@ -269,6 +269,11 @@ export class SyncEngine {
 		let remoteDirs = new Set<string>();
 		let remoteFromCache = false;
 
+		const syncPassStart = performance.now();
+		const scanStart = performance.now();
+		let scanMs = 0;
+		let planMs = 0;
+
 		if (isNarrow) {
 			onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
 			const candidatePaths = new Set(options.scanHints!);
@@ -349,6 +354,8 @@ export class SyncEngine {
 				[...testLocalPaths.entries()].map(([path, isDir]) => ({ path, isDir })),
 			);
 
+			scanMs = Math.round(performance.now() - scanStart);
+			const planStart = performance.now();
 			onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
 			const localFiles = new Map<string, LocalFileInfo>();
 			for (const [path, entry] of candidateLocalFiles) {
@@ -377,6 +384,7 @@ export class SyncEngine {
 				},
 				bulkThresholds,
 			);
+			planMs = Math.round(performance.now() - planStart);
 
 			effectiveLocalFiles = candidateLocalFiles;
 			effectiveRemoteFiles = this.remoteTreeCache!.scan.files;
@@ -450,6 +458,8 @@ export class SyncEngine {
 				});
 			}
 
+			scanMs = Math.round(performance.now() - scanStart);
+			const planStart = performance.now();
 			onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
 			planResult = planSync({
 				localFiles,
@@ -467,6 +477,7 @@ export class SyncEngine {
 				},
 				bulkThresholds,
 			);
+			planMs = Math.round(performance.now() - planStart);
 
 			effectiveLocalFiles = local.files;
 			effectiveRemoteFiles = remote.files;
@@ -543,6 +554,9 @@ export class SyncEngine {
 			});
 		}
 
+		let firstTransferMs: number | undefined;
+		const transferStart = performance.now();
+
 		const execute = async (action: (typeof planResult.actions)[number]): Promise<void> => {
 			const report = (completedBytes?: number, totalBytes?: number): void => {
 				if (action.operation !== "noop")
@@ -572,6 +586,9 @@ export class SyncEngine {
 						`File changed before applying ${action.path}. Replan the sync.`,
 					);
 				completed++;
+				if (firstTransferMs === undefined) {
+					firstTransferMs = Math.round(performance.now() - syncPassStart);
+				}
 				report();
 			}
 			applied += result.applied;
@@ -629,6 +646,7 @@ export class SyncEngine {
 			}
 		}
 		await flush();
+		const transferMs = Math.round(performance.now() - transferStart);
 		if (applied > 0 && options.scanHints === undefined) {
 			this.remoteTreeCache = null;
 		}
@@ -641,6 +659,13 @@ export class SyncEngine {
 			downloaded,
 			deletedLocal,
 			deletedRemote,
+			timing: {
+				totalMs: Math.round(performance.now() - syncPassStart),
+				scanMs,
+				planMs,
+				transferMs: applied > 0 ? transferMs : 0,
+				firstTransferMs,
+			},
 		};
 	}
 

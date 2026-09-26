@@ -6,7 +6,25 @@ import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { SyncEngine } from "../sync-engine";
 import type { BulkGuardReport } from "./bulk-guard";
-import type { SyncActivityEvent, SyncDirection, SyncOperation, SyncProgress } from "./types";
+import type {
+	SyncActivityEvent,
+	SyncDirection,
+	SyncOperation,
+	SyncProgress,
+	SyncTimingSummary,
+} from "./types";
+
+function formatTimingSummary(timing?: SyncTimingSummary): string {
+	if (!timing) return "";
+	const parts: string[] = [`total ${(timing.totalMs / 1000).toFixed(1)}s`];
+	if (timing.scanMs !== undefined && timing.scanMs > 0) parts.push(`scan ${timing.scanMs}ms`);
+	if (timing.planMs !== undefined && timing.planMs > 0) parts.push(`plan ${timing.planMs}ms`);
+	if (timing.transferMs !== undefined && timing.transferMs > 0)
+		parts.push(`transfer ${timing.transferMs}ms`);
+	if (timing.firstTransferMs !== undefined)
+		parts.push(`first file in ${timing.firstTransferMs}ms`);
+	return ` (${parts.join(", ")})`;
+}
 
 export type StatusBarKind = "idle" | "pending" | "syncing" | "success" | "warning" | "error";
 
@@ -324,7 +342,10 @@ export class SyncCoordinator {
 				}
 
 			if (result.applied === 0 && result.conflicts === 0) {
-				if (isManual) this.callbacks.onLogActivity("Sync complete: up to date");
+				if (isManual)
+					this.callbacks.onLogActivity(
+						`Sync complete: up to date${formatTimingSummary(result.timing)}`,
+					);
 				this.publishStatus({
 					kind: this.pendingCount > 0 ? "idle" : "success",
 					text: "up to date",
@@ -344,7 +365,9 @@ export class SyncCoordinator {
 			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
 			const summary = parts.join(", ");
 
-			this.callbacks.onLogActivity(`Sync complete: ${summary}`);
+			this.callbacks.onLogActivity(
+				`Sync complete: ${summary}${formatTimingSummary(result.timing)}`,
+			);
 			this.publishStatus({
 				kind: result.conflicts > 0 ? "warning" : this.pendingCount > 0 ? "idle" : "success",
 				text: result.conflicts > 0 ? `${result.conflicts} conflict(s) to review` : summary,
