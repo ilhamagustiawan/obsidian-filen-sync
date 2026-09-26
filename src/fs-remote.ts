@@ -49,6 +49,7 @@ export type RemoteFs = {
 	stat?(path: string): Promise<RemoteEntry | null>;
 	close(): void;
 	checkEvents?(watermarkMs: number): Promise<{ hasChanges: boolean; newWatermarkMs: number }>;
+	withMutationSession?<T>(fn: () => Promise<T>): Promise<T>;
 };
 
 type FilenRemoteFsConfig = {
@@ -65,8 +66,25 @@ export class FilenRemoteFs implements RemoteFs {
 	private verifiedRootForSync: FilenSDK | null = null;
 	private scannedDirectoryUuids: Map<string, string> | null = null;
 	private createdDirectoryPaths = new Set<string>();
+	private inMutationSession = false;
 
 	constructor(private readonly config: FilenRemoteFsConfig) {}
+
+	async withMutationSession<T>(fn: () => Promise<T>): Promise<T> {
+		this.inMutationSession = true;
+		try {
+			return await fn();
+		} finally {
+			this.inMutationSession = false;
+			this.verifiedRootForSync = null;
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+			if (this.client !== null) {
+				this.client.init(this.client.config);
+				configureSdkRetryBounds(this.client);
+			}
+		}
+	}
 
 	async walk(): Promise<RemoteEntry[]> {
 		this.verifiedRootForSync = null;
@@ -199,13 +217,6 @@ export class FilenRemoteFs implements RemoteFs {
 	): Promise<RemoteEntry> {
 		this.verifiedRootForSync = null;
 		validateSyncPath(path);
-		const current = await this.stat(path);
-		if (
-			(expectedRemoteUuid === undefined && current !== null) ||
-			(expectedRemoteUuid !== undefined && current?.uuid !== expectedRemoteUuid)
-		) {
-			throw new Error(`Remote file changed before upload: ${path}. Replan the sync.`);
-		}
 		const client = await this.getClient();
 		const normalized = normalizeRemotePath(path);
 		const parent = normalized.includes("/")
@@ -213,7 +224,38 @@ export class FilenRemoteFs implements RemoteFs {
 			: "";
 		const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
 
-		const parentUuid = await this.getParentUuid(parent);
+		let parentUuid: string;
+		if (
+			this.inMutationSession &&
+			this.scannedDirectoryUuids !== null &&
+			this.scannedDirectoryUuids.has(parent)
+		) {
+			parentUuid = this.scannedDirectoryUuids.get(parent)!;
+		} else {
+			parentUuid = await this.getParentUuid(parent);
+		}
+
+		if (this.inMutationSession) {
+			const existing = await client
+				.cloud()
+				.fileExists({ name: fileName, parent: parentUuid });
+			if (
+				(expectedRemoteUuid === undefined && existing) ||
+				(expectedRemoteUuid !== undefined &&
+					(!existing ||
+						(typeof existing === "object" && existing.uuid !== expectedRemoteUuid)))
+			) {
+				throw new Error(`Remote file changed before upload: ${path}. Replan the sync.`);
+			}
+		} else {
+			const current = await this.stat(path);
+			if (
+				(expectedRemoteUuid === undefined && current !== null) ||
+				(expectedRemoteUuid !== undefined && current?.uuid !== expectedRemoteUuid)
+			) {
+				throw new Error(`Remote file changed before upload: ${path}. Replan the sync.`);
+			}
+		}
 
 		const uploaded = await uploadFileChunks(
 			client,
@@ -225,11 +267,13 @@ export class FilenRemoteFs implements RemoteFs {
 			undefined,
 			(_done, _total, completedBytes, totalBytes) => onProgress?.(completedBytes, totalBytes),
 		);
-		this.verifiedRootForSync = null;
-		this.scannedDirectoryUuids = null;
-		this.createdDirectoryPaths.clear();
-		client.init(client.config);
-		configureSdkRetryBounds(client);
+		if (!this.inMutationSession) {
+			this.verifiedRootForSync = null;
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+			client.init(client.config);
+			configureSdkRetryBounds(client);
+		}
 		const rawHash = typeof uploaded.hash === "string" ? uploaded.hash : undefined;
 		const remoteHash =
 			rawHash !== undefined && isValidFilenSha512(rawHash)
@@ -257,11 +301,13 @@ export class FilenRemoteFs implements RemoteFs {
 			throw new Error(`Remote file changed before deletion: ${path}. Replan the sync.`);
 		}
 		await client.cloud().trashFile({ uuid: current.uuid! });
-		this.verifiedRootForSync = null;
-		this.scannedDirectoryUuids = null;
-		this.createdDirectoryPaths.clear();
-		client.init(client.config);
-		configureSdkRetryBounds(client);
+		if (!this.inMutationSession) {
+			this.verifiedRootForSync = null;
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+			client.init(client.config);
+			configureSdkRetryBounds(client);
+		}
 	}
 
 	async mkdir(path: string): Promise<void> {
@@ -474,6 +520,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	close(): void {
+		this.inMutationSession = false;
 		this.verifiedRootForSync = null;
 		this.scannedDirectoryUuids = null;
 		this.createdDirectoryPaths.clear();

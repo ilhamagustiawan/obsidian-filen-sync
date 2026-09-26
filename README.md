@@ -12,7 +12,7 @@ Obsidian Filen Sync mirrors vault files between Obsidian and a dedicated folder 
 - **Flexible sync modes**: Run full bidirectional **Sync now**, or one-way **Push changed local files** and **Pull changed remote files**.
 - **Automated background sync**: Optional auto-sync on file save (with configurable debounce delay), on a periodic interval, and shortly after Obsidian startup.
 - **Fast remote polling**: Probes Filen's cloud events feed during auto-sync to skip full remote scans when nothing changed in the cloud.
-- **Native status bar & floating indicator**: Real-time sync progress via a sleek floating progress pill in the top right of the workspace (ideal for newer Obsidian versions without a traditional status bar, and on mobile), an active progress notification banner, animated spinning ribbon icon with live progress tooltips, and customizable status bar item.
+- **Native status bar & mobile sync indicator**: Real-time sync progress via an inset-safe, compact notice on mobile, an animated spinning ribbon icon with live progress tooltips, and customizable desktop status bar item.
 - **Two-pane file version history**: Browse remote file revisions in Filen with grouped dates, side-by-side diff comparison against your local file, one-click preview, copy, and restore.
 - **Safety rails & bulk mutation guard**: Prevents catastrophic vault wipes if a folder is emptied or unmounted; prompts for confirmation before bulk overwrites or local deletions.
 - **Conflict preservation**: Automatically detects when a file was modified both locally and remotely, saving conflict copies (`.sync-conflict-*`) to prevent silent data loss.
@@ -127,9 +127,9 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 ### Sync progress and status
 
 - **Desktop status bar**: A compact Filen icon uses the native Obsidian status bar area. Hover or focus to see the current phase, completed/total changed files, active file, and last successful sync. Select it to open sync actions and details.
-- **Mobile fallback**: When enabled, a compact single-line indicator appears at the top right of the workspace. It is delayed briefly to avoid flashing during quick syncs; select it to open actions. Errors and conflicts stay visible until state changes.
-- **On-demand details**: Automatic progress banners are disabled. Select **Show sync progress** from the status menu, or select the sync ribbon icon during an active run, to open detailed progress. Error details retain a **View logs →** action.
-- **Last sync**: The status tooltip, menu, and on-demand details show a relative last-sync time; details include the exact local timestamp. Failed or skipped attempts do not change it.
+- **Mobile sync indicator**: When enabled, a compact notice appears through Obsidian's native notice container, safely positioned away from system status bars and notches on Android and iOS. It is delayed by 300 ms to avoid flashing during quick background checks, shows live in-flight progress (phase, completed/total files, active file, and transferred bytes), and is tappable to open sync actions. Actionable errors and conflicts stay visible until reviewed.
+- **On-demand details**: Automatic progress banners are disabled on desktop. Select **Show sync progress** from the status menu, or select the sync ribbon icon during an active run, to open detailed progress. Error details retain a **View logs →** action.
+- **Last sync & diagnostics**: The status tooltip, menu, and on-demand details show a relative last-sync time; details include the exact local timestamp. Activity logs record a concise local timing and count summary (total time, scan, plan, transfer phases, and time to first file transfer) for easy diagnosis without transmitting file names, contents, or telemetry. Failed or skipped attempts do not change last-sync time.
 
 ### Status bar
 
@@ -219,7 +219,7 @@ The sync baseline is maintained locally in IndexedDB inside the vault's plugin s
 | Setting                        | Description                                                                                                                               | Default                |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
 | **Auto-sync paused**           | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
-| **Floating sync indicator**    | Show a floating progress indicator at the top right of the workspace during sync.                                                         | Enabled                |
+| **Mobile sync indicator**      | Display a compact sync progress notice on mobile screens during synchronization.                                                          | Enabled                |
 | **Sync progress notice**       | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
 | **Status bar indicator style** | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
 | **Sync on file save**          | Batch file changes after the save delay; automatic runs also respect the minimum gap below.                                               | Enabled                |

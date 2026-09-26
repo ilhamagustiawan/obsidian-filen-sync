@@ -628,22 +628,31 @@ export class SyncEngine {
 			await mapPool(batch, this.config.transferConcurrency ?? 2, execute);
 			batch = [];
 		};
-		for (const action of planResult.actions) {
-			const size = Math.max(
-				effectiveLocalFiles.get(action.path)?.size ?? 0,
-				effectiveRemoteFiles.get(action.path)?.size ?? 0,
-			);
-			if (
-				(action.operation === "upload" || action.operation === "download") &&
-				size < 8 * 1024 * 1024
-			)
-				batch.push(action);
-			else {
-				await flush();
-				await execute(action);
+		const runTransfers = async (): Promise<void> => {
+			for (const action of planResult.actions) {
+				const size = Math.max(
+					effectiveLocalFiles.get(action.path)?.size ?? 0,
+					effectiveRemoteFiles.get(action.path)?.size ?? 0,
+				);
+				if (
+					(action.operation === "upload" || action.operation === "download") &&
+					size < 8 * 1024 * 1024
+				)
+					batch.push(action);
+				else {
+					await flush();
+					await execute(action);
+				}
 			}
+			await flush();
+		};
+
+		if (this.config.remote.withMutationSession) {
+			await this.config.remote.withMutationSession(runTransfers);
+		} else {
+			await runTransfers();
 		}
-		await flush();
+
 		const transferMs = Math.round(performance.now() - transferStart);
 		if (applied > 0 && options.scanHints === undefined) {
 			this.remoteTreeCache = null;

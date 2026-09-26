@@ -72,6 +72,7 @@ async function fixture(run) {
 			skipLargeFiles: false,
 			skipSizeLargerThanMB: 50,
 		};
+		const activities = [];
 		coordinator = new SyncCoordinator(
 			{
 				vault: {
@@ -90,7 +91,7 @@ async function fixture(run) {
 			() => ({}),
 			{
 				onStatusChange: (s) => states.push(s),
-				onLogActivity: () => {},
+				onLogActivity: (msg) => activities.push(msg),
 				confirmLocalDeletes: async () => true,
 				confirmBulkOperations: async () => true,
 				saveSettings: async () => {},
@@ -109,6 +110,7 @@ async function fixture(run) {
 			file,
 			timers,
 			notices: globalThis.__coordinatorNotices,
+			activities,
 		});
 	} finally {
 		coordinator?.close();
@@ -225,4 +227,28 @@ test("failed and skipped attempts do not mark a successful completion", () =>
 		const result = await coordinator.runSync("Sync", "both", { isManual: true });
 		assert.equal(result.kind, "skipped");
 		assert.equal(states.length, stateCount);
+	}));
+test("activity logs record concise phase timing summary without sensitive information", () =>
+	fixture(async ({ coordinator, activities }) => {
+		coordinator.syncEngine.sync = async () => ({
+			applied: 5,
+			conflicts: 0,
+			conflictCopies: [],
+			timing: {
+				totalMs: 1250,
+				scanMs: 150,
+				planMs: 25,
+				transferMs: 1075,
+				firstTransferMs: 220,
+			},
+		});
+		await coordinator.runSync("Sync", "both", { isManual: true });
+		const completionLog = activities.find((a) => a.startsWith("Sync complete:"));
+		assert.ok(completionLog, "Found completion log");
+		assert.match(completionLog, /5 applied/);
+		assert.match(completionLog, /total 1\.3s/);
+		assert.match(completionLog, /scan 150ms/);
+		assert.match(completionLog, /plan 25ms/);
+		assert.match(completionLog, /transfer 1075ms/);
+		assert.match(completionLog, /first file in 220ms/);
 	}));

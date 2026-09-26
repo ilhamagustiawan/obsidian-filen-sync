@@ -65,6 +65,7 @@ function createBenchmarkFixture({
 	let remoteReadCalls = 0;
 	let remoteWriteCalls = 0;
 	let remoteSdkResets = 0;
+	let inMutationSession = false;
 	let progressUpdates = 0;
 	let activeFiles = 0;
 	let peakFileConcurrency = 0;
@@ -181,7 +182,9 @@ function createBenchmarkFixture({
 			activeFiles++;
 			peakFileConcurrency = Math.max(peakFileConcurrency, activeFiles);
 			remoteWriteCalls++;
-			remoteSdkResets++;
+			if (!inMutationSession) {
+				remoteSdkResets++;
+			}
 			await delay();
 			activeFiles--;
 			const entry = {
@@ -197,8 +200,17 @@ function createBenchmarkFixture({
 			return entry;
 		},
 		rm: async (p) => {
-			remoteSdkResets++;
+			if (!inMutationSession) remoteSdkResets++;
 			cloud.delete(p);
+		},
+		withMutationSession: async (fn) => {
+			inMutationSession = true;
+			try {
+				return await fn();
+			} finally {
+				inMutationSession = false;
+				remoteSdkResets++;
+			}
 		},
 		close: () => {},
 	};
