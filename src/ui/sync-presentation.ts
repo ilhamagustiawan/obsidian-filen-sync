@@ -1,9 +1,41 @@
 import type { SyncProgress } from "../sync/types";
 
-export const shouldShowFloatingIndicator = (isMobile: boolean, enabled: boolean): boolean =>
+export const shouldShowMobileSyncIndicator = (isMobile: boolean, enabled: boolean): boolean =>
 	isMobile && enabled;
 
-export const shouldShowAutomaticProgressNotice = (): boolean => false;
+export const shouldShowFloatingIndicator = shouldShowMobileSyncIndicator;
+
+export const shouldShowAutomaticProgressNotice = (isMobile = false, enabled = false): boolean =>
+	isMobile && enabled;
+
+export function formatBytes(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+export function formatFilename(path: string): string {
+	if (!path) return "";
+	const parts = path.split("/").filter(Boolean);
+	if (parts.length <= 1) return path;
+	return `…/${parts.slice(-1)[0]}`;
+}
+
+export function formatTransferDetails(progress: SyncProgress): {
+	countText: string;
+	fileText: string;
+} {
+	const current = Math.min(progress.current ?? 0, progress.total ?? 0);
+	const total = progress.total ?? 0;
+	let countText = total > 0 ? `${current} of ${total} changes` : "Transferring changes";
+	if (progress.totalBytes !== undefined && progress.totalBytes > 0) {
+		const completedBytes = progress.completedBytes ?? 0;
+		countText += ` · ${formatBytes(completedBytes)}/${formatBytes(progress.totalBytes)}`;
+	}
+	const fileText = formatFilename(progress.path ?? "");
+	return { countText, fileText };
+}
 
 export function formatSyncProgress(progress: SyncProgress): string {
 	if (progress.phase === "scanning-local") return "Scanning local files";

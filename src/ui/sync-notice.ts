@@ -1,12 +1,6 @@
 import { Notice, setIcon } from "obsidian";
 import type { StatusBarState } from "../sync/coordinator";
-
-const formatFilename = (path: string): string => {
-	if (!path) return "";
-	const parts = path.split("/").filter(Boolean);
-	if (parts.length <= 1) return path;
-	return `…/${parts.slice(-1)[0]}`;
-};
+import { formatSyncProgress, formatTransferDetails } from "./sync-presentation";
 
 export class SyncNoticeController {
 	private activeNotice: Notice | null = null;
@@ -18,30 +12,166 @@ export class SyncNoticeController {
 	private countEl: HTMLElement | null = null;
 	private fileEl: HTMLElement | null = null;
 	private dismissTimer: number | null = null;
+	private showTimer: number | null = null;
+	private coalesceTimer: number | null = null;
+	private lastRenderTime = 0;
+	private pendingSyncState: StatusBarState | null = null;
+	private latestState: StatusBarState | null = null;
+	private mode: "compact" | "detailed" = "detailed";
 	private wasManual = false;
 	private onDemand = false;
+	private isVisible = false;
 
 	constructor(
 		private readonly onOpenLogs: () => void,
 		private readonly getLastSyncSummary: () => string,
+		private readonly onOpenMenu?: (e: MouseEvent) => void,
+		private readonly isMobile: () => boolean = () => false,
+		private readonly isEnabled: () => boolean = () => true,
 	) {}
 
 	onStatusChange(state: StatusBarState): void {
-		if (!this.onDemand) {
+		this.latestState = state;
+
+		if (this.onDemand) {
+			this.clearShowTimer();
+			if (state.kind === "syncing") {
+				this.coalesceSyncRender(state);
+				return;
+			}
+			this.clearCoalesceTimer();
+			this.renderState(state);
+			this.appendLastSyncSummary();
+			this.onDemand = false;
+			return;
+		}
+
+		const allowMobile = this.isMobile() && this.isEnabled();
+		if (!allowMobile) {
 			this.closeNotice();
 			return;
 		}
-		this.renderState(state);
-		this.appendLastSyncSummary();
-		if (state.kind !== "syncing") this.onDemand = false;
+
+		// Mobile automatic mode
+		this.mode = "compact";
+
+		if (state.kind === "syncing") {
+			if (state.isManual) this.wasManual = true;
+			this.clearDismissTimer();
+
+			if (this.isVisible) {
+				this.coalesceSyncRender(state);
+				return;
+			}
+
+			if (this.showTimer === null) {
+				this.showTimer = window.setTimeout(() => {
+					this.showTimer = null;
+					if (this.latestState?.kind !== "syncing") return;
+					this.ensureNoticeCreated("compact");
+					this.renderState(this.latestState);
+					this.lastRenderTime = Date.now();
+					this.isVisible = true;
+				}, 300);
+			}
+			return;
+		}
+
+		this.clearShowTimer();
+		this.clearCoalesceTimer();
+		this.pendingSyncState = null;
+
+		if (state.kind === "pending") {
+			this.clearDismissTimer();
+			this.ensureNoticeCreated("compact");
+			this.renderPending(state);
+			this.isVisible = true;
+			this.wasManual = false;
+			return;
+		}
+
+		if (state.kind === "error" || state.kind === "warning") {
+			this.clearDismissTimer();
+			this.ensureNoticeCreated("compact");
+			if (state.kind === "error") this.renderError(state);
+			else this.renderWarning(state);
+			this.isVisible = true;
+			this.wasManual = false;
+			return;
+		}
+
+		if (state.kind === "success") {
+			if (this.isVisible || this.wasManual) {
+				this.ensureNoticeCreated("compact");
+				this.renderSuccess(state);
+				this.isVisible = true;
+				this.scheduleDismiss(2400);
+			} else {
+				this.closeNotice();
+			}
+			this.wasManual = false;
+			return;
+		}
+
+		if (state.kind === "idle") {
+			this.closeNotice();
+		}
 	}
 
 	showOnDemand(state: StatusBarState): void {
+		this.clearShowTimer();
+		this.clearCoalesceTimer();
+		this.pendingSyncState = null;
 		this.onDemand = true;
-		this.ensureNoticeCreated();
+		this.mode = "detailed";
+		this.latestState = state;
+		this.ensureNoticeCreated("detailed");
 		this.renderState(state);
 		this.appendLastSyncSummary();
+		this.isVisible = true;
 		if (state.kind !== "syncing") this.onDemand = false;
+	}
+
+	refreshVisibility(enabled = this.isEnabled()): void {
+		if (!enabled && !this.onDemand) {
+			this.closeNotice();
+		}
+	}
+
+	private coalesceSyncRender(state: StatusBarState): void {
+		const now = Date.now();
+		const elapsed = now - this.lastRenderTime;
+		const minInterval = 100; // 10 Hz
+
+		if (elapsed >= minInterval) {
+			this.clearCoalesceTimer();
+			this.pendingSyncState = null;
+			this.renderState(state);
+			if (this.onDemand) this.appendLastSyncSummary();
+			this.lastRenderTime = now;
+			return;
+		}
+
+		this.pendingSyncState = state;
+		if (this.coalesceTimer === null) {
+			this.coalesceTimer = window.setTimeout(() => {
+				this.coalesceTimer = null;
+				if (this.pendingSyncState) {
+					const nextState = this.pendingSyncState;
+					this.pendingSyncState = null;
+					this.renderState(nextState);
+					if (this.onDemand) this.appendLastSyncSummary();
+					this.lastRenderTime = Date.now();
+				}
+			}, minInterval - elapsed);
+		}
+	}
+
+	private clearCoalesceTimer(): void {
+		if (this.coalesceTimer !== null) {
+			window.clearTimeout(this.coalesceTimer);
+			this.coalesceTimer = null;
+		}
 	}
 
 	private appendLastSyncSummary(): void {
@@ -52,7 +182,7 @@ export class SyncNoticeController {
 	}
 
 	private renderState(state: StatusBarState): void {
-		this.ensureNoticeCreated();
+		this.ensureNoticeCreated(this.mode);
 		if (state.kind === "syncing") {
 			this.renderSyncing(state);
 		} else if (state.kind === "success") {
@@ -61,13 +191,22 @@ export class SyncNoticeController {
 			this.renderError(state);
 		} else if (state.kind === "warning") {
 			this.renderWarning(state);
+		} else if (state.kind === "pending") {
+			this.renderPending(state);
 		} else {
 			this.renderReady(state);
 		}
 	}
 
 	closeNotice(): void {
+		this.clearShowTimer();
 		this.clearDismissTimer();
+		this.clearCoalesceTimer();
+		this.pendingSyncState = null;
+		this.latestState = null;
+		this.isVisible = false;
+		this.wasManual = false;
+		this.onDemand = false;
 		if (this.activeNotice) {
 			this.activeNotice.hide();
 			this.activeNotice = null;
@@ -79,14 +218,19 @@ export class SyncNoticeController {
 		this.barFill = null;
 		this.countEl = null;
 		this.fileEl = null;
-		this.wasManual = false;
-		this.onDemand = false;
 	}
 
 	private clearDismissTimer(): void {
 		if (this.dismissTimer !== null) {
 			window.clearTimeout(this.dismissTimer);
 			this.dismissTimer = null;
+		}
+	}
+
+	private clearShowTimer(): void {
+		if (this.showTimer !== null) {
+			window.clearTimeout(this.showTimer);
+			this.showTimer = null;
 		}
 	}
 
@@ -98,8 +242,18 @@ export class SyncNoticeController {
 		}, ms);
 	}
 
-	private ensureNoticeCreated(): void {
+	private ensureNoticeCreated(mode: "compact" | "detailed"): void {
 		if (this.activeNotice !== null && this.noticeEl !== null && this.noticeEl.isConnected) {
+			if (mode === "compact") {
+				this.noticeEl.addClass("filen-notice-compact");
+				this.noticeEl.setAttr("role", "button");
+				this.noticeEl.setAttr("tabindex", "0");
+				this.noticeEl.setAttr("aria-live", "polite");
+			} else {
+				this.noticeEl.removeClass("filen-notice-compact");
+				this.noticeEl.removeAttribute("role");
+				this.noticeEl.removeAttribute("tabindex");
+			}
 			return;
 		}
 
@@ -134,6 +288,34 @@ export class SyncNoticeController {
 		this.activeNotice = new Notice(frag, 0);
 		this.noticeEl = this.activeNotice.noticeEl;
 		this.noticeEl.addClass("filen-sync-progress-notice");
+
+		if (mode === "compact") {
+			this.noticeEl.addClass("filen-notice-compact");
+			this.noticeEl.setAttr("role", "button");
+			this.noticeEl.setAttr("tabindex", "0");
+			this.noticeEl.setAttr("aria-live", "polite");
+		}
+
+		this.noticeEl.addEventListener("click", (e) => {
+			const target = e.target as HTMLElement | null;
+			if (typeof target?.closest === "function" && target.closest(".filen-notice-log-link")) {
+				return;
+			}
+			if (this.mode === "compact" && this.onOpenMenu) {
+				e.preventDefault();
+				e.stopPropagation();
+				this.onOpenMenu(e);
+			}
+		});
+
+		this.noticeEl.addEventListener("keydown", (e) => {
+			if (e.key !== "Enter" && e.key !== " ") return;
+			if (this.mode === "compact" && this.onOpenMenu) {
+				e.preventDefault();
+				e.stopPropagation();
+				this.onOpenMenu(new MouseEvent("click"));
+			}
+		});
 	}
 
 	private renderReady(state: StatusBarState): void {
@@ -147,14 +329,43 @@ export class SyncNoticeController {
 		)
 			return;
 		this.clearDismissTimer();
-		this.noticeEl.removeClass("is-syncing", "is-error", "is-warning");
+		this.noticeEl.removeClass("is-syncing", "is-error", "is-warning", "is-pending");
 		this.noticeEl.addClass("is-success");
 		setIcon(this.iconSpan, "refresh-cw");
 		this.iconSpan.removeClass("filen-notice-spin");
-		this.titleEl.setText("Filen Sync details");
+		this.titleEl.setText(this.mode === "compact" ? "Filen Sync" : "Filen Sync details");
 		this.badgeEl.setText("Ready");
 		this.countEl.setText(state.detail || state.text);
 		this.fileEl.setText("");
+		this.noticeEl.setAttr("aria-label", `Filen Sync: ${state.text}.`);
+	}
+
+	private renderPending(state: StatusBarState): void {
+		if (
+			!this.noticeEl ||
+			!this.iconSpan ||
+			!this.titleEl ||
+			!this.badgeEl ||
+			!this.barFill ||
+			!this.countEl ||
+			!this.fileEl
+		)
+			return;
+		this.clearDismissTimer();
+		this.noticeEl.removeClass("is-syncing", "is-success", "is-error", "is-warning");
+		this.noticeEl.addClass("is-pending");
+
+		setIcon(this.iconSpan, "clock");
+		this.iconSpan.removeClass("filen-notice-spin");
+
+		this.titleEl.setText("Filen Sync");
+		this.badgeEl.setText("Pending");
+		this.barFill.removeClass("is-indeterminate");
+		this.barFill.style.width = "100%";
+
+		this.countEl.setText(state.text);
+		this.fileEl.setText(state.detail || "");
+		this.noticeEl.setAttr("aria-label", `Filen Sync: ${state.text}. Tap for options.`);
 	}
 
 	private renderSyncing(state: StatusBarState): void {
@@ -171,39 +382,47 @@ export class SyncNoticeController {
 			return;
 		}
 
-		this.noticeEl.removeClass("is-success", "is-error", "is-warning");
+		this.noticeEl.removeClass("is-success", "is-error", "is-warning", "is-pending");
 		this.noticeEl.addClass("is-syncing");
 
 		setIcon(this.iconSpan, "refresh-cw");
 		this.iconSpan.addClass("filen-notice-spin");
 
-		this.titleEl.setText("Filen Sync");
+		const progress = state.progress;
+		const total = progress?.phase === "transferring" ? (progress.total ?? 0) : 0;
+		const current = progress?.current ?? 0;
+		const path = progress?.path ?? "";
 
-		const total = state.progress?.phase === "transferring" ? state.progress.total : 0;
-		const current = state.progress?.current ?? 0;
-		const path = state.progress?.path ?? "";
-
-		if (total > 0) {
-			const pct = Math.min(100, Math.max(0, Math.round((current / total) * 100)));
-			this.badgeEl.setText(`${pct}%`);
+		if (total > 0 && progress) {
+			const boundedCurrent = Math.min(current, total);
+			const pct = Math.min(100, Math.max(0, Math.round((boundedCurrent / total) * 100)));
+			this.titleEl.setText("Filen Sync");
+			this.badgeEl.setText(`${boundedCurrent}/${total}`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
-			this.countEl.setText(
-				`${current} of ${total} changes${state.progress?.totalBytes === undefined ? "" : ` · ${((state.progress.completedBytes ?? 0) / 1048576).toFixed(1)}/${(state.progress.totalBytes / 1048576).toFixed(1)} MB`}`,
+
+			const { countText, fileText } = formatTransferDetails(progress);
+			this.countEl.setText(countText);
+			this.fileEl.setText(fileText);
+			if (path) {
+				this.fileEl.setAttr("title", path);
+			} else {
+				this.fileEl.removeAttribute("title");
+			}
+			this.noticeEl.setAttr(
+				"aria-label",
+				`Filen Sync: ${countText}${fileText ? ` · ${fileText}` : ""}. Tap for options.`,
 			);
 		} else {
+			const phaseLabel = progress?.phase ? formatSyncProgress(progress) : "";
+			this.titleEl.setText(phaseLabel || "Filen Sync");
 			this.badgeEl.setText("Syncing");
 			this.barFill.addClass("is-indeterminate");
 			this.barFill.style.width = "40%";
 			this.countEl.setText(state.text);
-		}
-
-		if (path) {
-			this.fileEl.setText(formatFilename(path));
-			this.fileEl.setAttr("title", path);
-		} else {
 			this.fileEl.setText(state.detail && state.detail !== "Starting..." ? state.detail : "");
 			this.fileEl.removeAttribute("title");
+			this.noticeEl.setAttr("aria-label", `Filen Sync: ${state.text}. Tap for options.`);
 		}
 	}
 
@@ -220,7 +439,7 @@ export class SyncNoticeController {
 			return;
 		}
 
-		this.noticeEl.removeClass("is-syncing", "is-error", "is-warning");
+		this.noticeEl.removeClass("is-syncing", "is-error", "is-warning", "is-pending");
 		this.noticeEl.addClass("is-success");
 
 		setIcon(this.iconSpan, "check");
@@ -235,8 +454,9 @@ export class SyncNoticeController {
 		this.countEl.setText(summary || "Sync complete");
 		this.fileEl.setText("");
 		this.fileEl.removeAttribute("title");
+		this.noticeEl.setAttr("aria-label", `Filen Sync: ${summary || "Sync complete"}.`);
 
-		if (!this.onDemand) this.scheduleDismiss(2800);
+		if (!this.onDemand) this.scheduleDismiss(2400);
 	}
 
 	private renderError(state: StatusBarState): void {
@@ -252,7 +472,7 @@ export class SyncNoticeController {
 			return;
 		}
 
-		this.noticeEl.removeClass("is-syncing", "is-success", "is-warning");
+		this.noticeEl.removeClass("is-syncing", "is-success", "is-warning", "is-pending");
 		this.noticeEl.addClass("is-error");
 
 		setIcon(this.iconSpan, "alert-circle");
@@ -276,7 +496,13 @@ export class SyncNoticeController {
 			this.onOpenLogs();
 		});
 
-		if (!this.onDemand) this.scheduleDismiss(6000);
+		this.noticeEl.setAttr(
+			"aria-label",
+			`Filen Sync: Failed. ${state.detail || "An error occurred"}.`,
+		);
+
+		// Actionable errors remain visible until dismissed or retried
+		if (this.onDemand) this.scheduleDismiss(6000);
 	}
 
 	private renderWarning(state: StatusBarState): void {
@@ -292,7 +518,7 @@ export class SyncNoticeController {
 			return;
 		}
 
-		this.noticeEl.removeClass("is-syncing", "is-success", "is-error");
+		this.noticeEl.removeClass("is-syncing", "is-success", "is-error", "is-pending");
 		this.noticeEl.addClass("is-warning");
 
 		setIcon(this.iconSpan, "pause");
@@ -307,6 +533,12 @@ export class SyncNoticeController {
 		this.fileEl.setText("");
 		this.fileEl.removeAttribute("title");
 
-		if (!this.onDemand) this.scheduleDismiss(3500);
+		this.noticeEl.setAttr(
+			"aria-label",
+			`Filen Sync: Paused. ${state.detail || state.text}. Tap for options.`,
+		);
+
+		// Actionable warnings remain persistent in compact mode, auto-dismiss in detailed mode
+		if (this.onDemand) this.scheduleDismiss(3500);
 	}
 }

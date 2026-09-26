@@ -1656,14 +1656,13 @@ test("Legacy credentials migration removes plaintext auth from disk without rese
 	}
 });
 
-test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibility, and lifecycles", async () => {
+test("SyncNoticeController handles sync states, mobile compact mode, visibility, and lifecycles", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "filen-ui-test-"));
 	const originalSetTimeout = globalThis.setTimeout;
 	const originalClearTimeout = globalThis.clearTimeout;
 	try {
 		const stub = join(dir, "obsidian-stub.mjs");
 		const outfileNotice = join(dir, "sync-notice.mjs");
-		const outfileIndicator = join(dir, "floating-indicator.mjs");
 
 		await writeFile(
 			stub,
@@ -1674,6 +1673,9 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 					this.duration = duration;
 					this.hidden = false;
 					this.noticeEl = globalThis.__createMockElement("div", "notice");
+					if (frag && frag.children) {
+						this.noticeEl.children.push(...frag.children);
+					}
 					globalThis.__testActiveNotices.push(this);
 				}
 				hide() {
@@ -1690,22 +1692,6 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		await build({
 			entryPoints: ["src/ui/sync-notice.ts"],
 			outfile: outfileNotice,
-			bundle: true,
-			format: "esm",
-			platform: "node",
-			plugins: [
-				{
-					name: "obsidian-test-stub",
-					setup(build) {
-						build.onResolve({ filter: /^obsidian$/ }, () => ({ path: stub }));
-					},
-				},
-			],
-		});
-
-		await build({
-			entryPoints: ["src/ui/floating-sync-indicator.ts"],
-			outfile: outfileIndicator,
 			bundle: true,
 			format: "esm",
 			platform: "node",
@@ -1744,6 +1730,9 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			setAttr(name, val) {
 				this.attributes.set(name, String(val));
 			}
+			getAttr(name) {
+				return this.attributes.get(name);
+			}
 			removeAttribute(name) {
 				this.attributes.delete(name);
 			}
@@ -1766,7 +1755,12 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 				return el;
 			}
 			addEventListener(evt, handler) {
-				this._handler = handler;
+				if (!this._listeners) this._listeners = new Map();
+				this._listeners.set(evt, handler);
+			}
+			trigger(evt, eventData = {}) {
+				const handler = this._listeners?.get(evt);
+				if (handler) handler({ preventDefault() {}, stopPropagation() {}, ...eventData });
 			}
 			empty() {
 				this.children = [];
@@ -1779,8 +1773,6 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 
 		globalThis.__createMockElement = (tag, cls) => new MockElement(tag, cls);
 		globalThis.__testActiveNotices = [];
-		const realSetTimeout = globalThis.setTimeout;
-		const realClearTimeout = globalThis.clearTimeout;
 		const indicatorTimers = new Map();
 		let nextIndicatorTimer = 1;
 		globalThis.setTimeout = (fn, ms) => {
@@ -1796,23 +1788,20 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		};
 
 		const { SyncNoticeController } = await import(pathToFileURL(outfileNotice).href);
-		const { FloatingSyncIndicator } = await import(pathToFileURL(outfileIndicator).href);
 
-		// Test SyncNoticeController
-		let settings = {
-			syncProgressNoticeMode: "transfers_only",
-			showFloatingSyncIndicator: true,
-		};
+		// Desktop controller: automatic progress stays quiet
 		let logsOpened = false;
-		const controller = new SyncNoticeController(
+		const desktopController = new SyncNoticeController(
 			() => {
 				logsOpened = true;
 			},
 			() => "Not synced yet",
+			() => {},
+			() => false, // isMobile = false
+			() => true,
 		);
 
-		// Automatic sync progress never creates a notice, regardless of legacy settings.
-		controller.onStatusChange({
+		desktopController.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
 			detail: "Scanning…",
@@ -1820,8 +1809,12 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			isManual: false,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		assert.equal(globalThis.__testActiveNotices.length, 0, "Automatic progress stays quiet");
-		controller.onStatusChange({
+		assert.equal(
+			globalThis.__testActiveNotices.length,
+			0,
+			"Desktop automatic progress stays quiet",
+		);
+		desktopController.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
 			detail: "1/5 · note.md",
@@ -1832,11 +1825,11 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 		assert.equal(
 			globalThis.__testActiveNotices.length,
 			0,
-			"Transfers stay quiet automatically",
+			"Desktop transfers stay quiet automatically",
 		);
 
 		// An explicit details request keeps the detailed renderer available.
-		controller.showOnDemand({
+		desktopController.showOnDemand({
 			kind: "syncing",
 			text: "Syncing…",
 			detail: "1/5 · note.md",
@@ -1844,31 +1837,34 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			progress: { current: 1, total: 5, path: "note.md" },
 		});
 		assert.equal(globalThis.__testActiveNotices.length, 1);
-		controller.onStatusChange({
+		desktopController.onStatusChange({
 			kind: "success",
 			text: "Sync complete",
 			detail: "5 files synced",
 			updatedAt: Date.now(),
 		});
 		assert.equal(globalThis.__testActiveNotices[0].noticeEl.hasClass("is-success"), true);
-		controller.closeNotice();
+		desktopController.closeNotice();
 		assert.equal(globalThis.__testActiveNotices[0].hidden, true);
 
-		// Test FloatingSyncIndicator
-		settings.showFloatingSyncIndicator = true;
-		const mockWorkspace = { containerEl: new MockElement("div", "workspace") };
-		const mockApp = { workspace: mockWorkspace };
-		let menuOpened = false;
-		const indicator = new FloatingSyncIndicator(
-			mockApp,
-			() => settings,
+		// Mobile controller: automatic progress shows compact notice after anti-flash delay
+		globalThis.__testActiveNotices = [];
+		let mobileMenuOpened = false;
+		let mobileEnabled = true;
+		const mobileController = new SyncNoticeController(
 			() => {
-				menuOpened = true;
+				logsOpened = true;
 			},
+			() => "Not synced yet",
+			() => {
+				mobileMenuOpened = true;
+			},
+			() => true, // isMobile = true
+			() => mobileEnabled,
 		);
 
-		// Background scan with 0 transfers: should remain hidden
-		indicator.onStatusChange({
+		// Background scan with 0 transfers: delayed anti-flash timer
+		mobileController.onStatusChange({
 			kind: "syncing",
 			text: "Syncing…",
 			detail: "Scanning…",
@@ -1876,31 +1872,17 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			isManual: false,
 			progress: { current: 0, total: 0, path: "" },
 		});
-		assert.equal(mockWorkspace.containerEl.children.length, 1);
-		const pill = mockWorkspace.containerEl.children[0];
-		assert.equal(
-			pill.hasClass("is-hidden"),
-			true,
-			"Indicator remains hidden during quiet background scan",
-		);
-		assert.equal(pill.hasClass("is-syncing"), false);
+		assert.equal(globalThis.__testActiveNotices.length, 0, "No notice before anti-flash delay");
 		const [initialShowTimer] = [...indicatorTimers].find(([, timer]) => timer.ms === 300);
+		assert.ok(initialShowTimer, "Anti-flash 300ms timer scheduled");
 
-		// Manual sync becomes visible after the anti-flash delay.
-		indicator.onStatusChange({
-			kind: "syncing",
-			text: "Syncing…",
-			detail: "Scanning…",
-			updatedAt: Date.now(),
-			isManual: true,
-			progress: { current: 0, total: 0, path: "" },
-		});
-		indicator.onStatusChange({
+		// Progress update during anti-flash delay does not restart timer
+		mobileController.onStatusChange({
 			kind: "syncing",
 			text: "Downloading…",
 			detail: "1/2 · note.md",
 			updatedAt: Date.now(),
-			isManual: true,
+			isManual: false,
 			progress: { current: 1, total: 2, path: "note.md", phase: "transferring" },
 		});
 		assert.equal(
@@ -1908,49 +1890,47 @@ test("FloatingSyncIndicator and SyncNoticeController handle sync states, visibil
 			initialShowTimer,
 			"Progress updates do not restart the anti-flash delay",
 		);
+
+		// Fire anti-flash timer
 		const showTimer = indicatorTimers.get(initialShowTimer);
 		indicatorTimers.delete(initialShowTimer);
 		showTimer.fn();
-		assert.equal(pill.hasClass("is-hidden"), false, "Pill is visible after 300 ms");
-		assert.equal(pill.hasClass("is-syncing"), true);
+
+		assert.equal(globalThis.__testActiveNotices.length, 1, "Notice visible after 300 ms");
+		const mobileNotice = globalThis.__testActiveNotices[0];
+		assert.equal(mobileNotice.noticeEl.hasClass("filen-notice-compact"), true);
+		assert.equal(mobileNotice.noticeEl.hasClass("is-syncing"), true);
 
 		// Success
-		indicator.onStatusChange({
+		mobileController.onStatusChange({
 			kind: "success",
 			text: "up to date",
 			detail: "No changes detected.",
 			updatedAt: Date.now(),
 		});
-		assert.equal(pill.hasClass("is-success"), true);
-		const successDetails = pill.children[0].children[1].children[2];
-		assert.equal(successDetails.children[0].textContent, "Vault is up to date");
-		assert.equal(successDetails.hasClass("is-empty"), false);
+		assert.equal(mobileNotice.noticeEl.hasClass("is-success"), true);
 
-		indicator.onStatusChange({
+		// Pending
+		mobileController.onStatusChange({
 			kind: "pending",
 			text: "2 changes pending",
 			detail: "Local changes waiting to sync.",
 			updatedAt: Date.now(),
 		});
-		assert.equal(pill.hasClass("is-pending"), true);
-		assert.equal(pill.hasClass("is-hidden"), false);
-		assert.equal(indicator.hideTimer, null, "Pending state stays visible");
+		assert.equal(mobileNotice.noticeEl.hasClass("is-pending"), true);
 
-		indicator.onStatusChange({
+		// Warning
+		mobileController.onStatusChange({
 			kind: "warning",
 			text: "2 conflict(s) to review",
 			detail: "Conflict copies were saved in the vault.",
 			updatedAt: Date.now(),
 		});
-		assert.equal(pill.hasClass("is-warning"), true);
-		const visibleStatus = pill.children[0].children[1].children[0];
-		assert.equal(visibleStatus.children[0].textContent, "2 conflict(s) to review");
-		assert.equal(visibleStatus.children[1].textContent, "Review");
-		assert.equal(indicator.hideTimer, null, "Actionable warning stays visible");
+		assert.equal(mobileNotice.noticeEl.hasClass("is-warning"), true);
 
 		// Cleanup
-		indicator.destroy();
-		assert.equal(pill.isConnected, false, "Pill disconnected after destroy");
+		mobileController.closeNotice();
+		assert.equal(mobileNotice.hidden, true, "Notice disconnected after close");
 	} finally {
 		delete globalThis.__createMockElement;
 		delete globalThis.__testActiveNotices;

@@ -416,7 +416,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		new Setting(section)
 			.setName("Mobile sync indicator")
 			.setDesc(
-				"Show a compact progress indicator at the top right of the workspace on mobile.",
+				"Display a compact sync progress notice on mobile screens during synchronization.",
 			)
 			.addToggle((toggle) =>
 				toggle

@@ -33,11 +33,10 @@ import {
 	type StatusBarState,
 	type SyncRunResult,
 } from "./sync/coordinator";
-import { FloatingSyncIndicator } from "./ui/floating-sync-indicator";
 import {
 	formatLastSyncSummary,
 	formatSyncProgress,
-	shouldShowFloatingIndicator,
+	shouldShowMobileSyncIndicator,
 } from "./ui/sync-presentation";
 import { SyncNoticeController } from "./ui/sync-notice";
 import { sha256Hex } from "./sync/executor";
@@ -73,7 +72,6 @@ export default class FilenSyncPlugin extends Plugin {
 	private statusBarTextEl: HTMLElement | null = null;
 	private syncRibbonIconEl: HTMLElement | null = null;
 	private noticeController!: SyncNoticeController;
-	private floatingIndicator!: FloatingSyncIndicator;
 	private statusBarState: StatusBarState = {
 		kind: "idle",
 		text: "Set up Filen",
@@ -109,12 +107,9 @@ export default class FilenSyncPlugin extends Plugin {
 		this.noticeController = new SyncNoticeController(
 			() => this.openActivityLogs(),
 			() => this.getExactLastSyncSummary(),
-		);
-
-		this.floatingIndicator = new FloatingSyncIndicator(
-			this.app,
-			() => this.settings,
 			(e) => this.openStatusBarMenu(e),
+			() => Platform.isMobile,
+			() => this.settings.showFloatingSyncIndicator,
 		);
 
 		this.coordinator = new SyncCoordinator(
@@ -135,16 +130,6 @@ export default class FilenSyncPlugin extends Plugin {
 					}
 					this.updateStatusDisplays();
 					this.noticeController.onStatusChange(state);
-					if (
-						shouldShowFloatingIndicator(
-							Platform.isMobile,
-							this.settings.showFloatingSyncIndicator,
-						)
-					) {
-						this.floatingIndicator.onStatusChange(state);
-					} else {
-						this.floatingIndicator.refreshVisibility(false);
-					}
 				},
 				onLogActivity: (message) => {
 					this.logActivity(message);
@@ -284,7 +269,6 @@ export default class FilenSyncPlugin extends Plugin {
 		this.unloaded = true;
 		this.coordinator.close();
 		this.noticeController?.closeNotice();
-		this.floatingIndicator?.destroy();
 		if (this.activityLogsSaveTimer !== null) {
 			window.clearTimeout(this.activityLogsSaveTimer);
 			this.activityLogsSaveTimer = null;
@@ -547,13 +531,13 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	refreshFloatingIndicator(): void {
-		const enabled = shouldShowFloatingIndicator(
+		const enabled = shouldShowMobileSyncIndicator(
 			Platform.isMobile,
 			this.settings.showFloatingSyncIndicator,
 		);
-		this.floatingIndicator.refreshVisibility(enabled);
+		this.noticeController.refreshVisibility(enabled);
 		if (enabled && this.coordinator.active) {
-			this.floatingIndicator.onStatusChange(this.statusBarState);
+			this.noticeController.onStatusChange(this.statusBarState);
 		}
 	}
 
