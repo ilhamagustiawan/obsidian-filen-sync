@@ -329,6 +329,24 @@ test("SyncNoticeController supports compact mobile mode with anti-flash delay an
 			"Detailed mode does not have compact class",
 		);
 
+		// Scanning phase: title is "Filen Sync", count shows phase label, file is empty (no duplicate text)
+		controller.showOnDemand({
+			kind: "syncing",
+			text: "Checking local files…",
+			detail: "Checking local files…",
+			updatedAt: Date.now(),
+			progress: { current: 0, total: 0, path: "", phase: "scanning-local" },
+		});
+		const scanNotice = globalThis.__testActiveNotices.at(-1);
+		const scanTitle = scanNotice.noticeEl.children[0].children[0].children[0].children[1];
+		const scanBadge = scanNotice.noticeEl.children[0].children[0].children[1];
+		const scanCount = scanNotice.noticeEl.children[0].children[2].children[0];
+		const scanFile = scanNotice.noticeEl.children[0].children[2].children[1];
+		assert.equal(scanTitle.textContent, "Filen Sync");
+		assert.equal(scanBadge.textContent, "Syncing");
+		assert.equal(scanCount.textContent, "Scanning local files · Last synced 1m ago");
+		assert.equal(scanFile.textContent, "");
+
 		controller.closeNotice();
 		assert.equal(globalThis.__testActiveNotices.at(-1).hidden, true);
 	} finally {

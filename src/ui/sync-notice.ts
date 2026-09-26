@@ -1,6 +1,6 @@
 import { Notice, setIcon } from "obsidian";
 import type { StatusBarState } from "../sync/coordinator";
-import { formatSyncProgress, formatTransferDetails } from "./sync-presentation";
+import { formatFilename, formatSyncProgress, formatTransferDetails } from "./sync-presentation";
 
 export class SyncNoticeController {
 	private activeNotice: Notice | null = null;
@@ -364,7 +364,7 @@ export class SyncNoticeController {
 		this.barFill.style.width = "100%";
 
 		this.countEl.setText(state.text);
-		this.fileEl.setText(state.detail || "");
+		this.fileEl.setText(state.detail && state.detail !== state.text ? state.detail : "");
 		this.noticeEl.setAttr("aria-label", `Filen Sync: ${state.text}. Tap for options.`);
 	}
 
@@ -393,10 +393,11 @@ export class SyncNoticeController {
 		const current = progress?.current ?? 0;
 		const path = progress?.path ?? "";
 
+		this.titleEl.setText("Filen Sync");
+
 		if (total > 0 && progress) {
 			const boundedCurrent = Math.min(current, total);
 			const pct = Math.min(100, Math.max(0, Math.round((boundedCurrent / total) * 100)));
-			this.titleEl.setText("Filen Sync");
 			this.badgeEl.setText(`${boundedCurrent}/${total}`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
@@ -415,14 +416,20 @@ export class SyncNoticeController {
 			);
 		} else {
 			const phaseLabel = progress?.phase ? formatSyncProgress(progress) : "";
-			this.titleEl.setText(phaseLabel || "Filen Sync");
 			this.badgeEl.setText("Syncing");
 			this.barFill.addClass("is-indeterminate");
 			this.barFill.style.width = "40%";
-			this.countEl.setText(state.text);
-			this.fileEl.setText(state.detail && state.detail !== "Starting..." ? state.detail : "");
-			this.fileEl.removeAttribute("title");
-			this.noticeEl.setAttr("aria-label", `Filen Sync: ${state.text}. Tap for options.`);
+			this.countEl.setText(phaseLabel || state.text);
+			this.fileEl.setText(path ? formatFilename(path) : "");
+			if (path) {
+				this.fileEl.setAttr("title", path);
+			} else {
+				this.fileEl.removeAttribute("title");
+			}
+			this.noticeEl.setAttr(
+				"aria-label",
+				`Filen Sync: ${phaseLabel || state.text}. Tap for options.`,
+			);
 		}
 	}
 
