@@ -2,6 +2,7 @@ import type { App, TAbstractFile } from "obsidian";
 import { TFile, normalizePath } from "obsidian";
 import type { SyncDb } from "../db";
 import type { RemoteEntry, RemoteFs } from "../fs-remote";
+import { sha256Hex } from "./content-hash";
 import type { ConflictCopy, PlannedAction, SyncedFileRecord } from "./types";
 
 export type LocalEntry = {
@@ -424,12 +425,7 @@ export class SyncExecutor {
 	}
 }
 
-export const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
-	const cryptoObj =
-		globalThis.crypto ?? (typeof window !== "undefined" ? window.crypto : undefined);
-	const digest = await cryptoObj!.subtle.digest("SHA-256", toArrayBuffer(bytes));
-	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-};
+export { sha256Hex } from "./content-hash";
 
 const assertLocalBytesUnchanged = async (
 	app: App,

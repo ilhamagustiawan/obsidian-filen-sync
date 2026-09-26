@@ -4,6 +4,7 @@ import type { SyncDb } from "./db";
 import type { RemoteEntry, RemoteFs } from "./fs-remote";
 import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncedFileRecord } from "./settings";
+import { isValidFilenSha512, sha512Hex } from "./sync/content-hash";
 import { checkBulkGuard, type BulkGuardReport, type BulkGuardThresholds } from "./sync/bulk-guard";
 import { sha256Hex, SyncExecutor, type ExecutionResult, type LocalEntry } from "./sync/executor";
 import { assertNoPathCollisions } from "./sync/path-validation";
@@ -311,32 +312,34 @@ export class SyncEngine {
 			}
 
 			onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-			const candidateRemoteFiles = new Map<string, RemoteFileInfo>();
+			const candidateEntries: Array<[string, RemoteEntry]> = [];
 			for (const path of candidatePaths) {
 				const entry = this.remoteTreeCache!.scan.files.get(path);
-				if (entry !== undefined && !entry.isDir) {
-					if (pathFilter.isIgnored(entry.path, entry.size)) continue;
-					let hash: string | undefined;
-					const localEntry = candidateLocalFiles.get(path);
-					if (
-						localEntry !== undefined &&
-						!candidatePrev.has(path) &&
-						localEntry.size === entry.size &&
-						localEntry.mtime === entry.mtime
-					) {
-						const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
-						hash = await sha256Hex(remoteBytes);
-					}
-					candidateRemoteFiles.set(path, {
-						path: entry.path,
-						mtime: entry.mtime,
-						size: entry.size,
-						isDir: false,
-						uuid: entry.uuid,
-						remoteHash: entry.remoteHash,
-						hash,
-					});
+				if (
+					entry !== undefined &&
+					!entry.isDir &&
+					!pathFilter.isIgnored(entry.path, entry.size)
+				) {
+					candidateEntries.push([path, entry]);
 				}
+			}
+			const candidateEqualityHashes = await this.resolveRemoteFileHashes(
+				candidateEntries,
+				candidateLocalFiles,
+				candidatePrev,
+			);
+
+			const candidateRemoteFiles = new Map<string, RemoteFileInfo>();
+			for (const [path, entry] of candidateEntries) {
+				candidateRemoteFiles.set(path, {
+					path: entry.path,
+					mtime: entry.mtime,
+					size: entry.size,
+					isDir: false,
+					uuid: entry.uuid,
+					remoteHash: entry.remoteHash,
+					hash: candidateEqualityHashes.get(path),
+				});
 			}
 
 			// Validate collisions against complete cached snapshot
@@ -434,19 +437,14 @@ export class SyncEngine {
 				});
 			}
 
+			const equalityHashes = await this.resolveRemoteFileHashes(
+				remote.files,
+				local.files,
+				filteredPrev,
+			);
+
 			const remoteFiles = new Map<string, RemoteFileInfo>();
 			for (const [path, entry] of remote.files) {
-				const localEntry = local.files.get(path);
-				let hash: string | undefined;
-				if (
-					localEntry !== undefined &&
-					!filteredPrev.has(path) &&
-					localEntry.size === entry.size &&
-					localEntry.mtime === entry.mtime
-				) {
-					const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
-					hash = await sha256Hex(remoteBytes);
-				}
 				remoteFiles.set(path, {
 					path,
 					mtime: entry.mtime,
@@ -454,7 +452,7 @@ export class SyncEngine {
 					isDir: entry.isDir,
 					uuid: entry.uuid,
 					remoteHash: entry.remoteHash,
-					hash,
+					hash: equalityHashes.get(path),
 				});
 			}
 
@@ -667,6 +665,57 @@ export class SyncEngine {
 				firstTransferMs,
 			},
 		};
+	}
+
+	private async resolveRemoteFileHashes(
+		remoteEntries: Iterable<[string, RemoteEntry]>,
+		localFiles: Map<string, LocalEntry>,
+		prevRecords: Map<string, SyncedFileRecord>,
+	): Promise<Map<string, string | undefined>> {
+		const candidates: Array<{ path: string; entry: RemoteEntry; localEntry: LocalEntry }> = [];
+		for (const [path, entry] of remoteEntries) {
+			if (entry.isDir) continue;
+			const localEntry = localFiles.get(path);
+			if (
+				localEntry !== undefined &&
+				!prevRecords.has(path) &&
+				localEntry.size === entry.size &&
+				localEntry.mtime === entry.mtime
+			) {
+				candidates.push({ path, entry, localEntry });
+			}
+		}
+
+		if (candidates.length === 0) return new Map();
+
+		const resolved = new Map<string, string | undefined>();
+		await mapPool(candidates, 4, async ({ path, entry, localEntry }) => {
+			if (entry.remoteHash !== undefined && isValidFilenSha512(entry.remoteHash)) {
+				try {
+					const abstractFile = this.config.app.vault.getAbstractFileByPath(
+						normalizePath(path),
+					);
+					if (abstractFile instanceof TFile) {
+						const content = await this.config.app.vault.readBinary(abstractFile);
+						const localSha512 = await sha512Hex(content);
+						if (localSha512.toLowerCase() === entry.remoteHash.toLowerCase()) {
+							resolved.set(path, localEntry.hash);
+							return;
+						}
+					}
+					resolved.set(path, undefined);
+					return;
+				} catch {
+					// Fall through to remote download fallback
+				}
+			}
+
+			// Fallback: download remote file and compute SHA-256
+			const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
+			resolved.set(path, await sha256Hex(remoteBytes));
+		});
+
+		return resolved;
 	}
 
 	private async walkLocal(pathFilter: SyncPathFilter, forceScan: boolean): Promise<LocalScan> {

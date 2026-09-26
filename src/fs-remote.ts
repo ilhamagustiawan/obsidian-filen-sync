@@ -2,6 +2,7 @@ import { FilenSDK } from "@filen/sdk";
 import { createObsidianAxiosLike } from "./obsidian-axios-adapter";
 import type { FilenAuth } from "./settings";
 import { downloadFileChunks, uploadFileChunks } from "./sync/chunk-transfers";
+import { isValidFilenSha512, normalizeFilenHash } from "./sync/content-hash";
 import { validateRemoteRoot, validateSyncPath } from "./sync/path-validation";
 
 export type RemoteEntry = {
@@ -98,6 +99,15 @@ export class FilenRemoteFs implements RemoteFs {
 
 			const path = validateSyncPath(treePath.startsWith("/") ? treePath.slice(1) : treePath);
 
+			const rawHash =
+				typeof (item as { hash?: unknown }).hash === "string"
+					? (item as { hash: string }).hash
+					: undefined;
+			const remoteHash =
+				rawHash !== undefined && isValidFilenSha512(rawHash)
+					? normalizeFilenHash(rawHash)
+					: undefined;
+
 			entries.push({
 				path,
 				mtime: normalizeRemoteTimestampMs(item.lastModified),
@@ -107,10 +117,7 @@ export class FilenRemoteFs implements RemoteFs {
 					typeof (item as { uuid?: unknown }).uuid === "string"
 						? (item as { uuid: string }).uuid
 						: undefined,
-				remoteHash:
-					typeof (item as { hash?: unknown }).hash === "string"
-						? (item as { hash: string }).hash
-						: undefined,
+				remoteHash,
 			});
 		}
 
@@ -188,13 +195,18 @@ export class FilenRemoteFs implements RemoteFs {
 		);
 		client.init(client.config);
 		configureSdkRetryBounds(client);
+		const rawHash = typeof uploaded.hash === "string" ? uploaded.hash : undefined;
+		const remoteHash =
+			rawHash !== undefined && isValidFilenSha512(rawHash)
+				? normalizeFilenHash(rawHash)
+				: undefined;
 		return {
 			path,
 			mtime,
 			size: uploaded.size,
 			isDir: false,
 			uuid: uploaded.uuid,
-			remoteHash: uploaded.hash,
+			remoteHash,
 		};
 	}
 
@@ -309,16 +321,21 @@ export class FilenRemoteFs implements RemoteFs {
 		if (uuid === null) return null;
 		const file = await client.cloud().getFile({ uuid });
 		if (file.trash) return null;
+		const rawHash =
+			typeof file.metadataDecrypted?.hash === "string"
+				? file.metadataDecrypted.hash
+				: undefined;
+		const remoteHash =
+			rawHash !== undefined && isValidFilenSha512(rawHash)
+				? normalizeFilenHash(rawHash)
+				: undefined;
 		return {
 			path,
 			mtime: normalizeRemoteTimestampMs(file.metadataDecrypted.lastModified),
 			size: file.size,
 			isDir: false,
 			uuid: file.uuid,
-			remoteHash:
-				typeof file.metadataDecrypted?.hash === "string"
-					? file.metadataDecrypted.hash
-					: undefined,
+			remoteHash,
 		};
 	}
 

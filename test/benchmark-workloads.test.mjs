@@ -323,3 +323,56 @@ test("Benchmark Workload C: automatic sync after 1 edit (no regression)", async 
 	assert.equal(outcome.applied, 1);
 	t.diagnostic(`[Workload C - 1 Edit Auto-Sync] elapsedMs: ${autoSyncMs.toFixed(1)}ms`);
 });
+
+test("First sync content fingerprint: mismatch creates conflict and fallback downloads when hash invalid", async () => {
+	// Case 1: Mismatched content with identical size and mtime detected without download during planning
+	const local1 = { "same-stat.md": "Hello World 123" };
+	const remote1 = {
+		"same-stat.md": {
+			content: "Diffs World 123", // same length (15 bytes)
+			mtime: 1000,
+			remoteHash: sha512Hex(bytes("Diffs World 123")),
+		},
+	};
+	const fixture1 = createBenchmarkFixture({
+		localFiles: local1,
+		remoteFiles: remote1,
+		delayMs: 0,
+	});
+	// Run with push direction: if identical, it would be noop (0 uploads). Since mismatched, it uploads (1 upload, 0 downloads).
+	const outcome1 = await fixture1.engine.sync(
+		undefined,
+		undefined,
+		undefined,
+		"push",
+		async () => true,
+	);
+	assert.equal(outcome1.applied, 1, "Applies upload because content was proven mismatched");
+	assert.equal(
+		fixture1.metrics.remoteReadCalls,
+		0,
+		"No remote read required to prove mismatch with valid SHA-512",
+	);
+
+	// Case 2: Invalid or absent remoteHash falls back to remote download
+	const local2 = { "fallback.md": "Same content here" };
+	const remote2 = {
+		"fallback.md": {
+			content: "Same content here",
+			mtime: 1000,
+			remoteHash: "invalid-short-hash", // not 128 chars
+		},
+	};
+	const fixture2 = createBenchmarkFixture({
+		localFiles: local2,
+		remoteFiles: remote2,
+		delayMs: 0,
+	});
+	const outcome2 = await fixture2.runSync();
+	assert.equal(outcome2.applied, 0, "Recognizes identical content via download fallback");
+	assert.equal(
+		fixture2.metrics.remoteReadCalls,
+		1,
+		"Fell back to downloading remote file because hash was invalid",
+	);
+});
