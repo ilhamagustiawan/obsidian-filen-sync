@@ -24,7 +24,7 @@
 		"lint:fix": "oxlint --fix",
 		"fmt": "oxfmt",
 		"fmt:check": "oxfmt --check",
-		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs"
+		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs test/remote-fs.test.mjs"
 	},
 	"dependencies": {
 		"@filen/sdk": "0.4.2",

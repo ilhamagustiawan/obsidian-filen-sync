@@ -62,17 +62,40 @@ type FilenRemoteFsConfig = {
 
 export class FilenRemoteFs implements RemoteFs {
 	private client: FilenSDK | null = null;
+	private verifiedRootForSync: FilenSDK | null = null;
+	private scannedDirectoryUuids: Map<string, string> | null = null;
+	private createdDirectoryPaths = new Set<string>();
 
 	constructor(private readonly config: FilenRemoteFsConfig) {}
 
 	async walk(): Promise<RemoteEntry[]> {
-		const rootUuid = await this.getParentUuid("");
-		const cloud = (await this.getClient()).cloud();
-		return this.sortEntries(await this.walkTree(rootUuid, cloud));
+		this.verifiedRootForSync = null;
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
+		try {
+			const rootUuid = await this.getParentUuid("");
+			const client = await this.getClient();
+			const entries = this.sortEntries(await this.walkTree(rootUuid, client.cloud()));
+			const directoryUuids = new Map<string, string>([["", rootUuid]]);
+			for (const entry of entries) {
+				if (entry.isDir && entry.uuid !== undefined) {
+					directoryUuids.set(normalizeRemotePath(entry.path), entry.uuid);
+				}
+			}
+			this.scannedDirectoryUuids = directoryUuids;
+			return entries;
+		} catch (error) {
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+			throw error;
+		}
 	}
 
 	/** Resolve the authenticated account and effective mirror directory before DB binding. */
 	async getTargetIdentity(): Promise<RemoteTargetIdentity> {
+		this.verifiedRootForSync = null;
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
 		const client = await this.getClient();
 		// Flush the SDK's in-memory directory cache so a replaced root cannot reuse
 		// an earlier UUID as the database binding.
@@ -82,7 +105,14 @@ export class FilenRemoteFs implements RemoteFs {
 		if (typeof userId !== "number" || !Number.isFinite(userId) || userId <= 0) {
 			throw new Error("Filen did not provide a valid authenticated user identity.");
 		}
-		return { userId, rootUuid: await this.getParentUuid("") };
+		try {
+			const rootUuid = await this.getParentUuid("");
+			this.verifiedRootForSync = client;
+			return { userId, rootUuid };
+		} catch (error) {
+			this.verifiedRootForSync = null;
+			throw error;
+		}
 	}
 
 	private async walkTree(
@@ -133,6 +163,7 @@ export class FilenRemoteFs implements RemoteFs {
 		expectedRemoteUuid?: string,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<Uint8Array> {
+		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
@@ -166,6 +197,7 @@ export class FilenRemoteFs implements RemoteFs {
 		expectedRemoteUuid?: string,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<RemoteEntry> {
+		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const current = await this.stat(path);
 		if (
@@ -193,6 +225,9 @@ export class FilenRemoteFs implements RemoteFs {
 			undefined,
 			(_done, _total, completedBytes, totalBytes) => onProgress?.(completedBytes, totalBytes),
 		);
+		this.verifiedRootForSync = null;
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
 		client.init(client.config);
 		configureSdkRetryBounds(client);
 		const rawHash = typeof uploaded.hash === "string" ? uploaded.hash : undefined;
@@ -211,6 +246,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async rm(path: string, expectedRemoteUuid?: string): Promise<void> {
+		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const current = await this.stat(path);
@@ -221,19 +257,71 @@ export class FilenRemoteFs implements RemoteFs {
 			throw new Error(`Remote file changed before deletion: ${path}. Replan the sync.`);
 		}
 		await client.cloud().trashFile({ uuid: current.uuid! });
+		this.verifiedRootForSync = null;
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
 		client.init(client.config);
 		configureSdkRetryBounds(client);
 	}
 
 	async mkdir(path: string): Promise<void> {
 		if (path.length > 0) validateSyncPath(path);
-		const fs = (await this.getClient()).fs();
-		await fs.mkdir({ path: this.join(path) });
+		const client = await this.getClient();
+		if (path.length === 0) {
+			const verified = this.verifiedRootForSync;
+			this.verifiedRootForSync = null;
+			if (verified === client) return;
+		}
+
+		const normalized = normalizeRemotePath(path);
+		const directoryUuids = this.scannedDirectoryUuids;
+		if (normalized.length > 0 && directoryUuids !== null) {
+			const parentPath = normalized.includes("/")
+				? normalized.slice(0, normalized.lastIndexOf("/"))
+				: "";
+			const parentUuid = directoryUuids.get(parentPath);
+			if (parentUuid !== undefined) {
+				try {
+					if (!this.createdDirectoryPaths.has(parentPath)) {
+						const currentParentUuid = await client
+							.fs()
+							.pathToItemUUID({ path: this.join(parentPath), type: "directory" });
+						if (currentParentUuid !== parentUuid) {
+							this.scannedDirectoryUuids = null;
+							this.createdDirectoryPaths.clear();
+							await client.fs().mkdir({ path: this.join(path) });
+							return;
+						}
+					}
+					const name = normalized.slice(normalized.lastIndexOf("/") + 1);
+					const uuid = await client.cloud().createDirectory({ name, parent: parentUuid });
+					directoryUuids.set(normalized, uuid);
+					this.createdDirectoryPaths.add(normalized);
+					return;
+				} catch (error) {
+					this.scannedDirectoryUuids = null;
+					this.createdDirectoryPaths.clear();
+					throw error;
+				}
+			}
+		}
+		if (normalized.length === 0) {
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+		}
+		try {
+			await client.fs().mkdir({ path: this.join(path) });
+		} catch (error) {
+			this.scannedDirectoryUuids = null;
+			this.createdDirectoryPaths.clear();
+			throw error;
+		}
 	}
 
 	async checkEvents(
 		watermarkMs: number,
 	): Promise<{ hasChanges: boolean; newWatermarkMs: number }> {
+		this.verifiedRootForSync = null;
 		const client = await this.getClient();
 		const lastTimestamp = Math.floor(watermarkMs / 1000);
 		const rawEvents = await (
@@ -270,6 +358,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async checkConnect(): Promise<void> {
+		this.verifiedRootForSync = null;
 		await this.ensureRoot();
 		const testPath = `_connection_test_${window.crypto.randomUUID()}.txt`;
 		const content = new TextEncoder().encode("filen-connection-check");
@@ -315,6 +404,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async stat(path: string): Promise<RemoteEntry | null> {
+		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
@@ -340,6 +430,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async getFileVersions(path: string): Promise<RemoteFileVersion[]> {
+		this.verifiedRootForSync = null;
 		validateSyncPath(path);
 		const client = await this.getClient();
 		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
@@ -356,6 +447,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async readFileVersion(version: RemoteFileVersion): Promise<Uint8Array> {
+		this.verifiedRootForSync = null;
 		const client = await this.getClient();
 		const file = await client.cloud().getFile({ uuid: version.uuid });
 		return downloadFileChunks(client, {
@@ -370,6 +462,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {
+		this.verifiedRootForSync = null;
 		const client = await this.getClient();
 		const currentUuid = await client
 			.fs()
@@ -381,6 +474,9 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	close(): void {
+		this.verifiedRootForSync = null;
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
 		this.client?.logout();
 		this.client = null;
 	}
