@@ -49,30 +49,43 @@ export function checkBulkGuard(
 	let remoteOverwrites = 0;
 
 	for (const action of actions) {
-		switch (action.operation) {
-			case "delete-local":
-				localDeletes += 1;
-				break;
-			case "delete-remote":
-				remoteDeletes += 1;
-				break;
-			case "download":
-				// Overwrite if detail implies replacement
-				if (
-					action.detail.includes("Remote changed") ||
-					action.detail.includes("overwriting")
-				) {
+		if (action.isDir || action.operation === "noop") continue;
+
+		if (action.operation === "delete-local") {
+			localDeletes += 1;
+		} else if (action.operation === "delete-remote") {
+			remoteDeletes += 1;
+		} else if (action.isOverwrite !== undefined) {
+			if (action.isOverwrite) {
+				if (action.destinationSide === "local") {
 					localOverwrites += 1;
-				}
-				break;
-			case "upload":
-				if (
-					action.detail.includes("Local changed") ||
-					action.detail.includes("overwriting")
-				) {
+				} else if (action.destinationSide === "remote") {
 					remoteOverwrites += 1;
 				}
-				break;
+			}
+		} else {
+			// Fallback for unadorned legacy action objects
+			if (
+				action.operation === "download" &&
+				(action.detail.includes("Remote changed") ||
+					action.detail.includes("overwriting") ||
+					action.detail.includes("overwrites"))
+			) {
+				localOverwrites += 1;
+			} else if (
+				action.operation === "upload" &&
+				(action.detail.includes("Local changed") ||
+					action.detail.includes("overwriting") ||
+					action.detail.includes("overwrites"))
+			) {
+				remoteOverwrites += 1;
+			} else if (action.operation === "conflict") {
+				if (action.conflictWinner === "local") {
+					remoteOverwrites += 1;
+				} else if (action.conflictWinner === "remote") {
+					localOverwrites += 1;
+				}
+			}
 		}
 	}
 

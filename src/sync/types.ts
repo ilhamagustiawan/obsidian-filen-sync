@@ -28,10 +28,43 @@ export type RemoteFileInfo = {
 	hash?: string;
 };
 
+export type ActionReasonCode =
+	| "missing_both"
+	| "delete_modify_local_survivor"
+	| "delete_modify_remote_survivor"
+	| "remote_deleted_push_reupload"
+	| "remote_deleted_delete_local"
+	| "new_local_pull_skip"
+	| "new_local_upload"
+	| "local_deleted_pull_download"
+	| "local_deleted_delete_remote"
+	| "new_remote_push_skip"
+	| "new_remote_download"
+	| "file_unavailable"
+	| "identical_content"
+	| "first_sync_identical"
+	| "first_sync_conflict_no_baseline"
+	| "first_sync_push_overwrite"
+	| "first_sync_pull_overwrite"
+	| "first_sync_conflict_newer"
+	| "both_unchanged"
+	| "local_changed_pull_skip"
+	| "local_changed_upload"
+	| "remote_changed_push_skip"
+	| "remote_changed_download"
+	| "both_changed_push_overwrite"
+	| "both_changed_pull_overwrite"
+	| "both_changed_conflict";
+
 export type PlannedAction = {
 	path: string;
 	operation: SyncOperation;
 	detail: string;
+	reasonCode?: ActionReasonCode | string;
+	destinationSide?: "local" | "remote";
+	destinationExists?: boolean;
+	isOverwrite?: boolean;
+	preservesSurvivor?: boolean;
 	hash?: string;
 	conflictWinner?: "local" | "remote";
 	isDir?: boolean;

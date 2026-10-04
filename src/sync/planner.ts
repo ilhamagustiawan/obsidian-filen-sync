@@ -92,7 +92,12 @@ function planPath(
 ): PlannedAction {
 	// Case 1: Missing on both sides
 	if (local === undefined && remote === undefined) {
-		return { path, operation: "noop", detail: "Missing on both sides" };
+		return {
+			path,
+			operation: "noop",
+			reasonCode: "missing_both",
+			detail: "Missing on both sides",
+		};
 	}
 
 	// Case 2: Local only
@@ -101,21 +106,16 @@ function planPath(
 			// Remote was deleted
 			const localChanged = isLocalChanged(local, prev);
 			if (localChanged) {
-				// Delete-vs-modify conflict
-				if (direction === "pull") {
-					// In pull mode, remote deleted => delete local unless user edit
-					return {
-						path,
-						operation: "conflict",
-						detail: "Remote deleted; local changed (conflict copy made)",
-						conflictWinner: "local",
-						hash: local.hash,
-					};
-				}
+				// Delete-vs-modify conflict: survivor preserved, no duplicate created
 				return {
 					path,
 					operation: "conflict",
-					detail: "Remote deleted; local changed (conflict copy made)",
+					reasonCode: "delete_modify_local_survivor",
+					destinationSide: "remote",
+					destinationExists: false,
+					isOverwrite: false,
+					preservesSurvivor: true,
+					detail: "Remote deleted; local survivor preserved (uploaded to remote, no duplicate)",
 					conflictWinner: "local",
 					hash: local.hash,
 				};
@@ -123,11 +123,16 @@ function planPath(
 
 			// Local unchanged, remote deleted
 			if (direction === "push") {
-				// In push-only mode, local file exists so we re-upload it
+				// In push-only mode, local survivor re-uploaded
 				return {
 					path,
 					operation: "upload",
-					detail: "Local file pushed to remote",
+					reasonCode: "remote_deleted_push_reupload",
+					destinationSide: "remote",
+					destinationExists: false,
+					isOverwrite: false,
+					preservesSurvivor: true,
+					detail: "Push mode: local survivor re-uploaded to remote",
 					hash: local.hash,
 				};
 			}
@@ -136,17 +141,33 @@ function planPath(
 			return {
 				path,
 				operation: "delete-local",
-				detail: "Remote deleted; removing local",
+				reasonCode: "remote_deleted_delete_local",
+				destinationSide: "local",
+				destinationExists: true,
+				isOverwrite: false,
+				detail:
+					direction === "pull"
+						? "Pull mode: remote deletion propagated (removing local)"
+						: "Remote deleted; removing local",
 			};
 		}
 
 		// New local file (never synced)
 		if (direction === "pull") {
-			return { path, operation: "noop", detail: "Pull mode: skipping local-only file" };
+			return {
+				path,
+				operation: "noop",
+				reasonCode: "new_local_pull_skip",
+				detail: "Pull mode: skipping local-only file",
+			};
 		}
 		return {
 			path,
 			operation: "upload",
+			reasonCode: "new_local_upload",
+			destinationSide: "remote",
+			destinationExists: false,
+			isOverwrite: false,
 			detail: "New local file; uploading",
 			hash: local.hash,
 		};
@@ -158,30 +179,32 @@ function planPath(
 			// Local was deleted
 			const remoteChanged = isRemoteChanged(remote, prev);
 			if (remoteChanged) {
-				// Delete-vs-modify conflict
-				if (direction === "push") {
-					return {
-						path,
-						operation: "conflict",
-						detail: "Local deleted; remote changed (conflict copy made)",
-						conflictWinner: "remote",
-					};
-				}
+				// Delete-vs-modify conflict: survivor preserved, no duplicate created
 				return {
 					path,
 					operation: "conflict",
-					detail: "Local deleted; remote changed (conflict copy made)",
+					reasonCode: "delete_modify_remote_survivor",
+					destinationSide: "local",
+					destinationExists: false,
+					isOverwrite: false,
+					preservesSurvivor: true,
+					detail: "Local deleted; remote survivor preserved (downloaded to local, no duplicate)",
 					conflictWinner: "remote",
 				};
 			}
 
 			// Remote unchanged, local deleted
 			if (direction === "pull") {
-				// In pull-only mode, remote file exists so download it
+				// In pull-only mode, remote file exists so restore it
 				return {
 					path,
 					operation: "download",
-					detail: "Remote file pulled to local",
+					reasonCode: "local_deleted_pull_download",
+					destinationSide: "local",
+					destinationExists: false,
+					isOverwrite: false,
+					preservesSurvivor: true,
+					detail: "Pull mode: remote survivor restored to local",
 				};
 			}
 
@@ -189,24 +212,45 @@ function planPath(
 			return {
 				path,
 				operation: "delete-remote",
-				detail: "Local deleted; removing remote",
+				reasonCode: "local_deleted_delete_remote",
+				destinationSide: "remote",
+				destinationExists: true,
+				isOverwrite: false,
+				detail:
+					direction === "push"
+						? "Push mode: local deletion propagated (removing remote)"
+						: "Local deleted; removing remote",
 			};
 		}
 
 		// New remote file (never synced)
 		if (direction === "push") {
-			return { path, operation: "noop", detail: "Push mode: skipping remote-only file" };
+			return {
+				path,
+				operation: "noop",
+				reasonCode: "new_remote_push_skip",
+				detail: "Push mode: skipping remote-only file",
+			};
 		}
 		return {
 			path,
 			operation: "download",
+			reasonCode: "new_remote_download",
+			destinationSide: "local",
+			destinationExists: false,
+			isOverwrite: false,
 			detail: "New remote file; downloading",
 		};
 	}
 
 	// Case 4: Both exist (local !== undefined && remote !== undefined)
 	if (local === undefined || remote === undefined) {
-		return { path, operation: "noop", detail: "File unavailable" };
+		return {
+			path,
+			operation: "noop",
+			reasonCode: "file_unavailable",
+			detail: "File unavailable",
+		};
 	}
 
 	// A replaced remote object is a change even when its path/metadata are unchanged.
@@ -228,7 +272,13 @@ function planPath(
 		local.hash === prev.hash
 	) {
 		if (remote.size === prev.size && remote.mtime === prev.mtime) {
-			return { path, operation: "noop", detail: "Unchanged", hash: local.hash };
+			return {
+				path,
+				operation: "noop",
+				reasonCode: "identical_content",
+				detail: "Unchanged",
+				hash: local.hash,
+			};
 		}
 	}
 
@@ -243,6 +293,7 @@ function planPath(
 				return {
 					path,
 					operation: "noop",
+					reasonCode: "first_sync_identical",
 					detail: "Verified identical content",
 					hash: local.hash,
 				};
@@ -251,7 +302,11 @@ function planPath(
 				return {
 					path,
 					operation: "conflict",
-					detail: "No trusted baseline or matching content fingerprint (conflict copy made)",
+					reasonCode: "first_sync_conflict_no_baseline",
+					destinationSide: "remote",
+					destinationExists: true,
+					isOverwrite: true,
+					detail: "No trusted baseline or matching content fingerprint (remote saved as conflict copy)",
 					conflictWinner: "local",
 					hash: local.hash,
 				};
@@ -262,7 +317,11 @@ function planPath(
 			return {
 				path,
 				operation: "upload",
-				detail: "Push mode: overwriting remote with local",
+				reasonCode: "first_sync_push_overwrite",
+				destinationSide: "remote",
+				destinationExists: true,
+				isOverwrite: true,
+				detail: "Push mode: overwriting remote with local (no conflict copy)",
 				hash: local.hash,
 			};
 		}
@@ -270,7 +329,11 @@ function planPath(
 			return {
 				path,
 				operation: "download",
-				detail: "Pull mode: overwriting local with remote",
+				reasonCode: "first_sync_pull_overwrite",
+				destinationSide: "local",
+				destinationExists: true,
+				isOverwrite: true,
+				detail: "Pull mode: overwriting local with remote (no conflict copy)",
 			};
 		}
 
@@ -278,10 +341,14 @@ function planPath(
 		return {
 			path,
 			operation: "conflict",
+			reasonCode: "first_sync_conflict_newer",
+			destinationSide: winner === "local" ? "remote" : "local",
+			destinationExists: true,
+			isOverwrite: true,
 			detail:
 				winner === "local"
-					? "No baseline; local is newer (conflict copy made)"
-					: "No baseline; remote is newer (conflict copy made)",
+					? "No baseline; local is newer (remote saved as conflict copy)"
+					: "No baseline; remote is newer (local saved as conflict copy)",
 			conflictWinner: winner,
 			hash: winner === "local" ? local.hash : undefined,
 		};
@@ -292,29 +359,53 @@ function planPath(
 	const remoteChanged = isRemoteChanged(remote, prev);
 
 	if (!localChanged && !remoteChanged) {
-		return { path, operation: "noop", detail: "Unchanged", hash: prev.hash ?? local.hash };
+		return {
+			path,
+			operation: "noop",
+			reasonCode: "both_unchanged",
+			detail: "Unchanged",
+			hash: prev.hash ?? local.hash,
+		};
 	}
 
 	if (localChanged && !remoteChanged) {
 		if (direction === "pull") {
-			return { path, operation: "noop", detail: "Pull mode: skipping local change" };
+			return {
+				path,
+				operation: "noop",
+				reasonCode: "local_changed_pull_skip",
+				detail: "Pull mode: skipping local change",
+			};
 		}
 		return {
 			path,
 			operation: "upload",
-			detail: "Local changed; uploading",
+			reasonCode: "local_changed_upload",
+			destinationSide: "remote",
+			destinationExists: true,
+			isOverwrite: true,
+			detail: "Local changed; uploading (overwriting remote)",
 			hash: local.hash,
 		};
 	}
 
 	if (!localChanged && remoteChanged) {
 		if (direction === "push") {
-			return { path, operation: "noop", detail: "Push mode: skipping remote change" };
+			return {
+				path,
+				operation: "noop",
+				reasonCode: "remote_changed_push_skip",
+				detail: "Push mode: skipping remote change",
+			};
 		}
 		return {
 			path,
 			operation: "download",
-			detail: "Remote changed; downloading",
+			reasonCode: "remote_changed_download",
+			destinationSide: "local",
+			destinationExists: true,
+			isOverwrite: true,
+			detail: "Remote changed; downloading (overwriting local)",
 		};
 	}
 
@@ -323,7 +414,11 @@ function planPath(
 		return {
 			path,
 			operation: "upload",
-			detail: "Push mode: local overwrites remote",
+			reasonCode: "both_changed_push_overwrite",
+			destinationSide: "remote",
+			destinationExists: true,
+			isOverwrite: true,
+			detail: "Push mode: local overwrites remote (no conflict copy)",
 			hash: local.hash,
 		};
 	}
@@ -331,7 +426,11 @@ function planPath(
 		return {
 			path,
 			operation: "download",
-			detail: "Pull mode: remote overwrites local",
+			reasonCode: "both_changed_pull_overwrite",
+			destinationSide: "local",
+			destinationExists: true,
+			isOverwrite: true,
+			detail: "Pull mode: remote overwrites local (no conflict copy)",
 		};
 	}
 
@@ -339,10 +438,14 @@ function planPath(
 	return {
 		path,
 		operation: "conflict",
+		reasonCode: "both_changed_conflict",
+		destinationSide: winner === "local" ? "remote" : "local",
+		destinationExists: true,
+		isOverwrite: true,
 		detail:
 			winner === "local"
-				? "Both changed; local newer (conflict copy made)"
-				: "Both changed; remote newer (conflict copy made)",
+				? "Both changed; local newer (remote saved as conflict copy)"
+				: "Both changed; remote newer (local saved as conflict copy)",
 		conflictWinner: winner,
 		hash: winner === "local" ? local.hash : undefined,
 	};

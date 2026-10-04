@@ -666,8 +666,23 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private confirmBulkOperations(report: BulkGuardReport): Promise<boolean> {
-		const message = `${report.reason ?? "A large number of files would be deleted or overwritten."}\n\nProceed with this sync run?`;
-		return confirmAction(this.app, "Mass changes detected", message, "Proceed with sync");
+		const lines: string[] = [];
+		if (report.reason) {
+			lines.push(report.reason);
+		} else {
+			lines.push("A large number of files would be deleted or overwritten.");
+		}
+		lines.push("");
+		lines.push("Proposed destructive effects:");
+		lines.push(
+			`• Local: ${report.stats.localDeletes} delete(s), ${report.stats.localOverwrites} overwrite(s)`,
+		);
+		lines.push(
+			`• Remote: ${report.stats.remoteDeletes} delete(s), ${report.stats.remoteOverwrites} overwrite(s)`,
+		);
+		lines.push("");
+		lines.push("Proceed with this sync run?");
+		return confirmAction(this.app, "Mass changes detected", lines.join("\n"), "Proceed with sync");
 	}
 
 	private getOrCreateRemoteFs(): FilenRemoteFs {

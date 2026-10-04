@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Planned actions expose stable reason codes and explicit destination/effect metadata; presentation text never controls safety decisions.
-- [ ] Deletes and overwrites are counted separately for each side. Conflict-winner replacement counts even when the losing content is preserved; conflict-copy creation, directory work, and no-ops do not inflate destructive-file counts.
-- [ ] Preserve confirmation defaults: 20 destructive files per side; five or more destructive files affecting at least 20% of that side; unexpectedly empty-side protection with at least five baseline files.
-- [ ] Preserve separate local-delete confirmation and unattended refusal when confirmation is required.
-- [ ] Changing human-readable detail does not change guard results. Existing direction semantics, target binding, and recovery behavior remain unchanged.
-- [ ] Manually verify all directions, overwrite/conflict classifications, guard boundaries, and automatic-sync refusal in a disposable vault. Automated test additions are out of scope.
+- [x] Planned actions expose stable reason codes and explicit destination/effect metadata; presentation text never controls safety decisions.
+- [x] Deletes and overwrites are counted separately for each side. Conflict-winner replacement counts even when the losing content is preserved; conflict-copy creation, directory work, and no-ops do not inflate destructive-file counts.
+- [x] Preserve confirmation defaults: 20 destructive files per side; five or more destructive files affecting at least 20% of that side; unexpectedly empty-side protection with at least five baseline files.
+- [x] Preserve separate local-delete confirmation and unattended refusal when confirmation is required.
+- [x] Changing human-readable detail does not change guard results. Existing direction semantics, target binding, and recovery behavior remain unchanged.
+- [x] Manually verify all directions, overwrite/conflict classifications, guard boundaries, and automatic-sync refusal in a disposable vault. Automated test additions are out of scope.
