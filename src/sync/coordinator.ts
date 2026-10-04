@@ -107,7 +107,6 @@ export class SyncCoordinator {
 	private lastSyncStartAt = 0;
 	private pendingAutoSyncRequiresFullScan = false;
 	private lastSuccessfulAutoSyncAt: number | null = null;
-	private lastResumeTriggerAt = 0;
 	private autoSyncTransientFailureCount = 0;
 	private autoSyncReplanRetryCount = 0;
 	private isReplanRetryHeld = false;
@@ -877,7 +876,6 @@ export class SyncCoordinator {
 	 */
 	private scheduleResumeAutoSync(hasSavedAuth: () => boolean): void {
 		if (this.isReplanRetryHeld) return;
-		this.lastResumeTriggerAt = Date.now();
 		if (this.resumeCoalescingBlocked()) return;
 		this.pendingAutoSync = true;
 		this.scheduleQueuedAutoSync(1000, hasSavedAuth);

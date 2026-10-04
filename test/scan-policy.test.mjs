@@ -328,10 +328,7 @@ test("unchanged routine reconcile performs zero content reads with valid hashes"
 	assert.equal(warm.scanDiagnostics?.fallbackReason, "missing-hints");
 	assert.equal(warm.scanDiagnostics?.hashMisses, 0, "no misses with valid hashes");
 	assert.equal(warm.scanDiagnostics?.localReads, 0, "zero content reads on an unchanged run");
-	assert.ok(
-		(coldReads ?? 0) > 0,
-		"cold run read content at least once",
-	);
+	assert.ok((coldReads ?? 0) > 0, "cold run read content at least once");
 });
 
 test("routine reconcile discovers additions, deletions, renames, and folders with empty hints", async () => {
@@ -397,8 +394,14 @@ test("reconcile and full fresh scans agree on identical waves of changes", async
 	assert.equal(reconcileOutcome.applied, fullOutcome.applied);
 	assert.equal(reconcileOutcome.conflicts, fullOutcome.conflicts);
 	assert.equal(
-		[...reconcile.cloud.entries()].sort().map(([, e]) => e.path).join(","),
-		[...full.cloud.entries()].sort().map(([, e]) => e.path).join(","),
+		[...reconcile.cloud.entries()]
+			.sort()
+			.map(([, e]) => e.path)
+			.join(","),
+		[...full.cloud.entries()]
+			.sort()
+			.map(([, e]) => e.path)
+			.join(","),
 	);
 });
 
@@ -533,7 +536,11 @@ test("failed hashing never publishes a partial snapshot or deletes evidence", as
 	assert.equal(s.engine.localScanSnapshot, null, "failed scan published no snapshot");
 	s.files.get("a.md").content = bytes("new-a");
 	await s.run();
-	assert.equal(new TextDecoder().decode(s.cloud.get("a.md").content), "new-a", "recovery still works");
+	assert.equal(
+		new TextDecoder().decode(s.cloud.get("a.md").content),
+		"new-a",
+		"recovery still works",
+	);
 });
 
 test("first sync equality derives both fingerprints from one read per file", async () => {
@@ -610,7 +617,11 @@ test("bulk guard and local-delete confirmation still gate reconcile-mode runs", 
 		baseline: ["a.md", "b.md"],
 	});
 	const refused = await s.run({}, undefined, async () => false);
-	assert.equal(refused.cancelled, true, "reconcile-mode local delete still asks for confirmation");
+	assert.equal(
+		refused.cancelled,
+		true,
+		"reconcile-mode local delete still asks for confirmation",
+	);
 	assert.match(refused.cancelReason ?? "", /deletes cancelled/);
 });
 
@@ -698,9 +709,34 @@ test("diagnostic records carry scan mode and stage timing and older records stay
 				planMs: 5,
 				executeMs: 300,
 			},
-			counts: { upload: 0, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 3, totalProposed: 0 },
-			destructiveStats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 },
-			safetyReport: { blocked: false, stats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 } },
+			counts: {
+				upload: 0,
+				download: 0,
+				deleteLocal: 0,
+				deleteRemote: 0,
+				conflict: 0,
+				noop: 3,
+				totalProposed: 0,
+			},
+			destructiveStats: {
+				localDeletes: 0,
+				remoteDeletes: 0,
+				localOverwrites: 0,
+				remoteOverwrites: 0,
+				totalDestructiveLocal: 0,
+				totalDestructiveRemote: 0,
+			},
+			safetyReport: {
+				blocked: false,
+				stats: {
+					localDeletes: 0,
+					remoteDeletes: 0,
+					localOverwrites: 0,
+					remoteOverwrites: 0,
+					totalDestructiveLocal: 0,
+					totalDestructiveRemote: 0,
+				},
+			},
 			outcome: "success",
 			actions: [],
 			totalActionsCount: 0,
@@ -715,9 +751,34 @@ test("diagnostic records carry scan mode and stage timing and older records stay
 			target: { userId: 1, rootUuid: "r", remoteRoot: "/", vaultId: "v" },
 			provenance: "full",
 			timing: { totalMs: 100 },
-			counts: { upload: 1, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 0, totalProposed: 1 },
-			destructiveStats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 },
-			safetyReport: { blocked: false, stats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 } },
+			counts: {
+				upload: 1,
+				download: 0,
+				deleteLocal: 0,
+				deleteRemote: 0,
+				conflict: 0,
+				noop: 0,
+				totalProposed: 1,
+			},
+			destructiveStats: {
+				localDeletes: 0,
+				remoteDeletes: 0,
+				localOverwrites: 0,
+				remoteOverwrites: 0,
+				totalDestructiveLocal: 0,
+				totalDestructiveRemote: 0,
+			},
+			safetyReport: {
+				blocked: false,
+				stats: {
+					localDeletes: 0,
+					remoteDeletes: 0,
+					localOverwrites: 0,
+					remoteOverwrites: 0,
+					totalDestructiveLocal: 0,
+					totalDestructiveRemote: 0,
+				},
+			},
 			outcome: "success",
 			actions: [],
 			totalActionsCount: 0,
@@ -737,4 +798,25 @@ test("diagnostic records carry scan mode and stage timing and older records stay
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("routine runs without event support refresh remote metadata conservatively", async () => {
+	const s = fixture({
+		local: { "a.md": "a", "b.md": "b" },
+		remote: { "a.md": "a", "b.md": "b" },
+		baseline: ["a.md", "b.md"],
+	});
+	delete s.engine.config.remote.checkEvents;
+	s.engine.config.settings.fastRemotePolling = true;
+	await s.run();
+	assert.equal(s.walks, 1, "cold run walks remote");
+	// Without an event feed, even a hinted run must refuse narrow planning and
+	// refresh remote metadata instead of trusting the cached tree.
+	s.files.get("a.md").content = bytes("a-mod");
+	s.engine.invalidateLocal("a.md");
+	const out = await s.run({ autoSync: true, scanHints: ["a.md"] });
+	assert.equal(out.provenance, "reconcile");
+	assert.equal(out.scanDiagnostics?.fallbackReason, "no-remote-event-support");
+	assert.equal(out.scanDiagnostics?.remoteRefreshes, 1);
+	assert.equal(new TextDecoder().decode(s.cloud.get("a.md").content), "a-mod");
 });

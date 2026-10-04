@@ -98,6 +98,7 @@ export type ScanFallbackReason =
 	| "remote-changes-detected"
 	| "remote-probe-failed"
 	| "no-remote-event-support"
+	| "fast-polling-disabled"
 	| "folder-hints"
 	| "missing-hints"
 	| "ambiguous-hints"

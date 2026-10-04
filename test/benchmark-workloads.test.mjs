@@ -41,7 +41,7 @@ before(async () => {
 		],
 	});
 	({ SyncEngine, TFile, createDefaultHashingPool, ByteBoundedWorkPool } = await import(
-		pathToFileURL(outfile).href,
+		pathToFileURL(outfile).href
 	));
 });
 

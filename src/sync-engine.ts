@@ -275,6 +275,7 @@ export class SyncEngine {
 		cacheValid: boolean,
 		probeHasChanges: boolean,
 		probeFailed: boolean,
+		probeStatus: "available" | "unsupported" | "disabled",
 		hasValidFileHints: boolean,
 	): ScanPolicy {
 		const isManual = options.isManual === true;
@@ -310,6 +311,8 @@ export class SyncEngine {
 			fallbackReason = "explicit-refresh";
 		else if (folderHintsOnly) fallbackReason = "folder-hints";
 		else if (!hasAnyHints) fallbackReason = "missing-hints";
+		else if (probeStatus === "unsupported") fallbackReason = "no-remote-event-support";
+		else if (probeStatus === "disabled") fallbackReason = "fast-polling-disabled";
 		else if (probeFailed) fallbackReason = "remote-probe-failed";
 		else if (probeHasChanges) fallbackReason = "remote-changes-detected";
 		else if (!cacheValid && !snapshotValid) fallbackReason = "cold-session";
@@ -359,8 +362,18 @@ export class SyncEngine {
 		let probeHasChanges = true;
 		let probeFailed = false;
 		let newWatermark = Date.now();
+		const eventProbeAvailable = this.config.remote.checkEvents !== undefined;
+		const probeStatus: "available" | "unsupported" | "disabled" = !eventProbeAvailable
+			? "unsupported"
+			: canFastPoll
+				? "available"
+				: "disabled";
 		const eventProbeStart = performance.now();
-		if (canFastPoll && !refreshRemote && this.config.remote.checkEvents !== undefined) {
+		if (
+			canFastPoll &&
+			!refreshRemote &&
+			this.config.remote.checkEvents !== undefined
+		) {
 			const currentWatermark = this.remoteTreeCache?.eventWatermark ?? 0;
 			try {
 				const probe = await this.config.remote.checkEvents(currentWatermark);
@@ -392,6 +405,7 @@ export class SyncEngine {
 			remoteCacheValid,
 			probeHasChanges,
 			probeFailed,
+			probeStatus,
 			hasValidFileHints,
 		);
 
@@ -582,6 +596,7 @@ export class SyncEngine {
 			if (
 				canFastPoll &&
 				!refreshRemote &&
+				eventProbeAvailable &&
 				!probeHasChanges &&
 				remoteCacheValid &&
 				this.remoteTreeCache !== null

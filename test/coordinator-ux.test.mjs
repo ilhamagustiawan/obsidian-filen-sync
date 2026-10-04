@@ -442,7 +442,11 @@ test("focus and visibility for the same transition share one reconciliation", ()
 		await domListeners.get("d-visibilitychange")();
 		await runNextDebounce(timers);
 		assert.equal(syncCalls, 1, "focus+visibility coalesced into one reconciliation");
-		assert.equal(optionsSeen[0].fullScan, false, "resume runs use the routine reconcile policy");
+		assert.equal(
+			optionsSeen[0].fullScan,
+			false,
+			"resume runs use the routine reconcile policy",
+		);
 
 		// A repeat resume trigger shortly after success with no queued edits is skipped.
 		await domListeners.get("w-focus")();
@@ -456,8 +460,11 @@ test("queued edits keep resume triggers running; overdue verification is never s
 	await fixture(async ({ coordinator, events, file, domListeners, timers }) => {
 		await domListeners.get("w-focus")();
 		await runNextDebounce(timers);
-		coordinator.syncEngine.sync =
-			async () => ({ applied: 0, conflicts: 0, timing: { totalMs: 1 } });
+		coordinator.syncEngine.sync = async () => ({
+			applied: 0,
+			conflicts: 0,
+			timing: { totalMs: 1 },
+		});
 		// Same transition, but now an edit is queued: the resume run must NOT be skipped.
 		events.get("modify")(file); // queues pending path + schedules auto-sync
 		await domListeners.get("w-focus")();
@@ -524,3 +531,30 @@ test("failed or cancelled runs never advance the successful-verification timesta
 		await resumeAt(3);
 	});
 });
+test("interval and startup runs use the routine reconcile policy, not forced scans", () =>
+	fixture(async ({ coordinator, timers }) => {
+		const optionsSeen = [];
+		coordinator.syncEngine = {
+			sync: async (_p, _c, _a, _d, _cb, _b, options) => {
+				optionsSeen.push(options);
+				return { applied: 0, conflicts: 0, timing: { totalMs: 1 } };
+			},
+			invalidateLocal: () => {},
+			close: () => {},
+		};
+		// Let the fire-and-forget runSync started by requestAutoSync finish.
+		const settle = () => new Promise((r) => setTimeout(r, 0));
+		// Stand in for a periodic interval tick: it must NOT force content verification.
+		coordinator.requestAutoSync(() => true, false);
+		await runNextDebounce(timers);
+		await settle();
+		assert.equal(optionsSeen.at(-1)?.fullScan, false, "interval runs are routine reconciles");
+		// A folder-driven conservative pass (e.g. folder events) stays forced.
+		optionsSeen.length = 0;
+		timers.clear();
+		coordinator.nextAutoSyncAllowedAt = 0;
+		coordinator.pendingAutoSyncRequiresFullScan = true;
+		coordinator.requestAutoSync(() => true, true);
+		await settle();
+		assert.equal(optionsSeen.at(-1)?.fullScan, true, "folder-driven runs stay forced");
+	}));
