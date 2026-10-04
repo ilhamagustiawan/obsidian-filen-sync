@@ -182,7 +182,36 @@ export class DiagnosticHistoryModal extends Modal {
 
 			const metaP = detailBox.createEl("p", { cls: "text-muted" });
 			metaP.setText(
-				`Trigger: ${sel.trigger} · Provenance: ${sel.provenance} · Direction: ${sel.direction} · Outcome: ${sel.outcome}`,
+				`Trigger: ${sel.trigger} · Mode: ${sel.provenance} · Direction: ${sel.direction} · Outcome: ${sel.outcome}`,
+			);
+
+			if (sel.scan) {
+				const scanP = detailBox.createEl("p", { cls: "text-muted" });
+				const fallback = sel.scan.fallbackReason
+					? ` · Fallback: ${sel.scan.fallbackReason}`
+					: "";
+				scanP.setText(`Scan: ${sel.scan.mode} (${sel.scan.localReads} reads, ${sel.scan.localReadBytes}B, ${sel.scan.hashHits} hash hits, ${sel.scan.hashMisses} misses, ${sel.scan.equalityComparisons} equality checks, ${sel.scan.equalityDownloads} downloads, ${sel.scan.remoteProbes} probes, ${sel.scan.remoteRefreshes} refreshes, ${sel.scan.remoteReuses} reuses)${fallback}`);
+			}
+
+			const timing = sel.timing;
+			const stageParts = [
+				["target prep", timing.targetPrepMs],
+				["probe", timing.eventProbeMs],
+				["local", timing.localScanMs],
+				["baseline", timing.baselineMs],
+				["remote", timing.remoteScanMs],
+				["equality", timing.equalityMs],
+				["plan", timing.planMs],
+				["dirs", timing.directoriesMs],
+				["apply", timing.executeMs],
+				["transfer", timing.transferMs],
+			]
+				.filter(([, ms]) => typeof ms === "number" && ms > 0)
+				.map(([name, ms]) => `${name} ${ms}ms`)
+				.join(", ");
+			const timingP = detailBox.createEl("p", { cls: "text-muted" });
+			timingP.setText(
+				`Elapsed ${(timing.totalMs / 1000).toFixed(1)}s · ${stageParts || "no stage timing recorded"}`,
 			);
 
 			if (sel.outcomeDetail) {

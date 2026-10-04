@@ -12,6 +12,8 @@ export type LocalEntry = {
 	ctime: number;
 	size: number;
 	hash?: string;
+	/** SHA-512 of the same verified bytes as `hash` (single-read equality pairs). */
+	sha512?: string;
 	file: TAbstractFile;
 };
 

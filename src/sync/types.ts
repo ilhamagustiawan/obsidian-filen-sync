@@ -83,7 +83,44 @@ export type ExclusionsSummary = {
 	samplePaths: string[];
 };
 
-export type SnapshotProvenance = "full" | "narrow" | "cache";
+export type SnapshotProvenance = "full" | "narrow" | "reconcile" | "cache";
+
+export type ScanMode = "narrow" | "reconcile" | "full";
+
+export type ScanFallbackReason =
+	| "manual-sync"
+	| "initial-sync"
+	| "explicit-verify"
+	| "explicit-refresh"
+	| "cold-session"
+	| "stale-local-snapshot"
+	| "stale-remote-tree"
+	| "remote-changes-detected"
+	| "remote-probe-failed"
+	| "no-remote-event-support"
+	| "folder-hints"
+	| "missing-hints"
+	| "scan-race"
+	| "replan";
+
+export type ScanCounters = {
+	localReads: number;
+	localReadBytes: number;
+	hashHits: number;
+	hashMisses: number;
+	equalityComparisons: number;
+	equalityDownloads: number;
+	remoteProbes: number;
+	remoteRefreshes: number;
+	remoteReuses: number;
+	inventoryFiles: number;
+	inventoryDirs: number;
+};
+
+export type ScanDiagnostics = {
+	mode: ScanMode;
+	fallbackReason?: ScanFallbackReason | string;
+} & ScanCounters;
 
 export type TargetIdentityInfo = {
 	userId: number;
@@ -118,6 +155,7 @@ export type SyncPreviewResult = {
 	exclusions: ExclusionsSummary;
 	timing: SyncTimingSummary;
 	provenance: SnapshotProvenance;
+	scanDiagnostics?: ScanDiagnostics;
 };
 
 export type SyncTimingSummary = {
@@ -126,6 +164,15 @@ export type SyncTimingSummary = {
 	planMs?: number;
 	transferMs?: number;
 	firstTransferMs?: number;
+	// Stage timings (optional so pre-existing records stay readable).
+	targetPrepMs?: number;
+	eventProbeMs?: number;
+	localScanMs?: number;
+	baselineMs?: number;
+	remoteScanMs?: number;
+	equalityMs?: number;
+	directoriesMs?: number;
+	executeMs?: number;
 };
 
 export type SyncOutcome = {
@@ -139,6 +186,9 @@ export type SyncOutcome = {
 	cancelled?: boolean;
 	cancelReason?: string;
 	timing?: SyncTimingSummary;
+	/** Actual scanning mode the engine selected (never inferred from hints). */
+	provenance?: SnapshotProvenance;
+	scanDiagnostics?: ScanDiagnostics;
 };
 
 export type SyncProgress = {

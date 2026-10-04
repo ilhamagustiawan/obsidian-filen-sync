@@ -1,4 +1,5 @@
 import type { DiagnosticPlanRecord } from "./diagnostic-history";
+import type { ScanDiagnostics } from "./types";
 
 export type SanitizedDiagnosticAction = {
 	pathAlias: string;
@@ -23,7 +24,16 @@ export type SanitizedDiagnosticRecord = {
 		planMs?: number;
 		transferMs?: number;
 		firstTransferMs?: number;
+		targetPrepMs?: number;
+		eventProbeMs?: number;
+		localScanMs?: number;
+		baselineMs?: number;
+		remoteScanMs?: number;
+		equalityMs?: number;
+		directoriesMs?: number;
+		executeMs?: number;
 	};
+	scan?: ScanDiagnostics;
 	counts: {
 		upload: number;
 		download: number;
@@ -146,6 +156,7 @@ export function buildRedactedDiagnosticExport(
 			trigger: record.trigger,
 			provenance: record.provenance,
 			timing: { ...record.timing },
+			scan: record.scan,
 			counts: { ...record.counts },
 			destructiveStats: { ...record.destructiveStats },
 			safetyReport: {

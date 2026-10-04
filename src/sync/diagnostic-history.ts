@@ -2,6 +2,7 @@ import localforage from "localforage";
 import type { BulkGuardReport } from "./bulk-guard";
 import type {
 	ActionReasonCode,
+	ScanDiagnostics,
 	SnapshotProvenance,
 	SyncDirection,
 	SyncOperation,
@@ -33,6 +34,8 @@ export type DiagnosticPlanRecord = {
 	target: TargetIdentityInfo;
 	provenance: SnapshotProvenance;
 	timing: SyncTimingSummary;
+	/** Actual engine scan decision; optional so older records remain readable. */
+	scan?: ScanDiagnostics;
 	counts: {
 		upload: number;
 		download: number;

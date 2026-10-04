@@ -4,6 +4,7 @@ import type { SyncDb } from "../db";
 import type { FilenRemoteFs } from "../fs-remote";
 import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
+import { LOCAL_HASH_CACHE_TTL_MS } from "./local-hash-cache";
 import { SyncEngine } from "../sync-engine";
 import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
 import { isConflictFilePath } from "./conflict-utils";
@@ -27,6 +28,23 @@ function formatTimingSummary(timing?: SyncTimingSummary): string {
 		parts.push(`transfer ${timing.transferMs}ms`);
 	if (timing.firstTransferMs !== undefined)
 		parts.push(`first file in ${timing.firstTransferMs}ms`);
+	// Stage timings distinguish where time went; they overlap and are not summed.
+	if (timing.targetPrepMs !== undefined && timing.targetPrepMs > 0)
+		parts.push(`target prep ${timing.targetPrepMs}ms`);
+	if (timing.eventProbeMs !== undefined && timing.eventProbeMs > 0)
+		parts.push(`probe ${timing.eventProbeMs}ms`);
+	if (timing.localScanMs !== undefined && timing.localScanMs > 0)
+		parts.push(`local scan ${timing.localScanMs}ms`);
+	if (timing.baselineMs !== undefined && timing.baselineMs > 0)
+		parts.push(`baseline ${timing.baselineMs}ms`);
+	if (timing.remoteScanMs !== undefined && timing.remoteScanMs > 0)
+		parts.push(`remote ${timing.remoteScanMs}ms`);
+	if (timing.equalityMs !== undefined && timing.equalityMs > 0)
+		parts.push(`equality ${timing.equalityMs}ms`);
+	if (timing.directoriesMs !== undefined && timing.directoriesMs > 0)
+		parts.push(`dirs ${timing.directoriesMs}ms`);
+	if (timing.executeMs !== undefined && timing.executeMs > 0)
+		parts.push(`apply ${timing.executeMs}ms`);
 	return ` (${parts.join(", ")})`;
 }
 
@@ -60,6 +78,8 @@ export type SyncRunResult =
 const AUTO_SYNC_FAILURE_BASE_BACKOFF_MS = 30_000;
 const AUTO_SYNC_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
 const ERROR_NOTICE_THROTTLE_MS = 15 * 60_000;
+/** A resume trigger that close to a successful reconciliation is coalesced away. */
+const RESUME_RECONCILE_SKIP_MS = 60_000;
 
 export type CoordinatorCallbacks = {
 	onStatusChange: (state: StatusBarState) => void;
@@ -86,6 +106,8 @@ export class SyncCoordinator {
 	private nextAutoSyncAllowedAt = 0;
 	private lastSyncStartAt = 0;
 	private pendingAutoSyncRequiresFullScan = false;
+	private lastSuccessfulAutoSyncAt: number | null = null;
+	private lastResumeTriggerAt = 0;
 	private autoSyncTransientFailureCount = 0;
 	private autoSyncReplanRetryCount = 0;
 	private isReplanRetryHeld = false;
@@ -383,10 +405,12 @@ export class SyncCoordinator {
 
 		let targetInfo: TargetIdentityInfo | null = null;
 		try {
+			const targetPrepStart = performance.now();
 			await this.callbacks.prepareTarget?.();
 			if (this.callbacks.getTargetInfo) {
 				targetInfo = await this.callbacks.getTargetInfo(false);
 			}
+			const targetPrepMs = Math.round(performance.now() - targetPrepStart);
 			const engine = this.getSyncEngine();
 
 			const confirmDeletes = options.silent
@@ -454,6 +478,9 @@ export class SyncCoordinator {
 				return { kind: "cancelled", reason };
 			}
 
+			// A complete, non-cancelled run advances the successful-verification
+			// timestamp; failed, skipped, and cancelled runs never do.
+			this.lastSuccessfulAutoSyncAt = Date.now();
 			this.resetAutoSyncBackoff();
 			this.autoSyncReplanRetryCount = 0;
 			this.isReplanRetryHeld = false;
@@ -488,8 +515,12 @@ export class SyncCoordinator {
 					direction,
 					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
 					target: targetInfo,
-					provenance: scanHints ? "narrow" : "full",
-					timing: result.timing ?? { totalMs: 0 },
+					provenance: result.provenance ?? (scanHints ? "narrow" : "full"),
+					timing: {
+						...(result.timing ?? { totalMs: 0 }),
+						targetPrepMs: targetPrepMs > 0 ? targetPrepMs : undefined,
+					},
+					scan: result.scanDiagnostics,
 					counts: {
 						upload: result.uploaded ?? 0,
 						download: result.downloaded ?? 0,
@@ -759,22 +790,21 @@ export class SyncCoordinator {
 
 		if (syncOnSave || syncIntervalMinutes > 0) {
 			this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
-				if (document.visibilityState === "visible")
-					this.scheduleAutoSync(1000, hasSavedAuth, true);
+				if (document.visibilityState === "visible") this.scheduleResumeAutoSync(hasSavedAuth);
 			});
 			this.registerAutoSyncDomEvent(window, "focus", () => {
-				this.scheduleAutoSync(1000, hasSavedAuth, true);
+				this.scheduleResumeAutoSync(hasSavedAuth);
 			});
 			this.registerAutoSyncDomEvent(window, "online", () => {
 				this.resetOffline();
-				this.scheduleAutoSync(1000, hasSavedAuth, true);
+				this.scheduleReconnectAutoSync(hasSavedAuth);
 			});
 		}
 
 		if (syncIntervalMinutes > 0) {
 			this.intervalId = window.setInterval(
 				() => {
-					this.requestAutoSync(hasSavedAuth, true);
+					this.requestAutoSync(hasSavedAuth, false);
 				},
 				syncIntervalMinutes * 60 * 1000,
 			);
@@ -783,7 +813,7 @@ export class SyncCoordinator {
 		if (syncStartupDelaySeconds > 0) {
 			this.startupTimerId = window.setTimeout(() => {
 				this.startupTimerId = null;
-				this.requestAutoSync(hasSavedAuth, true);
+				this.requestAutoSync(hasSavedAuth, false);
 			}, syncStartupDelaySeconds * 1000);
 		}
 	}
@@ -838,6 +868,52 @@ export class SyncCoordinator {
 		this.scheduleQueuedAutoSync(delayMs, hasSavedAuth);
 	}
 
+	/**
+	 * Resume trigger (visibility/focus) for the same app transition. Routine
+	 * resume runs use the reconcile policy (no forced content verification), and
+	 * duplicate triggers share one pending reconciliation.
+	 */
+	private scheduleResumeAutoSync(hasSavedAuth: () => boolean): void {
+		if (this.isReplanRetryHeld) return;
+		this.lastResumeTriggerAt = Date.now();
+		if (this.resumeCoalescingBlocked()) return;
+		this.pendingAutoSync = true;
+		this.scheduleQueuedAutoSync(1000, hasSavedAuth);
+	}
+
+	/**
+	 * Reconnect recovery must never be suppressed by the resume cooldown, so
+	 * offline changes are still checked. It still coalesces duplicate online
+	 * events into one pending reconciliation.
+	 */
+	private scheduleReconnectAutoSync(hasSavedAuth: () => boolean): void {
+		if (this.isReplanRetryHeld) return;
+		this.pendingAutoSync = true;
+		this.scheduleQueuedAutoSync(1000, hasSavedAuth);
+	}
+
+	private resumeCoalescingBlocked(): boolean {
+		if (this.pendingAutoSync) return true;
+		if (this.isSyncing) {
+			this.pendingAutoSync = true;
+			return true;
+		}
+		const now = Date.now();
+		const sinceSuccess =
+			this.lastSuccessfulAutoSyncAt === null ? Number.POSITIVE_INFINITY : now - this.lastSuccessfulAutoSyncAt;
+		// Skip a resume event that arrives shortly after a successful reconciliation
+		// with no queued edits while the hash evidence is still valid. Overdue
+		// verification and queued edits are never skipped.
+		if (
+			this.pendingCount === 0 &&
+			sinceSuccess < RESUME_RECONCILE_SKIP_MS &&
+			sinceSuccess < LOCAL_HASH_CACHE_TTL_MS
+		) {
+			return true;
+		}
+		return false;
+	}
+
 	private requestAutoSync(hasSavedAuth: () => boolean, fullScan = true): void {
 		this.pendingAutoSyncRequiresFullScan ||= fullScan;
 		if (this.isReplanRetryHeld) return;
@@ -860,7 +936,7 @@ export class SyncCoordinator {
 				: 0;
 		const waitMs = Math.max(this.nextAutoSyncAllowedAt, editDeadline) - Date.now();
 		if (waitMs > 0) {
-			this.scheduleAutoSync(waitMs, hasSavedAuth);
+			this.scheduleAutoSync(waitMs, hasSavedAuth, fullScan);
 			return;
 		}
 		this.pendingAutoSync = false;
