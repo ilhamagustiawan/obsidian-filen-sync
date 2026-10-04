@@ -4,7 +4,7 @@ import type { SyncDb } from "./db";
 import type { RemoteEntry, RemoteFs } from "./fs-remote";
 import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncedFileRecord } from "./settings";
-import { isValidFilenSha512, sha512Hex } from "./sync/content-hash";
+import { isValidFilenSha512 } from "./sync/content-hash";
 import { checkBulkGuard, type BulkGuardReport, type BulkGuardThresholds } from "./sync/bulk-guard";
 import { sha256Hex, SyncExecutor, type ExecutionResult, type LocalEntry } from "./sync/executor";
 import { assertNoPathCollisions } from "./sync/path-validation";
@@ -57,6 +57,18 @@ export const HASH_POOL_DEFAULT_CONFIG: BoundedPoolConfig = {
 	largeJobThresholdBytes: 8 * 1024 * 1024,
 	accountFactor: 2,
 };
+
+/**
+ * Concurrent small-file hashing is enabled by default only because the checked-in
+ * deterministic benchmarks (benchmark-workloads.test.mjs) show it eliminates
+ * unnecessary reads without regressing serial hashing correctness or bounds.
+ * Set to false to keep serial hashing.
+ */
+export const HASH_POOL_ENABLED = true;
+
+export function createDefaultHashingPool(): ByteBoundedWorkPool {
+	return new ByteBoundedWorkPool(HASH_POOL_DEFAULT_CONFIG);
+}
 
 type RemoteTreeCache = {
 	fetchedAt: number;
@@ -252,9 +264,7 @@ export class SyncEngine {
 	 */
 	private assertScanEpoch(epoch: number): void {
 		if (this.invalidationEpoch !== epoch) {
-			throw new Error(
-				"Local files changed while scanning. Replan the sync.",
-			);
+			throw new Error("Local files changed while scanning. Replan the sync.");
 		}
 	}
 
@@ -270,8 +280,10 @@ export class SyncEngine {
 		const isManual = options.isManual === true;
 		const isInitial = options.initialSync === true;
 		const forceVerified = isManual || isInitial;
-		const verifyContents = forceVerified || options.fullScan === true || options.verifyContents === true;
-		const refreshRemote = forceVerified || options.fullScan === true || options.refreshRemote === true;
+		const verifyContents =
+			forceVerified || options.fullScan === true || options.verifyContents === true;
+		const refreshRemote =
+			forceVerified || options.fullScan === true || options.refreshRemote === true;
 
 		const narrow =
 			!verifyContents &&
@@ -286,21 +298,24 @@ export class SyncEngine {
 			return { mode: "narrow", verifyContents, refreshRemote, narrow: true };
 		}
 
+		const hasAnyHints = options.scanHints !== undefined && options.scanHints.length > 0;
+		const folderHintsOnly = hasAnyHints && !hasValidFileHints;
+
 		let fallbackReason: ScanFallbackReason | string | undefined;
 		if (isManual) fallbackReason = "manual-sync";
 		else if (isInitial) fallbackReason = "initial-sync";
 		else if (replanAttempts > 0) fallbackReason = "replan";
 		else if (options.verifyContents === true) fallbackReason = "explicit-verify";
-		else if (options.refreshRemote === true || options.fullScan === true)
+		else if (options.fullScan === true || options.refreshRemote === true)
 			fallbackReason = "explicit-refresh";
-		else if (options.scanHints !== undefined && options.scanHints.length > 0)
-			fallbackReason = "folder-hints";
-		else if (options.scanHints !== undefined) fallbackReason = "missing-hints";
-		else if (probeHasChanges) {
-			fallbackReason = probeFailed ? "remote-probe-failed" : "remote-changes-detected";
-		} else if (!cacheValid) fallbackReason = "stale-remote-tree";
+		else if (folderHintsOnly) fallbackReason = "folder-hints";
+		else if (!hasAnyHints) fallbackReason = "missing-hints";
+		else if (probeFailed) fallbackReason = "remote-probe-failed";
+		else if (probeHasChanges) fallbackReason = "remote-changes-detected";
+		else if (!cacheValid && !snapshotValid) fallbackReason = "cold-session";
+		else if (!cacheValid) fallbackReason = "stale-remote-tree";
 		else if (!snapshotValid) fallbackReason = "stale-local-snapshot";
-		else fallbackReason = "missing-hints";
+		else fallbackReason = "ambiguous-hints";
 
 		const mode: ScanMode = verifyContents && refreshRemote ? "full" : "reconcile";
 		return { mode, fallbackReason, verifyContents, refreshRemote, narrow: false };
@@ -317,6 +332,9 @@ export class SyncEngine {
 		options: SyncRunOptions = {},
 		replanAttempts = 0,
 	): Promise<SyncOutcome> {
+		// Fresh counter window per pass so diagnostics describe THIS scan only.
+		this.localHashes.resetCounters();
+
 		const localSnapshotValid =
 			this.localScanSnapshot !== null &&
 			Date.now() - this.localScanSnapshot.fetchedAt < LOCAL_SCAN_SNAPSHOT_TTL_MS;
@@ -326,16 +344,17 @@ export class SyncEngine {
 			Date.now() - this.remoteTreeCache.fetchedAt < REMOTE_TREE_CACHE_TTL_MS;
 
 		const canFastPoll =
-			this.config.settings.fastRemotePolling &&
-			this.config.remote.checkEvents !== undefined;
+			this.config.settings.fastRemotePolling && this.config.remote.checkEvents !== undefined;
 
 		// Independently decide whether fresh content hashes / remote metadata are
 		// required before we consult the remote event probe.
 		const isManual = options.isManual === true;
 		const isInitial = options.initialSync === true;
 		const forceVerified = isManual || isInitial;
-		const verifyContents = forceVerified || options.fullScan === true || options.verifyContents === true;
-		const refreshRemote = forceVerified || options.fullScan === true || options.refreshRemote === true;
+		const verifyContents =
+			forceVerified || options.fullScan === true || options.verifyContents === true;
+		const refreshRemote =
+			forceVerified || options.fullScan === true || options.refreshRemote === true;
 
 		let probeHasChanges = true;
 		let probeFailed = false;
@@ -895,7 +914,11 @@ export class SyncEngine {
 		remoteEntries: Iterable<[string, RemoteEntry]>,
 		localFiles: Map<string, LocalEntry>,
 		prevRecords: Map<string, SyncedFileRecord>,
-	): Promise<{ resolved: Map<string, string | undefined>; comparisons: number; downloads: number }> {
+	): Promise<{
+		resolved: Map<string, string | undefined>;
+		comparisons: number;
+		downloads: number;
+	}> {
 		const candidates: Array<{ path: string; entry: RemoteEntry; localEntry: LocalEntry }> = [];
 		for (const [path, entry] of remoteEntries) {
 			if (entry.isDir) continue;
@@ -1181,6 +1204,7 @@ export class SyncEngine {
 		onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
 
 		// Full fresh scans for preview: verify contents and refresh remote metadata.
+		this.localHashes.resetCounters();
 		const epoch = this.invalidationEpoch;
 		const [local, prevRecords] = await Promise.all([
 			this.walkLocal(pathFilter, true, null, epoch, exclusionsTracker),

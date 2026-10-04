@@ -114,7 +114,15 @@ export class LocalHashCache {
 			throw new Error(`Local file changed while scanning: ${path}. Replan the sync.`);
 		}
 		if (generation === this.generation)
-			this.entries.set(path, { file, mtime, ctime, size, hash, sha512, checkedAt: Date.now() });
+			this.entries.set(path, {
+				file,
+				mtime,
+				ctime,
+				size,
+				hash,
+				sha512,
+				checkedAt: Date.now(),
+			});
 		return { hash, sha512, fromCache: false };
 	}
 }

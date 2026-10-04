@@ -5,7 +5,7 @@ import type { FilenRemoteFs } from "../fs-remote";
 import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { LOCAL_HASH_CACHE_TTL_MS } from "./local-hash-cache";
-import { SyncEngine } from "../sync-engine";
+import { createDefaultHashingPool, HASH_POOL_ENABLED, SyncEngine } from "../sync-engine";
 import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
 import { isConflictFilePath } from "./conflict-utils";
 import { saveDiagnosticRecord, truncateActionsIfNeeded } from "./diagnostic-history";
@@ -269,6 +269,7 @@ export class SyncCoordinator {
 				pluginId: this.pluginId,
 				settings: { ...this.settings, ignorePatterns: [...this.settings.ignorePatterns] },
 				remote: this.getRemoteFs(),
+				hashingPool: HASH_POOL_ENABLED ? createDefaultHashingPool() : undefined,
 			});
 		}
 		return this.syncEngine;
@@ -790,7 +791,8 @@ export class SyncCoordinator {
 
 		if (syncOnSave || syncIntervalMinutes > 0) {
 			this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
-				if (document.visibilityState === "visible") this.scheduleResumeAutoSync(hasSavedAuth);
+				if (document.visibilityState === "visible")
+					this.scheduleResumeAutoSync(hasSavedAuth);
 			});
 			this.registerAutoSyncDomEvent(window, "focus", () => {
 				this.scheduleResumeAutoSync(hasSavedAuth);
@@ -900,7 +902,9 @@ export class SyncCoordinator {
 		}
 		const now = Date.now();
 		const sinceSuccess =
-			this.lastSuccessfulAutoSyncAt === null ? Number.POSITIVE_INFINITY : now - this.lastSuccessfulAutoSyncAt;
+			this.lastSuccessfulAutoSyncAt === null
+				? Number.POSITIVE_INFINITY
+				: now - this.lastSuccessfulAutoSyncAt;
 		// Skip a resume event that arrives shortly after a successful reconciliation
 		// with no queued edits while the hash evidence is still valid. Overdue
 		// verification and queued edits are never skipped.

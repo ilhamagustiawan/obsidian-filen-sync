@@ -90,7 +90,9 @@ export class ByteBoundedWorkPool {
 
 		return new Promise<void>((resolve, reject) => {
 			const maybeFinish = (): void => {
-				if (next >= items.length && active.size === 0) {
+				// A failure rejects as soon as in-flight work drains; success waits for
+				// every item to be consumed and completed.
+				if (active.size === 0 && (error !== null || next >= items.length)) {
 					if (error !== null) reject(error);
 					else resolve();
 				}

@@ -190,7 +190,9 @@ export class DiagnosticHistoryModal extends Modal {
 				const fallback = sel.scan.fallbackReason
 					? ` · Fallback: ${sel.scan.fallbackReason}`
 					: "";
-				scanP.setText(`Scan: ${sel.scan.mode} (${sel.scan.localReads} reads, ${sel.scan.localReadBytes}B, ${sel.scan.hashHits} hash hits, ${sel.scan.hashMisses} misses, ${sel.scan.equalityComparisons} equality checks, ${sel.scan.equalityDownloads} downloads, ${sel.scan.remoteProbes} probes, ${sel.scan.remoteRefreshes} refreshes, ${sel.scan.remoteReuses} reuses)${fallback}`);
+				scanP.setText(
+					`Scan: ${sel.scan.mode} (${sel.scan.localReads} reads, ${sel.scan.localReadBytes}B, ${sel.scan.hashHits} hash hits, ${sel.scan.hashMisses} misses, ${sel.scan.equalityComparisons} equality checks, ${sel.scan.equalityDownloads} downloads, ${sel.scan.remoteProbes} probes, ${sel.scan.remoteRefreshes} refreshes, ${sel.scan.remoteReuses} reuses)${fallback}`,
+				);
 			}
 
 			const timing = sel.timing;

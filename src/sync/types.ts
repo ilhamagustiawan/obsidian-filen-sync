@@ -100,6 +100,7 @@ export type ScanFallbackReason =
 	| "no-remote-event-support"
 	| "folder-hints"
 	| "missing-hints"
+	| "ambiguous-hints"
 	| "scan-race"
 	| "replan";
 
