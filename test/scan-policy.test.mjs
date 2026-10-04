@@ -79,8 +79,9 @@ function fixture({ local = {}, remote = {}, baseline = [], hashingPool } = {}) {
 	}
 	for (const path of baseline) {
 		const file = files.get(path);
+		if (!file) continue;
 		const entry = cloud.get(path);
-		if (file && entry)
+		if (entry)
 			records.set(path, {
 				path,
 				mtime: 1000,
@@ -89,6 +90,14 @@ function fixture({ local = {}, remote = {}, baseline = [], hashingPool } = {}) {
 				hash: digest(file.content),
 				remoteUuid: entry.uuid,
 				remoteHash: entry.remoteHash,
+			});
+		else
+			records.set(path, {
+				path,
+				mtime: 1000,
+				ctime: 1000,
+				size: file.stat.size,
+				hash: digest(file.content),
 			});
 	}
 	const app = {
@@ -182,13 +191,13 @@ function fixture({ local = {}, remote = {}, baseline = [], hashingPool } = {}) {
 		get walks() {
 			return walks;
 		},
-		run: (options = {}) =>
+		run: (options = {}, confirmBulk, confirmDeletes) =>
 			engine.sync(
 				undefined,
-				undefined,
+				confirmDeletes ?? (async () => true),
 				undefined,
 				"both",
-				async () => true,
+				confirmBulk ?? (async () => true),
 				undefined,
 				options,
 			),
@@ -583,4 +592,149 @@ test("hash pool keeps one-file auto-sync reads bounded and concurrently hashes s
 	// Warm run reuses valid hashes.
 	const warm = await s.run();
 	assert.equal(warm.scanDiagnostics?.localReads, 0);
+});
+test("bulk guard and local-delete confirmation still gate reconcile-mode runs", async () => {
+	// Empty remote after a populated baseline: mass deletions need confirmation.
+	const many = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`n${i}.md`, `c${i}`]));
+	const bulk = fixture({ local: many, remote: {}, baseline: Object.keys(many) });
+	const cancelled = await bulk.run({}, async (report) => {
+		assert.equal(report.blocked, true);
+		return false;
+	});
+	assert.equal(cancelled.cancelled, true, "bulk guard blocks an empty-side deletion wave");
+
+	// A single local delete still requires the local-delete confirmation pass.
+	const s = fixture({
+		local: { "a.md": "a", "b.md": "b" },
+		remote: { "b.md": "b" },
+		baseline: ["a.md", "b.md"],
+	});
+	const refused = await s.run({}, undefined, async () => false);
+	assert.equal(refused.cancelled, true, "reconcile-mode local delete still asks for confirmation");
+	assert.match(refused.cancelReason ?? "", /deletes cancelled/);
+});
+
+test("failed remote listings never become a clean empty inventory", async () => {
+	const s = fixture({
+		local: { "a.md": "a", "b.md": "b" },
+		remote: { "a.md": "a", "b.md": "b" },
+		baseline: ["a.md", "b.md"],
+	});
+	await s.run();
+	const originalWalk = s.engine.config.remote.walk;
+	s.engine.config.remote.walk = async () => {
+		throw new Error("remote listing failed");
+	};
+	await assert.rejects(s.run({ refreshRemote: true }), /remote listing failed/u);
+	assert.equal(s.engine.localScanSnapshot, null, "failed listing publishes no local snapshot");
+	assert.equal(s.engine.remoteTreeCache, null, "failed listing publishes no remote tree");
+	// A later healthy run still reconciles normally.
+	s.engine.config.remote.walk = originalWalk;
+	const recovered = await s.run();
+	assert.equal(recovered.provenance, "reconcile");
+	assert.equal(recovered.applied, 0);
+});
+
+test("preview stays fully read-only under the new scan policy", async () => {
+	const s = fixture({
+		local: { "old.md": "old", "new.md": "new" },
+		remote: { "old.md": "old" },
+		baseline: ["old.md"],
+	});
+	const cloudBefore = s.cloud.size;
+	const filesBefore = s.files.size;
+	const recordsBefore = s.records.size;
+	const target = { userId: 1, rootUuid: "root", remoteRoot: "/", vaultId: "vault" };
+	const preview = await s.engine.previewPlan("both", target);
+	assert.ok(preview.counts.totalProposed >= 1, "preview plans the new file");
+	assert.equal(s.cloud.size, cloudBefore, "preview never touches remote");
+	assert.equal(s.files.size, filesBefore, "preview never writes local vault");
+	assert.equal(s.records.size, recordsBefore, "preview never writes baseline");
+	assert.equal(preview.provenance, "full", "preview verifies fresh state");
+});
+
+test("diagnostic records carry scan mode and stage timing and older records stay readable", async (t) => {
+	const dir = await mkdtemp(resolve("tmp/scan-export-test-"));
+	try {
+		const outfile = join(dir, "diagnostic-export.mjs");
+		await build({
+			entryPoints: ["src/sync/diagnostic-export.ts"],
+			outfile,
+			bundle: true,
+			format: "esm",
+			platform: "node",
+		});
+		const { buildRedactedDiagnosticExport } = await import(pathToFileURL(outfile).href);
+		const modern = {
+			id: "x1",
+			kind: "sync",
+			timestamp: 1_700_000_000_000,
+			direction: "both",
+			trigger: "auto",
+			target: { userId: 1, rootUuid: "r", remoteRoot: "/", vaultId: "v" },
+			provenance: "reconcile",
+			scan: {
+				mode: "reconcile",
+				fallbackReason: "missing-hints",
+				localReads: 3,
+				localReadBytes: 4096,
+				hashHits: 2,
+				hashMisses: 1,
+				equalityComparisons: 0,
+				equalityDownloads: 0,
+				remoteProbes: 1,
+				remoteRefreshes: 0,
+				remoteReuses: 1,
+				inventoryFiles: 3,
+				inventoryDirs: 1,
+			},
+			timing: {
+				totalMs: 500,
+				eventProbeMs: 2,
+				localScanMs: 40,
+				baselineMs: 1,
+				remoteScanMs: 20,
+				equalityMs: 0,
+				planMs: 5,
+				executeMs: 300,
+			},
+			counts: { upload: 0, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 3, totalProposed: 0 },
+			destructiveStats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 },
+			safetyReport: { blocked: false, stats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 } },
+			outcome: "success",
+			actions: [],
+			totalActionsCount: 0,
+			actionsTruncated: false,
+		};
+		const legacy = {
+			id: "x0",
+			kind: "sync",
+			timestamp: 1_600_000_000_000,
+			direction: "both",
+			trigger: "manual",
+			target: { userId: 1, rootUuid: "r", remoteRoot: "/", vaultId: "v" },
+			provenance: "full",
+			timing: { totalMs: 100 },
+			counts: { upload: 1, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 0, totalProposed: 1 },
+			destructiveStats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 },
+			safetyReport: { blocked: false, stats: { localDeletes: 0, remoteDeletes: 0, localOverwrites: 0, remoteOverwrites: 0, totalDestructiveLocal: 0, totalDestructiveRemote: 0 } },
+			outcome: "success",
+			actions: [],
+			totalActionsCount: 0,
+			actionsTruncated: false,
+		};
+		const exported = buildRedactedDiagnosticExport([modern, legacy]);
+		assert.equal(exported.records.length, 2);
+		const modernOut = exported.records.find((r) => r.id === "x1");
+		assert.equal(modernOut.scan?.mode, "reconcile");
+		assert.equal(modernOut.scan?.fallbackReason, "missing-hints");
+		assert.equal(modernOut.timing.eventProbeMs, 2);
+		const legacyOut = exported.records.find((r) => r.id === "x0");
+		assert.equal(legacyOut.scan, undefined, "older records export without scan fields");
+		// No contents, credentials, or raw provider payloads leak into the export.
+		assert.equal(JSON.stringify(exported).includes("user@example.com"), false);
+		assert.equal(JSON.stringify(exported).includes("masterKeys"), false);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });

@@ -9,6 +9,8 @@ import { pathToFileURL } from "node:url";
 let scratch;
 let SyncEngine;
 let TFile;
+let createDefaultHashingPool;
+let ByteBoundedWorkPool;
 
 before(async () => {
 	await mkdir(resolve("tmp"), { recursive: true });
@@ -22,7 +24,7 @@ before(async () => {
 	await build({
 		stdin: {
 			contents:
-				'export {SyncEngine} from "./src/sync-engine.ts"; export {TFile} from "obsidian";',
+				'export {SyncEngine, createDefaultHashingPool} from "./src/sync-engine.ts"; export {TFile} from "obsidian"; export {ByteBoundedWorkPool} from "./src/sync/byte-bounded-pool.ts";',
 			resolveDir: process.cwd(),
 		},
 		outfile,
@@ -38,7 +40,9 @@ before(async () => {
 			},
 		],
 	});
-	({ SyncEngine, TFile } = await import(pathToFileURL(outfile).href));
+	({ SyncEngine, TFile, createDefaultHashingPool, ByteBoundedWorkPool } = await import(
+		pathToFileURL(outfile).href,
+	));
 });
 
 after(async () => {
@@ -54,6 +58,7 @@ function createBenchmarkFixture({
 	remoteFiles = {},
 	baseline = [],
 	delayMs = 1,
+	hashingPool,
 } = {}) {
 	const local = new Map();
 	const cloud = new Map();
@@ -228,6 +233,7 @@ function createBenchmarkFixture({
 			skipSizeLargerThanMB: 50,
 		},
 		remote,
+		hashingPool,
 	});
 
 	const onProgress = (p) => {
@@ -386,5 +392,85 @@ test("First sync content fingerprint: mismatch creates conflict and fallback dow
 		fixture2.metrics.remoteReadCalls,
 		1,
 		"Fell back to downloading remote file because hash was invalid",
+	);
+});
+
+test("Benchmark Workload D: serial vs byte-bounded concurrent hashing under controlled read latency", async (t) => {
+	const files = {};
+	const remoteFiles = {};
+	const noteCount = 200;
+	for (let i = 0; i < noteCount; i++) {
+		const content = `hash-me-${i} ` + "x".repeat(2048);
+		files[`n-${i}.md`] = content;
+		remoteFiles[`n-${i}.md`] = { content, mtime: 1000 };
+	}
+	const baseline = Object.keys(files);
+
+	// First sync with mostly identical files hashes every file at least once.
+	const measuredPool = new ByteBoundedWorkPool({
+		maxWorkers: 2,
+		maxInFlightBytes: 8 * 1024 * 1024,
+		largeJobThresholdBytes: 8 * 1024 * 1024,
+	});
+	const serial = createBenchmarkFixture({
+		localFiles: files,
+		remoteFiles,
+		baseline,
+		delayMs: 1,
+	});
+	const concurrent = createBenchmarkFixture({
+		localFiles: files,
+		remoteFiles,
+		baseline,
+		delayMs: 1,
+		hashingPool: measuredPool,
+	});
+
+	// Warm both to establish baseline records, then force a full re-verify by
+	// dropping the engine so the next sync starts cold.
+	const sStart = performance.now();
+	const serialOutcome = await serial.runSync({ isManual: true });
+	const serialMs = performance.now() - sStart;
+
+	const cStart = performance.now();
+	const concurrentOutcome = await concurrent.runSync({ isManual: true });
+	const concurrentMs = performance.now() - cStart;
+
+	t.diagnostic(
+		`[Workload D - ${noteCount} Cold Re-Verify Hashes] serial: ${serialMs.toFixed(1)}ms | concurrent: ${concurrentMs.toFixed(1)}ms | serialReads: ${serialOutcome.scanDiagnostics?.localReads} | concurrentReads: ${concurrentOutcome.scanDiagnostics?.localReads} | pool peak workers: ${measuredPool.stats.peakActive} | pool peak in-flight: ${(measuredPool.stats.peakInFlightBytes / 1048576).toFixed(1)} MiB | serial large jobs: ${measuredPool.stats.serialLargeJobs}`,
+	);
+
+	// Same evidence, same bounds: concurrency must not change what is read or applied.
+	assert.equal(serialOutcome.applied, concurrentOutcome.applied);
+	assert.equal(
+		concurrentOutcome.scanDiagnostics?.localReads,
+		serialOutcome.scanDiagnostics?.localReads,
+		"concurrent hashing reads the same bytes as serial hashing",
+	);
+	assert.ok(
+		concurrentOutcome.scanDiagnostics?.hashMisses === noteCount,
+		"every file verified exactly once on a cold run",
+	);
+	assert.ok(measuredPool.stats.peakActive <= 2, "pool never exceeds its worker limit");
+
+	// One-file auto-sync stays bounded under the pool.
+	const oneFile = createBenchmarkFixture({
+		localFiles: files,
+		remoteFiles,
+		baseline,
+		delayMs: 1,
+		hashingPool: createDefaultHashingPool(),
+	});
+	await oneFile.runSync();
+	oneFile.local.get("n-0.md").content = bytes("Modified 0");
+	oneFile.local.get("n-0.md").stat.mtime = 2000;
+	oneFile.engine.invalidateLocal("n-0.md");
+	const editStart = performance.now();
+	const edit = await oneFile.runSync({ autoSync: true, scanHints: ["n-0.md"] });
+	const editMs = performance.now() - editStart;
+	assert.equal(edit.applied, 1);
+	assert.ok((edit.scanDiagnostics?.localReads ?? 0) <= 2, "one-file sync stays read-bounded");
+	t.diagnostic(
+		`[Workload D - One-File Edit Under Pool] elapsedMs: ${editMs.toFixed(1)}ms | localReads: ${edit.scanDiagnostics?.localReads}`,
 	);
 });
