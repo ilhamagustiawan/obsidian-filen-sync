@@ -12,6 +12,7 @@ async function fixture(run) {
 	const oldDocument = globalThis.document;
 	const timers = new Map();
 	let next = 1;
+	const domListeners = new Map();
 	globalThis.window = {
 		setTimeout: (fn, ms) => {
 			const id = next++;
@@ -21,12 +22,12 @@ async function fixture(run) {
 		clearTimeout: (id) => timers.delete(id),
 		setInterval: () => 99,
 		clearInterval: () => {},
-		addEventListener: () => {},
+		addEventListener: (type, fn) => domListeners.set(`w-${type}`, fn),
 		removeEventListener: () => {},
 	};
 	globalThis.document = {
 		visibilityState: "visible",
-		addEventListener: () => {},
+		addEventListener: (type, fn) => domListeners.set(`d-${type}`, fn),
 		removeEventListener: () => {},
 	};
 	let coordinator;
@@ -111,6 +112,7 @@ async function fixture(run) {
 			states,
 			file,
 			timers,
+			domListeners,
 			notices: globalThis.__coordinatorNotices,
 			activities,
 			Platform,
@@ -413,3 +415,112 @@ test("conflicts in vault produce persistent warning, informative notice, and cle
 		assert.equal(states.at(-1).kind, "success");
 		assert.equal(states.at(-1).text, "1 applied");
 	}));
+
+const runNextDebounce = async (timers) => {
+	const debounce = [...timers.values()].find((t) => t.ms > 0);
+	if (!debounce) return false;
+	timers.delete(debounce);
+	await debounce.fn();
+	return true;
+};
+
+test("focus and visibility for the same transition share one reconciliation", () =>
+	fixture(async ({ coordinator, domListeners, timers }) => {
+		let syncCalls = 0;
+		const optionsSeen = [];
+		coordinator.syncEngine = {
+			sync: async (_p, _c, _a, _d, _cb, _b, options) => {
+				syncCalls++;
+				optionsSeen.push(options);
+				return { applied: 0, conflicts: 0, timing: { totalMs: 1 } };
+			},
+			invalidateLocal: () => {},
+			close: () => {},
+		};
+		// One transition: focus then visibility right after.
+		await domListeners.get("w-focus")();
+		await domListeners.get("d-visibilitychange")();
+		await runNextDebounce(timers);
+		assert.equal(syncCalls, 1, "focus+visibility coalesced into one reconciliation");
+		assert.equal(optionsSeen[0].fullScan, false, "resume runs use the routine reconcile policy");
+
+		// A repeat resume trigger shortly after success with no queued edits is skipped.
+		await domListeners.get("w-focus")();
+		await runNextDebounce(timers);
+		assert.equal(syncCalls, 1, "repeat resume trigger after success is coalesced away");
+	}));
+
+test("queued edits keep resume triggers running; overdue verification is never skipped", async (t) => {
+	let now = 3_000_000;
+	t.mock.method(Date, "now", () => now);
+	await fixture(async ({ coordinator, events, file, domListeners, timers }) => {
+		await domListeners.get("w-focus")();
+		await runNextDebounce(timers);
+		coordinator.syncEngine.sync =
+			async () => ({ applied: 0, conflicts: 0, timing: { totalMs: 1 } });
+		// Same transition, but now an edit is queued: the resume run must NOT be skipped.
+		events.get("modify")(file); // queues pending path + schedules auto-sync
+		await domListeners.get("w-focus")();
+		await runNextDebounce(timers);
+	});
+});
+
+test("reconnect recovery is never suppressed by the resume cooldown", () =>
+	fixture(async ({ coordinator, domListeners, timers }) => {
+		let syncCalls = 0;
+		coordinator.syncEngine = {
+			sync: async () => {
+				syncCalls++;
+				return { applied: 0, conflicts: 0, timing: { totalMs: 1 } };
+			},
+			invalidateLocal: () => {},
+			close: () => {},
+		};
+		await domListeners.get("w-focus")();
+		await runNextDebounce(timers);
+		assert.equal(syncCalls, 1);
+		// Reset the minimum-auto-sync spacing so this proves the resume policy
+		// itself lets reconnect recovery through.
+		coordinator.nextAutoSyncAllowedAt = 0;
+		timers.clear();
+		// Reconnect immediately after a success still triggers a fresh run.
+		await domListeners.get("w-online")();
+		await runNextDebounce(timers);
+		assert.equal(syncCalls, 2, "online recovery runs despite the resume cooldown");
+	}));
+
+test("failed or cancelled runs never advance the successful-verification timestamp", async (t) => {
+	let now = 4_000_000;
+	t.mock.method(Date, "now", () => now);
+	await fixture(async ({ coordinator, domListeners, timers }) => {
+		let syncCalls = 0;
+		let mode = "ok";
+		coordinator.syncEngine = {
+			sync: async () => {
+				syncCalls++;
+				if (mode === "fail") throw new Error("Invalid password");
+				return { applied: 0, conflicts: 0, timing: { totalMs: 1 } };
+			},
+			invalidateLocal: () => {},
+			close: () => {},
+		};
+		const resumeAt = async (expectCall) => {
+			coordinator.nextAutoSyncAllowedAt = 0;
+			timers.clear();
+			await domListeners.get("w-focus")();
+			await runNextDebounce(timers);
+			assert.equal(syncCalls, expectCall);
+		};
+		await domListeners.get("w-focus")();
+		await runNextDebounce(timers);
+		assert.equal(syncCalls, 1, "initial success");
+		// Advance past the resume cooldown and the hash TTL so verification is due.
+		now += 5 * 60_000 + 1;
+		mode = "fail";
+		await resumeAt(2);
+		// The failed run must NOT rearm the cooldown by advancing the verification
+		// timestamp - the immediately following resume trigger is eligible again.
+		mode = "ok";
+		await resumeAt(3);
+	});
+});
