@@ -49,7 +49,7 @@ async function computeDbName(binding: SyncDbOptions): Promise<string> {
 }
 
 export const SyncDb = {
-	async open(binding: SyncDbOptions): Promise<SyncDb> {
+	async open(binding: SyncDbOptions, options: { readOnly?: boolean } = {}): Promise<SyncDb> {
 		if (
 			binding.vaultId.length === 0 ||
 			!Number.isSafeInteger(binding.userId) ||
@@ -64,7 +64,7 @@ export const SyncDb = {
 			name: dbName,
 			storeName: "synced-files",
 		});
-		const db = new LocalForageDb(store, binding);
+		const db = new LocalForageDb(store, binding, options.readOnly ?? false);
 		await db.loadMeta();
 		return db;
 	},
@@ -76,6 +76,7 @@ class LocalForageDb implements SyncDb {
 	constructor(
 		private readonly store: ReturnType<typeof localforage.createInstance>,
 		private readonly binding: SyncDbOptions,
+		private readonly readOnly: boolean = false,
 	) {}
 
 	get schemaVersion(): number {
@@ -93,6 +94,9 @@ class LocalForageDb implements SyncDb {
 	}
 
 	async setFile(path: string, record: SyncedFileRecord): Promise<void> {
+		if (this.readOnly) {
+			throw new Error("Cannot modify sync history in read-only mode.");
+		}
 		validateSyncPath(path);
 		if (record.path !== path || !isValidSyncedFileRecord(record)) {
 			throw new Error("Cannot save invalid sync history for this path.");
@@ -101,6 +105,9 @@ class LocalForageDb implements SyncDb {
 	}
 
 	async deleteFile(path: string): Promise<void> {
+		if (this.readOnly) {
+			throw new Error("Cannot modify sync history in read-only mode.");
+		}
 		validateSyncPath(path);
 		await this.store.removeItem(path);
 	}
@@ -130,6 +137,9 @@ class LocalForageDb implements SyncDb {
 				throw new Error("Sync history has no verified target binding; refusing to use it.");
 			}
 			this._schemaVersion = 0;
+			if (this.readOnly) {
+				return;
+			}
 			await this.store.setItem(META_KEY, { schemaVersion: 0, binding: this.binding });
 			return;
 		}
@@ -149,6 +159,9 @@ class LocalForageDb implements SyncDb {
 	}
 
 	async runMigrations(): Promise<boolean> {
+		if (this.readOnly) {
+			throw new Error("Cannot run migrations on sync history in read-only mode.");
+		}
 		if (this._schemaVersion > SYNC_DB_SCHEMA_VERSION) {
 			throw new Error(
 				`Sync history schema ${this._schemaVersion} is newer than supported schema ${SYNC_DB_SCHEMA_VERSION}. Update the plugin before syncing.`,

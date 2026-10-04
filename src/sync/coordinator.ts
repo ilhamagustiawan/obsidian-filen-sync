@@ -5,14 +5,20 @@ import type { FilenRemoteFs } from "../fs-remote";
 import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { SyncEngine } from "../sync-engine";
-import type { BulkGuardReport } from "./bulk-guard";
+import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
 import { isConflictFilePath } from "./conflict-utils";
+import {
+	saveDiagnosticRecord,
+	truncateActionsIfNeeded,
+} from "./diagnostic-history";
 import type {
 	SyncActivityEvent,
 	SyncDirection,
 	SyncOperation,
+	SyncPreviewResult,
 	SyncProgress,
 	SyncTimingSummary,
+	TargetIdentityInfo,
 } from "./types";
 
 function formatTimingSummary(timing?: SyncTimingSummary): string {
@@ -64,11 +70,13 @@ export type CoordinatorCallbacks = {
 	confirmLocalDeletes: (paths: string[]) => Promise<boolean>;
 	confirmBulkOperations: (report: BulkGuardReport) => Promise<boolean>;
 	saveSettings: () => Promise<void>;
-	prepareTarget?: () => Promise<void>;
+	prepareTarget?: (options?: { readOnly?: boolean }) => Promise<void>;
+	getTargetInfo?: (noCreate?: boolean) => Promise<TargetIdentityInfo>;
 };
 
 export class SyncCoordinator {
 	private isSyncing = false;
+	private isPreviewActive = false;
 	private isOffline = false;
 	private consecutiveNetworkFailures = 0;
 	private lastErrorNoticeTime = new Map<string, number>();
@@ -260,6 +268,70 @@ export class SyncCoordinator {
 		}
 	}
 
+	get isPreviewing(): boolean {
+		return this.isPreviewActive;
+	}
+
+	setPreviewActive(active: boolean, canAutoSync?: () => boolean): void {
+		this.isPreviewActive = active;
+		if (!active && canAutoSync) {
+			this.refreshAutoSync(canAutoSync);
+		}
+	}
+
+	async generatePreview(
+		direction: SyncDirection = "both",
+		targetInfo: TargetIdentityInfo,
+		onProgress?: (progress: SyncProgress) => void,
+		bulkThresholds?: BulkGuardThresholds,
+	): Promise<SyncPreviewResult> {
+		if (this.isSyncing) {
+			throw new Error("Cannot preview while sync is in progress.");
+		}
+		this.isPreviewActive = true;
+		try {
+			await this.callbacks.prepareTarget?.({ readOnly: true });
+			const engine = this.getSyncEngine();
+			const result = await engine.previewPlan(direction, targetInfo, onProgress, bulkThresholds);
+
+			const { actions, truncated } = truncateActionsIfNeeded(
+				result.actions.map((a) => ({
+					path: a.path,
+					operation: a.operation,
+					reasonCode: a.reasonCode,
+					detail: a.detail,
+					destinationSide: a.destinationSide,
+					isOverwrite: a.isOverwrite,
+					preservesSurvivor: a.preservesSurvivor,
+					conflictWinner: a.conflictWinner,
+				})),
+			);
+
+			const previewId = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			await saveDiagnosticRecord({
+				id: previewId,
+				kind: "preview",
+				timestamp: result.createdAt,
+				direction: result.direction,
+				trigger: "manual-preview",
+				target: result.target,
+				provenance: result.provenance,
+				timing: result.timing,
+				counts: result.counts,
+				destructiveStats: result.destructiveStats,
+				safetyReport: result.safetyReport,
+				outcome: "proposed",
+				actions,
+				totalActionsCount: result.actions.length,
+				actionsTruncated: truncated,
+			});
+
+			return result;
+		} catch (error) {
+			throw error;
+		}
+	}
+
 	async runSync(
 		label: string,
 		direction: SyncDirection = "both",
@@ -269,12 +341,18 @@ export class SyncCoordinator {
 			isManual?: boolean;
 			initialSync?: boolean;
 			fullScan?: boolean;
+			correlationId?: string;
+			previewId?: string;
 		} = {},
 	): Promise<SyncRunResult> {
-		if (this.isSyncing) {
-			const reason = "Sync already in progress.";
-			this.callbacks.onLogActivity(`${label} skipped: sync already in progress`);
-			if (!options.silent) new Notice(reason);
+		if (this.isSyncing || this.isPreviewActive) {
+			const reason = this.isSyncing ? "Sync already in progress." : "Preview in progress.";
+			this.callbacks.onLogActivity(`${label} skipped: ${reason.toLowerCase()}`);
+			if (options.autoSync) {
+				this.pendingAutoSync = true;
+				if (options.fullScan) this.pendingAutoSyncRequiresFullScan = true;
+			}
+			if (!options.silent && !this.isPreviewActive) new Notice(reason);
 			return { kind: "skipped", reason };
 		}
 
@@ -310,8 +388,12 @@ export class SyncCoordinator {
 		});
 		if (isManual) this.callbacks.onLogActivity(`${label} started`);
 
+		let targetInfo: TargetIdentityInfo | null = null;
 		try {
 			await this.callbacks.prepareTarget?.();
+			if (this.callbacks.getTargetInfo) {
+				targetInfo = await this.callbacks.getTargetInfo(false);
+			}
 			const engine = this.getSyncEngine();
 
 			const confirmDeletes = options.silent
@@ -404,6 +486,55 @@ export class SyncCoordinator {
 				);
 			}
 
+			if (targetInfo) {
+				const isCancel = Boolean(result.cancelled);
+				await saveDiagnosticRecord({
+					id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+					kind: "sync",
+					timestamp: Date.now(),
+					direction,
+					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
+					target: targetInfo,
+					provenance: scanHints ? "narrow" : "full",
+					timing: result.timing ?? { totalMs: 0 },
+					counts: {
+						upload: result.uploaded ?? 0,
+						download: result.downloaded ?? 0,
+						deleteLocal: result.deletedLocal ?? 0,
+						deleteRemote: result.deletedRemote ?? 0,
+						conflict: result.conflicts,
+						noop: 0,
+						totalProposed: result.applied,
+					},
+					destructiveStats: {
+						localDeletes: result.deletedLocal ?? 0,
+						remoteDeletes: result.deletedRemote ?? 0,
+						localOverwrites: 0,
+						remoteOverwrites: 0,
+						totalDestructiveLocal: result.deletedLocal ?? 0,
+						totalDestructiveRemote: result.deletedRemote ?? 0,
+					},
+					safetyReport: {
+						blocked: false,
+						stats: {
+							localDeletes: result.deletedLocal ?? 0,
+							remoteDeletes: result.deletedRemote ?? 0,
+							localOverwrites: 0,
+							remoteOverwrites: 0,
+							totalDestructiveLocal: result.deletedLocal ?? 0,
+							totalDestructiveRemote: result.deletedRemote ?? 0,
+						},
+					},
+					outcome: isCancel ? "cancelled" : (result.applied > 0 || hasConflicts ? "success" : "success"),
+					outcomeDetail: result.cancelReason,
+					correlationId: options.correlationId,
+					previewId: options.previewId,
+					actions: [],
+					totalActionsCount: result.applied,
+					actionsTruncated: false,
+				});
+			}
+
 			if (result.applied === 0 && !hasConflicts) {
 				if (isManual)
 					this.callbacks.onLogActivity(
@@ -452,6 +583,54 @@ export class SyncCoordinator {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			this.callbacks.onLogActivity(`${label} failed: ${message}`);
+
+			if (targetInfo) {
+				await saveDiagnosticRecord({
+					id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+					kind: "sync",
+					timestamp: Date.now(),
+					direction,
+					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
+					target: targetInfo,
+					provenance: "full",
+					timing: { totalMs: 0 },
+					counts: {
+						upload: 0,
+						download: 0,
+						deleteLocal: 0,
+						deleteRemote: 0,
+						conflict: 0,
+						noop: 0,
+						totalProposed: 0,
+					},
+					destructiveStats: {
+						localDeletes: 0,
+						remoteDeletes: 0,
+						localOverwrites: 0,
+						remoteOverwrites: 0,
+						totalDestructiveLocal: 0,
+						totalDestructiveRemote: 0,
+					},
+					safetyReport: {
+						blocked: false,
+						stats: {
+							localDeletes: 0,
+							remoteDeletes: 0,
+							localOverwrites: 0,
+							remoteOverwrites: 0,
+							totalDestructiveLocal: 0,
+							totalDestructiveRemote: 0,
+						},
+					},
+					outcome: "failure",
+					outcomeDetail: message,
+					correlationId: options.correlationId,
+					previewId: options.previewId,
+					actions: [],
+					totalActionsCount: 0,
+					actionsTruncated: false,
+				});
+			}
 
 			if (isNetworkClassError(error)) {
 				this.consecutiveNetworkFailures += 1;

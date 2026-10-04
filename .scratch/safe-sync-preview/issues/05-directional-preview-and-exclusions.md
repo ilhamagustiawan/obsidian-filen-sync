@@ -6,11 +6,11 @@
 - 02 — Explain direction and conflict-preservation behavior.
 - 04 — Handle unavailable targets and incomplete previews safely.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Direction selection regenerates a fresh read-only plan using the existing direction contract rather than new one-way modes.
-- [ ] Show uploads/downloads, destination overwrites, local/remote deletions, conflict winners, and survivor preservation accurately in all directions.
-- [ ] Reasons use stable planner codes with human-readable presentation; delete-versus-modify recovery does not promise a nonexistent copy.
-- [ ] Distinguish known filtered exclusions from no-ops and directionally skipped entries. Do not invent per-path records for entries that were never enumerated.
-- [ ] Changing direction does not mutate content, target structure, baseline, or success state, and preserves preview serialization.
-- [ ] Manually verify every direction against representative creation, modification, deletion, conflict, ignored-path, and size-filter cases. Automated test additions are out of scope.
+- [x] Direction selection regenerates a fresh read-only plan using the existing direction contract rather than new one-way modes.
+- [x] Show uploads/downloads, destination overwrites, local/remote deletions, conflict winners, and survivor preservation accurately in all directions.
+- [x] Reasons use stable planner codes with human-readable presentation; delete-versus-modify recovery does not promise a nonexistent copy.
+- [x] Distinguish known filtered exclusions from no-ops and directionally skipped entries. Do not invent per-path records for entries that were never enumerated.
+- [x] Changing direction does not mutate content, target structure, baseline, or success state, and preserves preview serialization.
+- [x] Manually verify every direction against representative creation, modification, deletion, conflict, ignored-path, and size-filter cases. Automated test additions are out of scope.

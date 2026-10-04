@@ -37,6 +37,9 @@ import { formatLastSyncSummary, formatSyncProgress } from "./ui/sync-presentatio
 import { SyncNoticeController } from "./ui/sync-notice";
 import { sha256Hex } from "./sync/executor";
 import { getOriginalPathFromConflictPath } from "./sync/conflict-utils";
+import { SyncPreviewModal } from "./ui/sync-preview-modal";
+import { DiagnosticHistoryModal } from "./ui/diagnostic-history-modal";
+import type { SyncDirection, SyncPreviewResult, TargetIdentityInfo } from "./sync/types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -134,7 +137,8 @@ export default class FilenSyncPlugin extends Plugin {
 				confirmLocalDeletes: (paths) => this.confirmLocalDeletes(paths),
 				confirmBulkOperations: (report) => this.confirmBulkOperations(report),
 				saveSettings: () => this.saveSettings(),
-				prepareTarget: () => this.prepareSyncTarget(),
+				prepareTarget: (options) => this.prepareSyncTarget(false, options),
+				getTargetInfo: (noCreate) => this.getTargetIdentityInfo(noCreate),
 			},
 		);
 
@@ -235,6 +239,38 @@ export default class FilenSyncPlugin extends Plugin {
 					return;
 				}
 				void this.forceSyncFile(activeFile);
+			},
+		});
+
+		this.addCommand({
+			id: "preview-sync-changes",
+			name: "Preview changes",
+			callback: () => {
+				this.previewChanges("both");
+			},
+		});
+
+		this.addCommand({
+			id: "preview-push-local",
+			name: "Preview push (local to Filen)",
+			callback: () => {
+				this.previewChanges("push");
+			},
+		});
+
+		this.addCommand({
+			id: "preview-pull-remote",
+			name: "Preview pull (Filen to local)",
+			callback: () => {
+				this.previewChanges("pull");
+			},
+		});
+
+		this.addCommand({
+			id: "open-diagnostic-history",
+			name: "Open diagnostic plan history",
+			callback: () => {
+				this.openDiagnosticHistory();
 			},
 		});
 
@@ -502,7 +538,10 @@ export default class FilenSyncPlugin extends Plugin {
 		else this.renderStatusBar();
 	}
 
-	private async prepareSyncTarget(fromForceUpload = false): Promise<void> {
+	async prepareSyncTarget(
+		fromForceUpload = false,
+		options: { readOnly?: boolean } = {},
+	): Promise<void> {
 		if (this.reconciliationPersistenceFailed) {
 			throw new Error("Transfer recovery state could not be saved. Sync is disabled.");
 		}
@@ -518,7 +557,7 @@ export default class FilenSyncPlugin extends Plugin {
 		const generation = this.targetGeneration;
 		const preparation = (async () => {
 			const remote = this.getOrCreateRemoteFs();
-			const identity = await remote.getTargetIdentity();
+			const identity = await remote.getTargetIdentity({ noCreate: options.readOnly });
 			if (generation !== this.targetGeneration || this.unloaded) {
 				throw new Error("Sync target changed during preparation. Retry the sync.");
 			}
@@ -528,13 +567,18 @@ export default class FilenSyncPlugin extends Plugin {
 				identity.rootUuid,
 			]);
 			if (this.db !== null && this.targetBindingKey === bindingKey) return;
-			const db = await SyncDb.open({
-				vaultId: this.settings.vaultId,
-				userId: identity.userId,
-				remoteRootUuid: identity.rootUuid,
-			});
+			const db = await SyncDb.open(
+				{
+					vaultId: this.settings.vaultId,
+					userId: identity.userId,
+					remoteRootUuid: identity.rootUuid,
+				},
+				{ readOnly: options.readOnly },
+			);
 			try {
-				await db.runMigrations();
+				if (!options.readOnly) {
+					await db.runMigrations();
+				}
 				if (generation !== this.targetGeneration || this.unloaded) {
 					throw new Error("Sync target changed during preparation. Retry the sync.");
 				}
@@ -554,6 +598,44 @@ export default class FilenSyncPlugin extends Plugin {
 		} finally {
 			if (this.targetPreparation === preparation) this.targetPreparation = null;
 		}
+	}
+
+	async getTargetIdentityInfo(noCreate = true): Promise<TargetIdentityInfo> {
+		const remote = this.getOrCreateRemoteFs();
+		const identity = await remote.getTargetIdentity({ noCreate });
+		return {
+			userId: identity.userId,
+			rootUuid: identity.rootUuid,
+			remoteRoot: getVaultRemoteRoot(this.settings.remoteRoot, this.settings.vaultName),
+			vaultId: this.settings.vaultId,
+		};
+	}
+
+	previewChanges(direction: SyncDirection = "both"): void {
+		if (this.coordinator.active) {
+			new Notice("A sync is already in progress.");
+			return;
+		}
+		new SyncPreviewModal(this.app, this, direction).open();
+	}
+
+	openDiagnosticHistory(): void {
+		new DiagnosticHistoryModal(this.app, this).open();
+	}
+
+	setPreviewActive(active: boolean): void {
+		this.coordinator.setPreviewActive(active, () => this.canAutoSync());
+	}
+
+	async generatePreview(
+		direction: SyncDirection,
+		targetInfo: TargetIdentityInfo,
+	): Promise<SyncPreviewResult> {
+		return this.coordinator.generatePreview(direction, targetInfo);
+	}
+
+	async runApplySync(direction: SyncDirection): Promise<SyncRunResult> {
+		return this.coordinator.runSync("Apply preview", direction, { isManual: true });
 	}
 
 	refreshAutoSync(): void {
@@ -1027,6 +1109,13 @@ export default class FilenSyncPlugin extends Plugin {
 					void this.syncNow();
 				});
 			});
+			menu.addItem((item) => {
+				item.setTitle("Preview changes");
+				item.setIcon("eye");
+				item.onClick(() => {
+					this.previewChanges("both");
+				});
+			});
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile instanceof TFile) {
 				menu.addItem((item) => {
@@ -1051,6 +1140,20 @@ export default class FilenSyncPlugin extends Plugin {
 					void this.pullRemote();
 				});
 			});
+			menu.addItem((item) => {
+				item.setTitle("Preview push (local → Filen)");
+				item.setIcon("arrow-up");
+				item.onClick(() => {
+					this.previewChanges("push");
+				});
+			});
+			menu.addItem((item) => {
+				item.setTitle("Preview pull (Filen → local)");
+				item.setIcon("arrow-down");
+				item.onClick(() => {
+					this.previewChanges("pull");
+				});
+			});
 		}
 
 		menu.addSeparator();
@@ -1068,6 +1171,13 @@ export default class FilenSyncPlugin extends Plugin {
 				item.setIcon("align-left");
 				item.onClick(() => {
 					this.openActivityLogs();
+				});
+			});
+			menu.addItem((item) => {
+				item.setTitle("Open diagnostic plan history");
+				item.setIcon("history");
+				item.onClick(() => {
+					this.openDiagnosticHistory();
 				});
 			});
 		}

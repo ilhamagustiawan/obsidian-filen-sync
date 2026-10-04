@@ -19,7 +19,9 @@ import type {
 	SyncDirection,
 	SyncOperation,
 	SyncOutcome,
+	SyncPreviewResult,
 	SyncProgress,
+	TargetIdentityInfo,
 } from "./sync/types";
 
 export type {
@@ -29,7 +31,9 @@ export type {
 	SyncDirection,
 	SyncOperation,
 	SyncOutcome,
+	SyncPreviewResult,
 	SyncProgress,
+	TargetIdentityInfo,
 };
 
 export const REMOTE_TREE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -727,13 +731,27 @@ export class SyncEngine {
 		return resolved;
 	}
 
-	private async walkLocal(pathFilter: SyncPathFilter, forceScan: boolean): Promise<LocalScan> {
+	private async walkLocal(
+		pathFilter: SyncPathFilter,
+		forceScan: boolean,
+		exclusionsTracker?: { ignoredCount: number; tooLargeCount: number; samplePaths: string[] },
+	): Promise<LocalScan> {
 		const files = new Map<string, LocalEntry>();
 		const dirs = new Set<string>();
 		for (const file of this.config.app.vault.getAllLoadedFiles()) {
 			if (file.path.length === 0) continue;
 			if (file instanceof TFile) {
-				if (pathFilter.isIgnored(file.path, file.stat.size)) continue;
+				const exclusion = pathFilter.checkExclusion(file.path, file.stat.size);
+				if (exclusion !== "included") {
+					if (exclusionsTracker) {
+						if (exclusion === "too_large") exclusionsTracker.tooLargeCount += 1;
+						else exclusionsTracker.ignoredCount += 1;
+						if (exclusionsTracker.samplePaths.length < 10) {
+							exclusionsTracker.samplePaths.push(file.path);
+						}
+					}
+					continue;
+				}
 				const hash = await this.localHashes.read(
 					file,
 					() => this.config.app.vault.readBinary(file),
@@ -748,7 +766,13 @@ export class SyncEngine {
 					file,
 				});
 			} else if (file instanceof TFolder) {
-				if (pathFilter.isIgnored(file.path)) continue;
+				const exclusion = pathFilter.checkExclusion(file.path);
+				if (exclusion !== "included") {
+					if (exclusionsTracker) {
+						exclusionsTracker.ignoredCount += 1;
+					}
+					continue;
+				}
 				dirs.add(file.path);
 			}
 		}
@@ -760,13 +784,27 @@ export class SyncEngine {
 		return { files, dirs };
 	}
 
-	private async walkRemote(pathFilter: SyncPathFilter): Promise<RemoteScan> {
+	private async walkRemote(
+		pathFilter: SyncPathFilter,
+		exclusionsTracker?: { ignoredCount: number; tooLargeCount: number; samplePaths: string[] },
+		options: { noCreate?: boolean } = {},
+	): Promise<RemoteScan> {
 		const files = new Map<string, RemoteEntry>();
 		const dirs = new Set<string>();
-		const remoteEntries = await this.config.remote.walk();
+		const remoteEntries = await this.config.remote.walk(options);
 		assertNoPathCollisions(remoteEntries.map(({ path, isDir }) => ({ path, isDir })));
 		for (const entry of remoteEntries) {
-			if (pathFilter.isIgnored(entry.path, entry.size)) continue;
+			const exclusion = pathFilter.checkExclusion(entry.path, entry.size);
+			if (exclusion !== "included") {
+				if (exclusionsTracker) {
+					if (exclusion === "too_large") exclusionsTracker.tooLargeCount += 1;
+					else exclusionsTracker.ignoredCount += 1;
+					if (exclusionsTracker.samplePaths.length < 10) {
+						exclusionsTracker.samplePaths.push(entry.path);
+					}
+				}
+				continue;
+			}
 			if (entry.isDir) {
 				dirs.add(entry.path);
 			} else {
@@ -774,6 +812,131 @@ export class SyncEngine {
 			}
 		}
 		return { files, dirs };
+	}
+
+	/**
+	 * Strictly read-only preview of proposed sync operations.
+	 * Performs no remote mkdir/upload/delete/rename, no local content writes,
+	 * no conflict copies, and no baseline updates.
+	 */
+	async previewPlan(
+		direction: SyncDirection = "both",
+		targetInfo: TargetIdentityInfo,
+		onProgress?: (progress: SyncProgress) => void,
+		bulkThresholds?: BulkGuardThresholds,
+	): Promise<SyncPreviewResult> {
+		const maxFileSizeBytes = this.config.settings.skipLargeFiles
+			? this.config.settings.skipSizeLargerThanMB * 1024 * 1024
+			: undefined;
+
+		const pathFilter = createSyncPathFilter({
+			configDir: this.config.app.vault.configDir,
+			pluginId: this.config.pluginId,
+			ignorePatterns: this.config.settings.ignorePatterns,
+			maxFileSizeBytes,
+		});
+
+		const exclusionsTracker = {
+			ignoredCount: 0,
+			tooLargeCount: 0,
+			samplePaths: [] as string[],
+		};
+
+		const previewStart = performance.now();
+		const scanStart = performance.now();
+		onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
+
+		// Full fresh scans for preview
+		const [local, prevRecords] = await Promise.all([
+			this.walkLocal(pathFilter, true, exclusionsTracker),
+			this.config.db.getAllFiles(),
+		]);
+
+		onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+		// Walk remote without creating folder!
+		const remote = await this.walkRemote(pathFilter, exclusionsTracker, { noCreate: true });
+
+		const filteredPrev = filterPrevRecords(prevRecords, pathFilter);
+
+		const localFiles = new Map<string, LocalFileInfo>();
+		for (const [path, entry] of local.files) {
+			localFiles.set(path, {
+				path,
+				mtime: entry.mtime,
+				ctime: entry.ctime,
+				size: entry.size,
+				hash: entry.hash,
+			});
+		}
+
+		const equalityHashes = await this.resolveRemoteFileHashes(
+			remote.files,
+			local.files,
+			filteredPrev,
+		);
+
+		const remoteFiles = new Map<string, RemoteFileInfo>();
+		for (const [path, entry] of remote.files) {
+			remoteFiles.set(path, {
+				path,
+				mtime: entry.mtime,
+				size: entry.size,
+				isDir: entry.isDir,
+				uuid: entry.uuid,
+				remoteHash: entry.remoteHash,
+				hash: equalityHashes.get(path),
+			});
+		}
+
+		const scanMs = Math.round(performance.now() - scanStart);
+		const planStart = performance.now();
+		onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
+
+		const planResult = planSync({
+			localFiles,
+			remoteFiles,
+			prevRecords: filteredPrev,
+			direction,
+		});
+
+		const bulkReport = checkBulkGuard(
+			planResult.actions,
+			{
+				totalLocalFiles: local.files.size,
+				totalRemoteFiles: remote.files.size,
+				totalBaselineFiles: filteredPrev.size,
+			},
+			bulkThresholds,
+		);
+		const planMs = Math.round(performance.now() - planStart);
+		const totalMs = Math.round(performance.now() - previewStart);
+
+		const totalProposed = planResult.actions.filter((a) => a.operation !== "noop").length;
+
+		return {
+			target: targetInfo,
+			direction,
+			createdAt: Date.now(),
+			actions: planResult.actions,
+			counts: {
+				...planResult.counts,
+				totalProposed,
+			},
+			destructiveStats: bulkReport.stats,
+			safetyReport: bulkReport,
+			exclusions: {
+				ignoredCount: exclusionsTracker.ignoredCount,
+				tooLargeCount: exclusionsTracker.tooLargeCount,
+				totalExcluded: exclusionsTracker.ignoredCount + exclusionsTracker.tooLargeCount,
+				samplePaths: exclusionsTracker.samplePaths,
+			},
+			timing: {
+				totalMs,
+				scanMs,
+				planMs,
+			},
+			provenance: "full",
+		};
 	}
 }
 

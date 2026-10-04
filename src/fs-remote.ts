@@ -27,7 +27,7 @@ export type RemoteFileVersion = {
 };
 
 export type RemoteFs = {
-	walk(): Promise<RemoteEntry[]>;
+	walk(options?: { noCreate?: boolean }): Promise<RemoteEntry[]>;
 	readFile(
 		path: string,
 		expectedRemoteUuid?: string,
@@ -91,12 +91,27 @@ export class FilenRemoteFs implements RemoteFs {
 		}
 	}
 
-	async walk(): Promise<RemoteEntry[]> {
+	async walk(options: { noCreate?: boolean } = {}): Promise<RemoteEntry[]> {
 		this.verifiedRootForSync = null;
 		this.scannedDirectoryUuids = null;
 		this.createdDirectoryPaths.clear();
 		try {
-			const rootUuid = await this.getParentUuid("");
+			let rootUuid: string;
+			if (options.noCreate) {
+				const client = await this.getClient();
+				const fs = client.fs();
+				const normalized = normalizeRemotePath("");
+				const targetPath = this.join(normalized);
+				const existing = await fs.pathToItemUUID({ path: targetPath, type: "directory" });
+				if (existing === null) {
+					throw new Error(
+						`Remote sync folder "${targetPath}" does not exist in Filen. Create it or run Initial sync first.`,
+					);
+				}
+				rootUuid = existing;
+			} else {
+				rootUuid = await this.getParentUuid("");
+			}
 			const client = await this.getClient();
 			const entries = this.sortEntries(await this.walkTree(rootUuid, client.cloud()));
 			const directoryUuids = new Map<string, string>([["", rootUuid]]);
@@ -115,7 +130,7 @@ export class FilenRemoteFs implements RemoteFs {
 	}
 
 	/** Resolve the authenticated account and effective mirror directory before DB binding. */
-	async getTargetIdentity(): Promise<RemoteTargetIdentity> {
+	async getTargetIdentity(options: { noCreate?: boolean } = {}): Promise<RemoteTargetIdentity> {
 		this.verifiedRootForSync = null;
 		this.scannedDirectoryUuids = null;
 		this.createdDirectoryPaths.clear();
@@ -129,7 +144,21 @@ export class FilenRemoteFs implements RemoteFs {
 			throw new Error("Filen did not provide a valid authenticated user identity.");
 		}
 		try {
-			const rootUuid = await this.getParentUuid("");
+			let rootUuid: string;
+			if (options.noCreate) {
+				const fs = client.fs();
+				const normalized = normalizeRemotePath("");
+				const targetPath = this.join(normalized);
+				const existing = await fs.pathToItemUUID({ path: targetPath, type: "directory" });
+				if (existing === null) {
+					throw new Error(
+						`Remote sync folder "${targetPath}" does not exist in Filen. Create it or run Initial sync first.`,
+					);
+				}
+				rootUuid = existing;
+			} else {
+				rootUuid = await this.getParentUuid("");
+			}
 			this.verifiedRootForSync = client;
 			return { userId, rootUuid };
 		} catch (error) {

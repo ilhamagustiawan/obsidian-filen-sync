@@ -21,9 +21,12 @@ type CompiledIgnoreRule = {
 	regex: RegExp | null;
 };
 
+export type ExclusionReason = "included" | "too_large" | "ignored";
+
 export type SyncPathFilter = {
 	patterns: string[];
 	isIgnored(path: string, size?: number): boolean;
+	checkExclusion(path: string, size?: number): ExclusionReason;
 };
 
 export const normalizeIgnorePatterns = (patterns: Iterable<string>): string[] => {
@@ -51,29 +54,34 @@ export const createSyncPathFilter = (config: PathFilterConfig): SyncPathFilter =
 	const patterns = normalizeIgnorePatterns([...builtInPatterns, ...config.ignorePatterns]);
 	const rules = patterns.map(compileIgnoreRule);
 
+	const checkExclusion = (path: string, size?: number): ExclusionReason => {
+		if (
+			size !== undefined &&
+			config.maxFileSizeBytes !== undefined &&
+			size > config.maxFileSizeBytes
+		) {
+			return "too_large";
+		}
+
+		const normalizedPath = normalizePattern(path);
+		if (normalizedPath.length === 0) {
+			return "ignored";
+		}
+
+		for (const rule of rules) {
+			if (matchesRule(normalizedPath, rule)) {
+				return "ignored";
+			}
+		}
+
+		return "included";
+	};
+
 	return {
 		patterns,
+		checkExclusion,
 		isIgnored(path: string, size?: number): boolean {
-			if (
-				size !== undefined &&
-				config.maxFileSizeBytes !== undefined &&
-				size > config.maxFileSizeBytes
-			) {
-				return true;
-			}
-
-			const normalizedPath = normalizePattern(path);
-			if (normalizedPath.length === 0) {
-				return true;
-			}
-
-			for (const rule of rules) {
-				if (matchesRule(normalizedPath, rule)) {
-					return true;
-				}
-			}
-
-			return false;
+			return checkExclusion(path, size) !== "included";
 		},
 	};
 };

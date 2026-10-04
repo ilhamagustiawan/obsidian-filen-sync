@@ -1,4 +1,5 @@
 import type { SyncedFileRecord } from "../settings";
+import type { BulkGuardReport } from "./bulk-guard";
 
 export type SyncDirection = "both" | "push" | "pull";
 
@@ -73,6 +74,50 @@ export type PlannedAction = {
 export type ConflictCopy = {
 	originalPath: string;
 	copyPath: string;
+};
+
+export type ExclusionsSummary = {
+	ignoredCount: number;
+	tooLargeCount: number;
+	totalExcluded: number;
+	samplePaths: string[];
+};
+
+export type SnapshotProvenance = "full" | "narrow" | "cache";
+
+export type TargetIdentityInfo = {
+	userId: number;
+	rootUuid: string;
+	remoteRoot: string;
+	vaultId: string;
+};
+
+export type SyncPreviewResult = {
+	target: TargetIdentityInfo;
+	direction: SyncDirection;
+	createdAt: number;
+	actions: PlannedAction[];
+	counts: {
+		upload: number;
+		download: number;
+		deleteLocal: number;
+		deleteRemote: number;
+		conflict: number;
+		noop: number;
+		totalProposed: number;
+	};
+	destructiveStats: {
+		localDeletes: number;
+		remoteDeletes: number;
+		localOverwrites: number;
+		remoteOverwrites: number;
+		totalDestructiveLocal: number;
+		totalDestructiveRemote: number;
+	};
+	safetyReport: BulkGuardReport;
+	exclusions: ExclusionsSummary;
+	timing: SyncTimingSummary;
+	provenance: SnapshotProvenance;
 };
 
 export type SyncTimingSummary = {
