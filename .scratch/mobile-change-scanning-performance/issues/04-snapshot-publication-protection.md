@@ -4,9 +4,9 @@
 
 **Blocked by:** None (engine internal safety; can proceed after 01/02 land).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] A vault event during local scanning prevents publication of the affected local snapshot; partial results never become empty-side or deletion evidence.
-- [ ] LocalHashCache read race protection (same-stat checks between read start/end and across digest) is retained.
-- [ ] Edits before reads, during reads, between digest calculations, after a worker completes, and before snapshot publication are covered by tests.
-- [ ] Failed or cancelled scans do not advance successful-verification timestamps.
+- [x] A vault event during local scanning prevents publication of the affected local snapshot; partial results never become empty-side or deletion evidence.
+- [x] LocalHashCache read race protection (same-stat checks between read start/end and across digest) is retained.
+- [x] Edits before reads, during reads, between digest calculations, after a worker completes, and before snapshot publication are covered by tests.
+- [x] Failed or cancelled scans do not advance successful-verification timestamps.

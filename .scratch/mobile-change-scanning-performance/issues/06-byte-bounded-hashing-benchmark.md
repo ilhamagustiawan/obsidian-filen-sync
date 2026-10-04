@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 (stage timing/counters needed to measure), 05 (unifies single-read bytes).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Hashing concurrency is bounded by workers AND accounted bytes (copy-aware, not just file lengths).
-- [ ] Large attachments hash serially; one oversized file may run only in isolation.
-- [ ] Failed workers stop scheduling, drain in-flight work, and never publish partial snapshots.
-- [ ] Deterministic benchmark compares concurrent vs serial hashing under identical inputs and controlled latency; result documented in the benchmark output.
-- [ ] No user-facing fast mode is introduced; policy is enabled (or kept serial) based on the checked-in measurements.
+- [x] Hashing concurrency is bounded by workers AND accounted bytes (copy-aware, not just file lengths).
+- [x] Large attachments hash serially; one oversized file may run only in isolation.
+- [x] Failed workers stop scheduling, drain in-flight work, and never publish partial snapshots.
+- [x] Deterministic benchmark compares concurrent vs serial hashing under identical inputs and controlled latency; result documented in the benchmark output.
+- [x] No user-facing fast mode is introduced; policy is enabled (or kept serial) based on the checked-in measurements.

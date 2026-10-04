@@ -460,6 +460,14 @@ export class SyncCoordinator {
 				},
 			);
 
+			// End-to-end elapsed time includes coordinator target preparation.
+			const engineTiming = result.timing ?? { totalMs: 0 };
+			const timingWithPrep: SyncTimingSummary = {
+				...engineTiming,
+				totalMs: engineTiming.totalMs + targetPrepMs,
+				targetPrepMs: targetPrepMs > 0 ? targetPrepMs : undefined,
+			};
+
 			// Reaching here means remote access succeeded
 			this.resetOffline();
 
@@ -516,10 +524,7 @@ export class SyncCoordinator {
 					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
 					target: targetInfo,
 					provenance: result.provenance ?? (scanHints ? "narrow" : "full"),
-					timing: {
-						...(result.timing ?? { totalMs: 0 }),
-						targetPrepMs: targetPrepMs > 0 ? targetPrepMs : undefined,
-					},
+					timing: timingWithPrep,
 					scan: result.scanDiagnostics,
 					counts: {
 						upload: result.uploaded ?? 0,
@@ -566,7 +571,7 @@ export class SyncCoordinator {
 			if (result.applied === 0 && !hasConflicts) {
 				if (isManual)
 					this.callbacks.onLogActivity(
-						`Sync complete: up to date${formatTimingSummary(result.timing)}`,
+						`Sync complete: up to date${formatTimingSummary(timingWithPrep)}`,
 					);
 				this.publishStatus({
 					kind: this.pendingCount > 0 ? "idle" : "success",
@@ -588,7 +593,7 @@ export class SyncCoordinator {
 			const summary = parts.join(", ");
 
 			this.callbacks.onLogActivity(
-				`Sync complete: ${summary}${formatTimingSummary(result.timing)}`,
+				`Sync complete: ${summary}${formatTimingSummary(timingWithPrep)}`,
 			);
 			this.publishStatus({
 				kind: hasConflicts ? "warning" : this.pendingCount > 0 ? "idle" : "success",

@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately; overlaps 01 in engine internals).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Engine accepts explicit verify/refresh/reconcile signals instead of relying only on `fullScan`.
-- [ ] Conservative callers (manual, initial, preview, replan, recovery, cold session) keep fresh local content and remote metadata.
-- [ ] Routine auto-sync enumerates the complete included inventory (adds/deletes/renames/folders found) while reusing still-valid session hashes.
-- [ ] Inventory refresh never extends a hash's verification deadline; expired/invalidated paths still force fresh content evidence on the next eligible run.
-- [ ] Empty pending hints never prove an unchanged vault; collision checks and empty-side guards still run over the full inventory.
+- [x] Engine accepts explicit verify/refresh/reconcile signals instead of relying only on `fullScan`.
+- [x] Conservative callers (manual, initial, preview, replan, recovery, cold session) keep fresh local content and remote metadata.
+- [x] Routine auto-sync enumerates the complete included inventory (adds/deletes/renames/folders found) while reusing still-valid session hashes.
+- [x] Inventory refresh never extends a hash's verification deadline; expired/invalidated paths still force fresh content evidence on the next eligible run.
+- [x] Empty pending hints never prove an unchanged vault; collision checks and empty-side guards still run over the full inventory.

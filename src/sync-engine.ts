@@ -369,11 +369,7 @@ export class SyncEngine {
 				? "available"
 				: "disabled";
 		const eventProbeStart = performance.now();
-		if (
-			canFastPoll &&
-			!refreshRemote &&
-			this.config.remote.checkEvents !== undefined
-		) {
+		if (canFastPoll && !refreshRemote && this.config.remote.checkEvents !== undefined) {
 			const currentWatermark = this.remoteTreeCache?.eventWatermark ?? 0;
 			try {
 				const probe = await this.config.remote.checkEvents(currentWatermark);
@@ -424,6 +420,7 @@ export class SyncEngine {
 		let remoteProbes = 0;
 		let remoteRefreshes = 0;
 		let remoteReuses = 0;
+		remoteProbes = canFastPoll && !refreshRemote ? 1 : 0;
 
 		let scanMs = 0;
 		let planMs = 0;
@@ -497,6 +494,8 @@ export class SyncEngine {
 				candidateLocalFiles,
 				candidatePrev,
 			);
+			equalityComparisons = candidateEqualityHashes.comparisons;
+			equalityDownloads = candidateEqualityHashes.downloads;
 
 			const candidateRemoteFiles = new Map<string, RemoteFileInfo>();
 			for (const [path, entry] of candidateEntries) {
@@ -616,7 +615,6 @@ export class SyncEngine {
 			}
 			remoteScanMs = Math.round(performance.now() - remoteStart);
 			this.assertScanEpoch(epoch);
-			remoteProbes = canFastPoll && !refreshRemote ? 1 : 0;
 
 			const equalityStart = performance.now();
 			const equalityHashes = await this.resolveRemoteFileHashes(

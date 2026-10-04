@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Engine returns actual scan mode + fallback reason in every outcome and preview; narrow status is never inferred from supplied hints.
-- [ ] Timing summary distinguishes stage durations from elapsed total; coordinator target preparation and engine event probing are included in end-to-end elapsed time.
-- [ ] Counters are bounded aggregates (no contents, credentials, or raw provider payloads).
-- [ ] Coordinator records actual provenance from the engine result instead of hint presence.
-- [ ] Diagnostic modal shows mode, fallback, and stage timings without crashing on older records (new fields optional).
+- [x] Engine returns actual scan mode + fallback reason in every outcome and preview; narrow status is never inferred from supplied hints.
+- [x] Timing summary distinguishes stage durations from elapsed total; coordinator target preparation and engine event probing are included in end-to-end elapsed time.
+- [x] Counters are bounded aggregates (no contents, credentials, or raw provider payloads).
+- [x] Coordinator records actual provenance from the engine result instead of hint presence.
+- [x] Diagnostic modal shows mode, fallback, and stage timings without crashing on older records (new fields optional).
