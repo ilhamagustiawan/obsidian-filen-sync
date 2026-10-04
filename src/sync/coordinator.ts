@@ -7,10 +7,7 @@ import type { FilenSyncSettings } from "../settings";
 import { SyncEngine } from "../sync-engine";
 import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
 import { isConflictFilePath } from "./conflict-utils";
-import {
-	saveDiagnosticRecord,
-	truncateActionsIfNeeded,
-} from "./diagnostic-history";
+import { saveDiagnosticRecord, truncateActionsIfNeeded } from "./diagnostic-history";
 import type {
 	SyncActivityEvent,
 	SyncDirection,
@@ -289,47 +286,43 @@ export class SyncCoordinator {
 			throw new Error("Cannot preview while sync is in progress.");
 		}
 		this.isPreviewActive = true;
-		try {
-			await this.callbacks.prepareTarget?.({ readOnly: true });
-			const engine = this.getSyncEngine();
-			const result = await engine.previewPlan(direction, targetInfo, onProgress, bulkThresholds);
+		await this.callbacks.prepareTarget?.({ readOnly: true });
+		const engine = this.getSyncEngine();
+		const result = await engine.previewPlan(direction, targetInfo, onProgress, bulkThresholds);
 
-			const { actions, truncated } = truncateActionsIfNeeded(
-				result.actions.map((a) => ({
-					path: a.path,
-					operation: a.operation,
-					reasonCode: a.reasonCode,
-					detail: a.detail,
-					destinationSide: a.destinationSide,
-					isOverwrite: a.isOverwrite,
-					preservesSurvivor: a.preservesSurvivor,
-					conflictWinner: a.conflictWinner,
-				})),
-			);
+		const { actions, truncated } = truncateActionsIfNeeded(
+			result.actions.map((a) => ({
+				path: a.path,
+				operation: a.operation,
+				reasonCode: a.reasonCode,
+				detail: a.detail,
+				destinationSide: a.destinationSide,
+				isOverwrite: a.isOverwrite,
+				preservesSurvivor: a.preservesSurvivor,
+				conflictWinner: a.conflictWinner,
+			})),
+		);
 
-			const previewId = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-			await saveDiagnosticRecord({
-				id: previewId,
-				kind: "preview",
-				timestamp: result.createdAt,
-				direction: result.direction,
-				trigger: "manual-preview",
-				target: result.target,
-				provenance: result.provenance,
-				timing: result.timing,
-				counts: result.counts,
-				destructiveStats: result.destructiveStats,
-				safetyReport: result.safetyReport,
-				outcome: "proposed",
-				actions,
-				totalActionsCount: result.actions.length,
-				actionsTruncated: truncated,
-			});
+		const previewId = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		await saveDiagnosticRecord({
+			id: previewId,
+			kind: "preview",
+			timestamp: result.createdAt,
+			direction: result.direction,
+			trigger: "manual-preview",
+			target: result.target,
+			provenance: result.provenance,
+			timing: result.timing,
+			counts: result.counts,
+			destructiveStats: result.destructiveStats,
+			safetyReport: result.safetyReport,
+			outcome: "proposed",
+			actions,
+			totalActionsCount: result.actions.length,
+			actionsTruncated: truncated,
+		});
 
-			return result;
-		} catch (error) {
-			throw error;
-		}
+		return result;
 	}
 
 	async runSync(
@@ -525,7 +518,11 @@ export class SyncCoordinator {
 							totalDestructiveRemote: result.deletedRemote ?? 0,
 						},
 					},
-					outcome: isCancel ? "cancelled" : (result.applied > 0 || hasConflicts ? "success" : "success"),
+					outcome: isCancel
+						? "cancelled"
+						: result.applied > 0 || hasConflicts
+							? "success"
+							: "success",
 					outcomeDetail: result.cancelReason,
 					correlationId: options.correlationId,
 					previewId: options.previewId,

@@ -764,7 +764,12 @@ export default class FilenSyncPlugin extends Plugin {
 		);
 		lines.push("");
 		lines.push("Proceed with this sync run?");
-		return confirmAction(this.app, "Mass changes detected", lines.join("\n"), "Proceed with sync");
+		return confirmAction(
+			this.app,
+			"Mass changes detected",
+			lines.join("\n"),
+			"Proceed with sync",
+		);
 	}
 
 	private getOrCreateRemoteFs(): FilenRemoteFs {

@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import { Modal, Notice, setIcon } from "obsidian";
+import { Modal, Notice } from "obsidian";
 import type FilenSyncPlugin from "../main";
 import { getDirectionExplanation } from "../sync/direction-explanation";
 import type {
@@ -58,7 +58,8 @@ export class SyncPreviewModal extends Modal {
 			);
 			this.currentPage = 1;
 		} catch (error) {
-			this.errorMessage = error instanceof Error ? error.message : "Failed to generate preview.";
+			this.errorMessage =
+				error instanceof Error ? error.message : "Failed to generate preview.";
 			this.currentPreview = null;
 		} finally {
 			this.isLoading = false;
@@ -188,7 +189,9 @@ export class SyncPreviewModal extends Modal {
 				cls: "text-error",
 			});
 			renewedWarn.createEl("p", {
-				text: this.renewedPlanDifference || "A fresh plan has been prepared. Please review the updated proposed actions before applying.",
+				text:
+					this.renewedPlanDifference ||
+					"A fresh plan has been prepared. Please review the updated proposed actions before applying.",
 				cls: "text-error",
 			});
 		}
@@ -230,9 +233,18 @@ export class SyncPreviewModal extends Modal {
 			{ label: `Total actions: ${c.totalProposed}`, color: "var(--text-normal)" },
 			{ label: `Uploads: ${c.upload}`, color: "var(--text-accent)" },
 			{ label: `Downloads: ${c.download}`, color: "var(--text-accent)" },
-			{ label: `Local deletes: ${c.deleteLocal}`, color: c.deleteLocal > 0 ? "var(--text-error)" : "var(--text-muted)" },
-			{ label: `Remote deletes: ${c.deleteRemote}`, color: c.deleteRemote > 0 ? "var(--text-error)" : "var(--text-muted)" },
-			{ label: `Conflicts: ${c.conflict}`, color: c.conflict > 0 ? "var(--text-warning)" : "var(--text-muted)" },
+			{
+				label: `Local deletes: ${c.deleteLocal}`,
+				color: c.deleteLocal > 0 ? "var(--text-error)" : "var(--text-muted)",
+			},
+			{
+				label: `Remote deletes: ${c.deleteRemote}`,
+				color: c.deleteRemote > 0 ? "var(--text-error)" : "var(--text-muted)",
+			},
+			{
+				label: `Conflicts: ${c.conflict}`,
+				color: c.conflict > 0 ? "var(--text-warning)" : "var(--text-muted)",
+			},
 			{ label: `Unchanged: ${c.noop}`, color: "var(--text-muted)" },
 		];
 
@@ -248,7 +260,9 @@ export class SyncPreviewModal extends Modal {
 		// Exclusions info
 		if (this.currentPreview.exclusions.totalExcluded > 0) {
 			const excl = this.currentPreview.exclusions;
-			const exclDiv = this.contentEl.createDiv({ cls: "filen-preview-exclusions text-muted" });
+			const exclDiv = this.contentEl.createDiv({
+				cls: "filen-preview-exclusions text-muted",
+			});
 			exclDiv.style.fontSize = "0.85em";
 			exclDiv.style.marginBottom = "12px";
 			exclDiv.setText(
@@ -267,7 +281,10 @@ export class SyncPreviewModal extends Modal {
 		filterButtons.style.display = "flex";
 		filterButtons.style.gap = "4px";
 
-		const filters: Array<{ id: "all" | "upload" | "download" | "delete" | "conflict"; label: string }> = [
+		const filters: Array<{
+			id: "all" | "upload" | "download" | "delete" | "conflict";
+			label: string;
+		}> = [
 			{ id: "all", label: `All (${c.totalProposed})` },
 			{ id: "upload", label: `Uploads (${c.upload})` },
 			{ id: "download", label: `Downloads (${c.download})` },
@@ -307,11 +324,18 @@ export class SyncPreviewModal extends Modal {
 		const filteredActions = allActions.filter((a) => {
 			if (this.activeFilter === "upload" && a.operation !== "upload") return false;
 			if (this.activeFilter === "download" && a.operation !== "download") return false;
-			if (this.activeFilter === "delete" && a.operation !== "delete-local" && a.operation !== "delete-remote") return false;
+			if (
+				this.activeFilter === "delete" &&
+				a.operation !== "delete-local" &&
+				a.operation !== "delete-remote"
+			)
+				return false;
 			if (this.activeFilter === "conflict" && a.operation !== "conflict") return false;
 			if (this.searchQuery.trim().length > 0) {
 				const query = this.searchQuery.toLowerCase();
-				return a.path.toLowerCase().includes(query) || a.detail.toLowerCase().includes(query);
+				return (
+					a.path.toLowerCase().includes(query) || a.detail.toLowerCase().includes(query)
+				);
 			}
 			return true;
 		});
@@ -326,7 +350,10 @@ export class SyncPreviewModal extends Modal {
 
 		if (filteredActions.length === 0) {
 			const emptyP = listContainer.createEl("p", {
-				text: allActions.length === 0 ? "No changes needed. Vault and Filen are up to date." : "No actions match the current filter.",
+				text:
+					allActions.length === 0
+						? "No changes needed. Vault and Filen are up to date."
+						: "No actions match the current filter.",
 				cls: "text-muted",
 			});
 			emptyP.style.textAlign = "center";
@@ -361,7 +388,10 @@ export class SyncPreviewModal extends Modal {
 				const pathSpan = pathCell.createEl("div", { text: action.path });
 				pathSpan.style.wordBreak = "break-all";
 
-				const reasonSpan = pathCell.createEl("div", { text: action.detail, cls: "text-muted" });
+				const reasonSpan = pathCell.createEl("div", {
+					text: action.detail,
+					cls: "text-muted",
+				});
 				reasonSpan.style.fontSize = "0.85em";
 				reasonSpan.style.marginTop = "2px";
 			}
@@ -429,7 +459,9 @@ export class SyncPreviewModal extends Modal {
 			case "delete-remote":
 				return "Delete remote";
 			case "conflict":
-				return action.preservesSurvivor ? "Preserve survivor" : `Conflict (${action.conflictWinner ?? "local"} wins)`;
+				return action.preservesSurvivor
+					? "Preserve survivor"
+					: `Conflict (${action.conflictWinner ?? "local"} wins)`;
 			default:
 				return action.operation;
 		}
@@ -479,25 +511,29 @@ export class SyncPreviewModal extends Modal {
 					freshTarget,
 				);
 				this.renewedReviewNeeded = true;
-				this.renewedPlanDifference = "Target folder identity changed. Please review the updated plan.";
+				this.renewedPlanDifference =
+					"Target folder identity changed. Please review the updated plan.";
 				this.isLoading = false;
 				this.render();
 				return;
 			}
 
 			// Generate fresh plan to compare against reviewed preview
-			const freshPreview = await this.plugin.generatePreview(
-				this.direction,
-				freshTarget,
-			);
+			const freshPreview = await this.plugin.generatePreview(this.direction, freshTarget);
 
 			// Compare plan actions
-			const reviewedActions = this.currentPreview.actions.filter((a: PlannedAction) => a.operation !== "noop");
-			const freshActions = freshPreview.actions.filter((a: PlannedAction) => a.operation !== "noop");
+			const reviewedActions = this.currentPreview.actions.filter(
+				(a: PlannedAction) => a.operation !== "noop",
+			);
+			const freshActions = freshPreview.actions.filter(
+				(a: PlannedAction) => a.operation !== "noop",
+			);
 
 			let planChanged = reviewedActions.length !== freshActions.length;
 			if (!planChanged) {
-				const freshActionMap = new Map<string, PlannedAction>(freshActions.map((a: PlannedAction) => [a.path, a]));
+				const freshActionMap = new Map<string, PlannedAction>(
+					freshActions.map((a: PlannedAction) => [a.path, a]),
+				);
 				for (const reviewed of reviewedActions) {
 					const fresh = freshActionMap.get(reviewed.path);
 					if (

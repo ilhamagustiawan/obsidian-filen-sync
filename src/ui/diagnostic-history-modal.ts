@@ -15,7 +15,10 @@ export class DiagnosticHistoryModal extends Modal {
 	private isLoading = true;
 	private selectedRecord: DiagnosticPlanRecord | null = null;
 
-	constructor(app: App, private readonly plugin: FilenSyncPlugin) {
+	constructor(
+		app: App,
+		private readonly plugin: FilenSyncPlugin,
+	) {
 		super(app);
 	}
 
@@ -68,7 +71,9 @@ export class DiagnosticHistoryModal extends Modal {
 			const emptyDiv = this.contentEl.createDiv();
 			emptyDiv.style.textAlign = "center";
 			emptyDiv.style.padding = "30px 10px";
-			emptyDiv.createEl("p", { text: "No recent diagnostic plan history recorded for this target." });
+			emptyDiv.createEl("p", {
+				text: "No recent diagnostic plan history recorded for this target.",
+			});
 
 			const btnBar = this.contentEl.createDiv({ cls: "modal-button-container" });
 			const closeBtn = btnBar.createEl("button", { text: "Close" });
@@ -212,7 +217,10 @@ export class DiagnosticHistoryModal extends Modal {
 		const clearBtn = footer.createEl("button", { text: "Clear history", cls: "mod-warning" });
 		clearBtn.onClickEvent(() => void this.handleClearHistory());
 
-		const exportBtn = footer.createEl("button", { text: "Export redacted diagnostics", cls: "mod-cta" });
+		const exportBtn = footer.createEl("button", {
+			text: "Export redacted diagnostics",
+			cls: "mod-cta",
+		});
 		exportBtn.onClickEvent(() => void this.handleExport());
 
 		const closeBtn = footer.createEl("button", { text: "Close" });

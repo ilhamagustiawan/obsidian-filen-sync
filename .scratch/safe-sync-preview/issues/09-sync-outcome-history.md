@@ -3,6 +3,7 @@
 **What to build:** Users can investigate ordinary and preview-initiated syncs in the same bounded diagnostic history, distinguish proposed work from completed work, and trace an Apply run back to its preview.
 
 **Blocked by:**
+
 - 07 — Apply a preview through fresh planning and renewed review.
 - 08 — Browse recent preview history.
 

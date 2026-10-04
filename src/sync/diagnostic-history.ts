@@ -73,16 +73,21 @@ const historyStore = localforage.createInstance({
 	storeName: "plan-history",
 });
 
-function pruneRecords(records: DiagnosticPlanRecord[], now: number = Date.now()): DiagnosticPlanRecord[] {
+function pruneRecords(
+	records: DiagnosticPlanRecord[],
+	now: number = Date.now(),
+): DiagnosticPlanRecord[] {
 	return records
 		.filter((r) => now - r.timestamp <= MAX_AGE_MS)
 		.sort((a, b) => b.timestamp - a.timestamp)
 		.slice(0, MAX_RECORDS);
 }
 
-export function truncateActionsIfNeeded(
-	actions: DiagnosticActionItem[],
-): { actions: DiagnosticActionItem[]; truncated: boolean; totalCount: number } {
+export function truncateActionsIfNeeded(actions: DiagnosticActionItem[]): {
+	actions: DiagnosticActionItem[];
+	truncated: boolean;
+	totalCount: number;
+} {
 	const totalCount = actions.length;
 	if (totalCount <= MAX_ACTIONS_PER_RECORD) {
 		return { actions, truncated: false, totalCount };
@@ -106,7 +111,9 @@ export async function saveDiagnosticRecord(record: DiagnosticPlanRecord): Promis
 	}
 }
 
-export async function getDiagnosticRecords(target: TargetIdentityInfo): Promise<DiagnosticPlanRecord[]> {
+export async function getDiagnosticRecords(
+	target: TargetIdentityInfo,
+): Promise<DiagnosticPlanRecord[]> {
 	try {
 		const key = targetBindingKey(target);
 		const existing = (await historyStore.getItem<DiagnosticPlanRecord[]>(key)) ?? [];

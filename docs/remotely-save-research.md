@@ -167,21 +167,21 @@ Important implementation detail: floating/mobile indicator and automatic progres
 
 ## 3. Comparison matrix
 
-| Area | Remotely Save | Filen Sync | Assessment |
-| --- | --- | --- | --- |
-| Backend scope | Multiple providers; some paid | Native Filen only | Keep focused unless multi-provider support is a product goal. [R-readme][F-remote] |
-| Core reconciliation | Local + remote + previous success | Same model with content/identity evidence | No engine replacement needed. [R-sync][F-planner] |
-| Ordinary equality | Time and effective encrypted size | Local digest, baseline, remote UUID/hash, metadata | Different correctness/cost trade-offs. [R-sync][F-planner] |
-| Normal conflicts | Newer/larger; paid smart merge/duplicate | Newer winner with losing copy retained locally | Preserve copies; consider optional merge preview later. [R-readme][R-conflict][F-executor] |
-| Directions | Five explicit modes | Three modes with their own preservation/deletion branches | Document differences before adding parity. [R-design][F-planner] |
-| Dry run / plan history | Command and persisted plan export | Planner exists, no registered preview/dry-run command | High-value gap. [R-main][R-sync][F-main][F-planner] |
-| Mass-change guard | Percentage setting, default 50 | Absolute + percentage + empty-side checks | Retain local conservative guards. [R-main][R-sync][F-bulk] |
-| Save-triggered work | Throttled active-file check | Revisioned changed-path queue and narrow planning | Retain Filen approach. [R-main][F-coordinator][F-engine] |
-| Transfers | Configurable file-operation queue, default five | Default two small files; serial large files; three chunks/file | Tune by memory and request load, not concurrency alone. [R-sync][F-engine][F-chunks] |
-| Diagnostics | Saved plans + optional stage profiler | Activity logs + aggregate scan/plan/transfer/first-file timing | Add structured plan diagnostics. [R-profiler][R-db][F-engine][F-logs] |
-| Config transfer / language | QR/URI settings transfer and i18n | No equivalent observed in settings/commands | Useful optional conveniences after safety work. [R-import][R-i18n][F-settings][F-main] |
-| Recovery UI | No comparable version-history command found in inspected main/settings | Filen revision preview/diff/restore | Keep native recovery as a differentiator. [R-main][R-settings][F-version] |
-| Credentials at rest | Obfuscated settings plus warning/gitignore | Derived auth in Obsidian SecretStorage | Do not copy obfuscation as a security mechanism. [R-config][R-readme][F-secrets] |
+| Area                       | Remotely Save                                                          | Filen Sync                                                     | Assessment                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Backend scope              | Multiple providers; some paid                                          | Native Filen only                                              | Keep focused unless multi-provider support is a product goal. [R-readme][F-remote]         |
+| Core reconciliation        | Local + remote + previous success                                      | Same model with content/identity evidence                      | No engine replacement needed. [R-sync][F-planner]                                          |
+| Ordinary equality          | Time and effective encrypted size                                      | Local digest, baseline, remote UUID/hash, metadata             | Different correctness/cost trade-offs. [R-sync][F-planner]                                 |
+| Normal conflicts           | Newer/larger; paid smart merge/duplicate                               | Newer winner with losing copy retained locally                 | Preserve copies; consider optional merge preview later. [R-readme][R-conflict][F-executor] |
+| Directions                 | Five explicit modes                                                    | Three modes with their own preservation/deletion branches      | Document differences before adding parity. [R-design][F-planner]                           |
+| Dry run / plan history     | Command and persisted plan export                                      | Planner exists, no registered preview/dry-run command          | High-value gap. [R-main][R-sync][F-main][F-planner]                                        |
+| Mass-change guard          | Percentage setting, default 50                                         | Absolute + percentage + empty-side checks                      | Retain local conservative guards. [R-main][R-sync][F-bulk]                                 |
+| Save-triggered work        | Throttled active-file check                                            | Revisioned changed-path queue and narrow planning              | Retain Filen approach. [R-main][F-coordinator][F-engine]                                   |
+| Transfers                  | Configurable file-operation queue, default five                        | Default two small files; serial large files; three chunks/file | Tune by memory and request load, not concurrency alone. [R-sync][F-engine][F-chunks]       |
+| Diagnostics                | Saved plans + optional stage profiler                                  | Activity logs + aggregate scan/plan/transfer/first-file timing | Add structured plan diagnostics. [R-profiler][R-db][F-engine][F-logs]                      |
+| Config transfer / language | QR/URI settings transfer and i18n                                      | No equivalent observed in settings/commands                    | Useful optional conveniences after safety work. [R-import][R-i18n][F-settings][F-main]     |
+| Recovery UI                | No comparable version-history command found in inspected main/settings | Filen revision preview/diff/restore                            | Keep native recovery as a differentiator. [R-main][R-settings][F-version]                  |
+| Credentials at rest        | Obfuscated settings plus warning/gitignore                             | Derived auth in Obsidian SecretStorage                         | Do not copy obfuscation as a security mechanism. [R-config][R-readme][F-secrets]           |
 
 ## 4. Optimization opportunities, ranked
 

@@ -1,4 +1,4 @@
-import type { DiagnosticActionItem, DiagnosticPlanRecord } from "./diagnostic-history";
+import type { DiagnosticPlanRecord } from "./diagnostic-history";
 
 export type SanitizedDiagnosticAction = {
 	pathAlias: string;

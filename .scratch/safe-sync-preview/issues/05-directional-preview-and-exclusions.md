@@ -3,6 +3,7 @@
 **What to build:** Users select bidirectional, push, or pull preview and inspect the exact proposed effects with explanations of directional preservation behavior. Excluded files are not confused with unchanged planner entries.
 
 **Blocked by:**
+
 - 02 — Explain direction and conflict-preservation behavior.
 - 04 — Handle unavailable targets and incomplete previews safely.
 
