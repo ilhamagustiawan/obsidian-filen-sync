@@ -285,6 +285,10 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 		const countEl = notice.noticeEl.children[0].children[2].children[0];
 		assert.match(countEl.textContent, /0 of 294/);
 		assert.match(countEl.textContent, /1\.0 KB\/8\.0 KB/);
+		assert.match(countEl.textContent, /^Syncing · /);
+		assert.doesNotMatch(countEl.textContent, /Last synced/);
+		assert.equal(notice.noticeEl.children[0].children[0].children[1].textContent, "0%");
+		assert.equal(notice.noticeEl.children[0].children[3].textContent, "Last synced 1m ago");
 
 		// 3. Coalescing to 10 Hz (100 ms) while on-demand notice is active
 		for (let i = 1; i <= 5; i++) {
@@ -314,6 +318,8 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 			updatedAt: Date.now(),
 		});
 		assert.ok(notice.noticeEl.hasClass("is-success"), "Terminal state rendered immediately");
+		assert.equal(countEl.textContent, "294 files synced");
+		assert.equal(notice.noticeEl.children[0].children[3].textContent, "Last synced 1m ago");
 
 		// Scanning phase on-demand: title is "Filen Sync", count shows phase label, file is empty
 		controller.showOnDemand({
@@ -330,7 +336,8 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 		const scanFile = scanNotice.noticeEl.children[0].children[2].children[1];
 		assert.equal(scanTitle.textContent, "Filen Sync");
 		assert.equal(scanBadge.textContent, "Syncing");
-		assert.equal(scanCount.textContent, "Scanning local files · Last synced 1m ago");
+		assert.equal(scanCount.textContent, "Scanning local files");
+		assert.equal(scanNotice.noticeEl.children[0].children[3].textContent, "Last synced 1m ago");
 		assert.equal(scanFile.textContent, "");
 
 		controller.closeNotice();

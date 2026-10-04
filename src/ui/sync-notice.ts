@@ -11,6 +11,7 @@ export class SyncNoticeController {
 	private barFill: HTMLElement | null = null;
 	private countEl: HTMLElement | null = null;
 	private fileEl: HTMLElement | null = null;
+	private summaryEl: HTMLElement | null = null;
 	private dismissTimer: number | null = null;
 	private showTimer: number | null = null;
 	private coalesceTimer: number | null = null;
@@ -111,14 +112,15 @@ export class SyncNoticeController {
 	}
 
 	private appendLastSyncSummary(): void {
-		if (!this.countEl) return;
-		this.countEl.setText(
-			[this.countEl.textContent, this.getLastSyncSummary()].filter(Boolean).join(" · "),
-		);
+		if (!this.summaryEl) return;
+		const summary = this.getLastSyncSummary();
+		this.summaryEl.setText(summary);
+		this.summaryEl.setAttr("title", summary);
 	}
 
 	private renderState(state: StatusBarState): void {
 		this.ensureNoticeCreated(this.mode);
+		this.fileEl?.removeAttribute("title");
 		if (state.kind === "syncing") {
 			this.renderSyncing(state);
 		} else if (state.kind === "success") {
@@ -154,6 +156,7 @@ export class SyncNoticeController {
 		this.barFill = null;
 		this.countEl = null;
 		this.fileEl = null;
+		this.summaryEl = null;
 	}
 
 	private clearDismissTimer(): void {
@@ -220,6 +223,7 @@ export class SyncNoticeController {
 		const details = container.createDiv({ cls: "filen-notice-details" });
 		this.countEl = details.createSpan({ cls: "filen-notice-count", text: "Starting…" });
 		this.fileEl = details.createSpan({ cls: "filen-notice-file", text: "" });
+		this.summaryEl = container.createDiv({ cls: "filen-notice-summary" });
 
 		this.activeNotice = new Notice(frag, 0);
 		this.noticeEl = this.activeNotice.noticeEl;
@@ -334,12 +338,18 @@ export class SyncNoticeController {
 		if (total > 0 && progress) {
 			const boundedCurrent = Math.min(current, total);
 			const pct = Math.min(100, Math.max(0, Math.round((boundedCurrent / total) * 100)));
-			this.badgeEl.setText(`${boundedCurrent}/${total}`);
+			this.badgeEl.setText(`${pct}%`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;
 
 			const { countText, fileText } = formatTransferDetails(progress);
-			this.countEl.setText(countText);
+			const action =
+				progress.operation === "upload"
+					? "Uploading"
+					: progress.operation === "download"
+						? "Downloading"
+						: "Syncing";
+			this.countEl.setText(`${action} · ${countText}`);
 			this.fileEl.setText(fileText);
 			if (path) {
 				this.fileEl.setAttr("title", path);
@@ -348,7 +358,7 @@ export class SyncNoticeController {
 			}
 			this.noticeEl.setAttr(
 				"aria-label",
-				`Filen Sync: ${countText}${fileText ? ` · ${fileText}` : ""}. Tap for options.`,
+				`Filen Sync: ${action} · ${countText}${fileText ? ` · ${fileText}` : ""}.`,
 			);
 		} else {
 			const phaseLabel = progress?.phase ? formatSyncProgress(progress) : "";
@@ -430,7 +440,7 @@ export class SyncNoticeController {
 		this.fileEl.empty();
 		const link = this.fileEl.createEl("a", {
 			cls: "filen-notice-log-link",
-			text: "View logs →",
+			text: "View logs",
 		});
 		link.addEventListener("click", (e) => {
 			e.preventDefault();
