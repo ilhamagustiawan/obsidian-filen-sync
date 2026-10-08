@@ -5,7 +5,9 @@
 	justify-content: flex-end;
 	align-items: center;
 	gap: 4px;
-	padding: 0 8px 4px;
+	/* Android WebViews can report a zero safe-area inset while drawing beneath
+	   the system status bar, so keep a minimum gap as well as reported insets. */
+	padding: max(24px, var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) 8px 4px;
 	min-width: 0;
 }
 
