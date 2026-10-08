@@ -10,7 +10,7 @@ Obsidian Filen Sync mirrors vault files between Obsidian and a dedicated folder 
 
 - **Direct Filen folder mirror**: Vault files mirror directly to a readable remote folder (e.g. `/Obsidian/<vaultName>`), without proprietary database blobs or chunked journal locks.
 - **Flexible sync modes**: Run full bidirectional **Sync now**, or one-way **Push changed local files** and **Pull changed remote files**.
-- **Automated background sync**: Optional auto-sync on file save (with configurable debounce delay), on a periodic interval, and shortly after Obsidian startup.
+- **Automatic opening sync**: Checks Filen one second after the workspace is ready and when returning to the app. Save and interval triggers are optional; pause and safety holds still apply.
 - **Fast remote polling**: Probes Filen's cloud events feed during auto-sync to skip full remote scans when nothing changed in the cloud.
 - **Cheap routine checks on mobile**: Returning to the app and periodic intervals reconcile the full included inventory while reusing still-valid content hashes, so unchanged vaults finish quickly without re-reading every file. Focus and visibility events for the same transition share one reconciliation; manual sync and initial sync still verify fresh content.
 - **Native status bar & quiet mobile status**: Real-time sync progress via an unobtrusive spinning ribbon icon on mobile (never obstructing your notes), and a customizable status bar item on desktop. Select **Show sync progress** on demand anytime.
@@ -143,6 +143,14 @@ When visible, the status bar item reflects real-time sync state and provides qui
 - **Review / Error**: Conflicts and required confirmation stay visible; transient failures show a retry countdown.
 - **Action menu**: Click, right-click, or press Enter/Space on the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.
 
+### Mobile sync progress
+
+A compact chip below the active note header shows **Checking shortly…** when an opening check is scheduled, then live phases and transfer progress. Notes remain editable, and the chip stays outside the scrolling content and away from the keyboard.
+
+Opening checks and manual runs show progress immediately. Other automatic runs wait 300 ms to avoid flashing on quick checks. Successful results disappear after two seconds; errors, conflicts, and required confirmation remain until dismissed or resolved. Dismissing an issue does not clear it: the ribbon and sync menu retain access. Tap progress for details or an issue for the sync menu. You can also pin **Show sync progress** to the mobile toolbar.
+
+Disable **Show mobile sync progress** to hide the chip without disabling sync. The former **Sync after startup** setting has been removed: connected, unpaused vaults always check shortly after opening, even when save and interval sync are disabled. Old startup-delay values are ignored. Returning to the app coalesces duplicate events and skips recent successful checks when no edits are queued. Offline checks recover when connectivity returns; safety holds still require review. The separate **Initial sync** command retains its verified first-sync behavior.
+
 ### Ribbon icons
 
 - **Filen: sync menu / sync now** (`refresh-cw`): Spins with smooth animation during active sync. On mobile, tapping always opens the sync actions menu safely. On desktop, clicking triggers sync now or displays live on-demand progress while active. Tooltip updates dynamically with live progress and status.
@@ -221,12 +229,12 @@ The sync baseline is maintained locally in IndexedDB inside the vault's plugin s
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
 | **Auto-sync paused**           | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
 | **Sync progress notice**       | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
+| **Show mobile sync progress**  | Show the compact chip below the mobile note header.                                                                                       | Enabled                |
 | **Status bar indicator style** | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
 | **Sync on file save**          | Batch file changes after the save delay; automatic runs also respect the minimum gap below.                                               | Enabled                |
 | **Sync on save delay**         | Wait this long after the latest save before syncing (1 to 30 seconds).                                                                    | `2` seconds            |
 | **Minimum automatic sync gap** | Wait at least this long between automatic sync starts (5 to 120 seconds). Manual sync is immediate.                                       | `10` seconds           |
 | **Background sync interval**   | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
-| **Sync after startup**         | Delay in seconds after layout ready before running an initial sync (0 disables).                                                          | `0` (Disabled)         |
 | **Fast remote polling**        | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |
 | **Skip large files**           | Skip transferring files larger than the specified threshold.                                                                              | Enabled                |
 | **Skip size threshold**        | Maximum file size in megabytes before skipping (1 to 1000 MB).                                                                            | `50` MB                |

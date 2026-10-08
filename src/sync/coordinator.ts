@@ -83,6 +83,8 @@ const RESUME_RECONCILE_SKIP_MS = 60_000;
 
 export type CoordinatorCallbacks = {
 	onStatusChange: (state: StatusBarState) => void;
+	onOpeningCheckChange?: (state: OpeningCheckState) => void;
+	getAutoSyncBlockReason?: () => string | null;
 	onLogActivity: (message: string) => void;
 	confirmLocalDeletes: (paths: string[]) => Promise<boolean>;
 	confirmBulkOperations: (report: BulkGuardReport) => Promise<boolean>;
@@ -90,6 +92,11 @@ export type CoordinatorCallbacks = {
 	prepareTarget?: (options?: { readOnly?: boolean }) => Promise<void>;
 	getTargetInfo?: (noCreate?: boolean) => Promise<TargetIdentityInfo>;
 };
+
+export type OpeningCheckState =
+	| { kind: "scheduled"; scheduledAt: number }
+	| { kind: "cleared" }
+	| { kind: "blocked"; text: string };
 
 export class SyncCoordinator {
 	private isSyncing = false;
@@ -99,7 +106,8 @@ export class SyncCoordinator {
 	private lastErrorNoticeTime = new Map<string, number>();
 	private debounceTimer: number | null = null;
 	private intervalId: number | null = null;
-	private startupTimerId: number | null = null;
+	private startupInitialized = false;
+	private openingCheckPending = false;
 	private vaultEventRefs: EventRef[] = [];
 	private autoSyncDomCleanup: (() => void)[] = [];
 	private pendingAutoSync = false;
@@ -401,6 +409,7 @@ export class SyncCoordinator {
 			isManual,
 			progress: { current: 0, total: 0, path: "" },
 		});
+		this.clearOpeningCheck();
 		if (isManual) this.callbacks.onLogActivity(`${label} started`);
 
 		let targetInfo: TargetIdentityInfo | null = null;
@@ -758,8 +767,9 @@ export class SyncCoordinator {
 
 	setupAutoSync(hasSavedAuth: () => boolean): void {
 		this.autoSyncHasSavedAuth = hasSavedAuth;
-		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } =
-			this.settings;
+		const startup = !this.startupInitialized;
+		this.startupInitialized = true;
+		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes } = this.settings;
 
 		const handleVaultChange = (action: string) => (file: TAbstractFile, oldPath?: string) => {
 			this.syncEngine?.invalidateLocal(file.path);
@@ -791,21 +801,21 @@ export class SyncCoordinator {
 		this.vaultEventRefs.push(this.app.vault.on("delete", handleVaultChange("deleted")));
 		this.vaultEventRefs.push(this.app.vault.on("rename", handleVaultChange("renamed")));
 
-		if (this.settings.syncPaused) return;
-
-		if (syncOnSave || syncIntervalMinutes > 0) {
-			this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
-				if (document.visibilityState === "visible")
-					this.scheduleResumeAutoSync(hasSavedAuth);
-			});
-			this.registerAutoSyncDomEvent(window, "focus", () => {
-				this.scheduleResumeAutoSync(hasSavedAuth);
-			});
-			this.registerAutoSyncDomEvent(window, "online", () => {
-				this.resetOffline();
-				this.scheduleReconnectAutoSync(hasSavedAuth);
-			});
+		if (this.settings.syncPaused) {
+			if (startup) this.reportOpeningBlock(hasSavedAuth);
+			return;
 		}
+
+		this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") this.scheduleResumeAutoSync(hasSavedAuth);
+		});
+		this.registerAutoSyncDomEvent(window, "focus", () => {
+			this.scheduleResumeAutoSync(hasSavedAuth);
+		});
+		this.registerAutoSyncDomEvent(window, "online", () => {
+			this.resetOffline();
+			this.scheduleReconnectAutoSync(hasSavedAuth);
+		});
 
 		if (syncIntervalMinutes > 0) {
 			this.intervalId = window.setInterval(
@@ -816,12 +826,7 @@ export class SyncCoordinator {
 			);
 		}
 
-		if (syncStartupDelaySeconds > 0) {
-			this.startupTimerId = window.setTimeout(() => {
-				this.startupTimerId = null;
-				this.requestAutoSync(hasSavedAuth, false);
-			}, syncStartupDelaySeconds * 1000);
-		}
+		if (startup) this.scheduleOpeningCheck(hasSavedAuth);
 	}
 
 	teardownAutoSync(): void {
@@ -833,10 +838,7 @@ export class SyncCoordinator {
 			window.clearInterval(this.intervalId);
 			this.intervalId = null;
 		}
-		if (this.startupTimerId !== null) {
-			window.clearTimeout(this.startupTimerId);
-			this.startupTimerId = null;
-		}
+		this.clearOpeningCheck();
 		for (const ref of this.vaultEventRefs) this.app.vault.offref(ref);
 		this.vaultEventRefs = [];
 		for (const cleanup of this.autoSyncDomCleanup) cleanup();
@@ -882,8 +884,7 @@ export class SyncCoordinator {
 	private scheduleResumeAutoSync(hasSavedAuth: () => boolean): void {
 		if (this.isReplanRetryHeld) return;
 		if (this.resumeCoalescingBlocked()) return;
-		this.pendingAutoSync = true;
-		this.scheduleQueuedAutoSync(1000, hasSavedAuth);
+		this.scheduleOpeningCheck(hasSavedAuth);
 	}
 
 	/**
@@ -893,14 +894,44 @@ export class SyncCoordinator {
 	 */
 	private scheduleReconnectAutoSync(hasSavedAuth: () => boolean): void {
 		if (this.isReplanRetryHeld) return;
+		this.scheduleOpeningCheck(hasSavedAuth, true);
+	}
+
+	private scheduleOpeningCheck(hasSavedAuth: () => boolean, recoverQueued = false): void {
+		if (this.isSyncing || (this.pendingAutoSync && !recoverQueued)) return;
+		if (this.reportOpeningBlock(hasSavedAuth)) return;
+		this.openingCheckPending = true;
 		this.pendingAutoSync = true;
 		this.scheduleQueuedAutoSync(1000, hasSavedAuth);
+	}
+
+	private reportOpeningBlock(hasSavedAuth: () => boolean): boolean {
+		const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+		const reason = this.settings.syncPaused
+			? "Sync paused"
+			: this.isReplanRetryHeld || this.confirmationRequired
+				? "Sync needs review — select Sync now"
+				: this.callbacks.getAutoSyncBlockReason?.() ||
+					(!hasSavedAuth()
+						? "Connect Filen to sync"
+						: offline
+							? "Offline — waiting for connection"
+							: null);
+		if (!reason) return false;
+		this.openingCheckPending = false;
+		this.callbacks.onOpeningCheckChange?.({ kind: "blocked", text: reason });
+		return true;
+	}
+
+	private clearOpeningCheck(): void {
+		if (!this.openingCheckPending) return;
+		this.openingCheckPending = false;
+		this.callbacks.onOpeningCheckChange?.({ kind: "cleared" });
 	}
 
 	private resumeCoalescingBlocked(): boolean {
 		if (this.pendingAutoSync) return true;
 		if (this.isSyncing) {
-			this.pendingAutoSync = true;
 			return true;
 		}
 		const now = Date.now();
@@ -923,6 +954,10 @@ export class SyncCoordinator {
 
 	private requestAutoSync(hasSavedAuth: () => boolean, fullScan = true): void {
 		this.pendingAutoSyncRequiresFullScan ||= fullScan;
+		if (this.openingCheckPending && this.reportOpeningBlock(hasSavedAuth)) {
+			this.pendingAutoSync = false;
+			return;
+		}
 		if (this.isReplanRetryHeld) return;
 		if (!this.hasAutoSyncEnabled() || this.confirmationRequired) return;
 		if (!hasSavedAuth()) return;
@@ -983,6 +1018,9 @@ export class SyncCoordinator {
 		const now = Date.now();
 		const cooldownDelayMs = Math.max(0, this.nextAutoSyncAllowedAt - now);
 		const waitMs = Math.max(delayMs, cooldownDelayMs);
+		if (this.openingCheckPending) {
+			this.callbacks.onOpeningCheckChange?.({ kind: "scheduled", scheduledAt: now + waitMs });
+		}
 		if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
 		this.debounceTimer = window.setTimeout(() => {
 			this.debounceTimer = null;
@@ -1014,12 +1052,8 @@ export class SyncCoordinator {
 	}
 
 	private hasAutoSyncEnabled(): boolean {
-		return (
-			!this.settings.syncPaused &&
-			(this.settings.syncOnSave ||
-				this.settings.syncIntervalMinutes > 0 ||
-				this.settings.syncStartupDelaySeconds > 0)
-		);
+		// Opening and reconnect checks remain enabled independently of optional save/interval triggers.
+		return !this.settings.syncPaused;
 	}
 
 	private shouldAutoSyncForFileEvent(file: TAbstractFile, oldPath?: string): boolean {

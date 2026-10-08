@@ -35,6 +35,7 @@ import {
 } from "./sync/coordinator";
 import { formatLastSyncSummary, formatSyncProgress } from "./ui/sync-presentation";
 import { SyncNoticeController } from "./ui/sync-notice";
+import { MobileSyncIndicator } from "./ui/mobile-sync-indicator";
 import { sha256Hex } from "./sync/executor";
 import { getOriginalPathFromConflictPath } from "./sync/conflict-utils";
 import { SyncPreviewModal } from "./ui/sync-preview-modal";
@@ -72,6 +73,7 @@ export default class FilenSyncPlugin extends Plugin {
 	private statusBarTextEl: HTMLElement | null = null;
 	private syncRibbonIconEl: HTMLElement | null = null;
 	private noticeController!: SyncNoticeController;
+	private mobileIndicator!: MobileSyncIndicator;
 	private statusBarState: StatusBarState = {
 		kind: "idle",
 		text: "Set up Filen",
@@ -112,6 +114,13 @@ export default class FilenSyncPlugin extends Plugin {
 			() => this.settings.showFloatingSyncIndicator,
 		);
 
+		this.mobileIndicator = new MobileSyncIndicator(
+			this,
+			() => this.settings.showFloatingSyncIndicator,
+			() => this.showSyncProgressNoticeOnDemand(),
+			(event) => this.openStatusBarMenu(event),
+		);
+
 		this.coordinator = new SyncCoordinator(
 			this.app,
 			this.manifest.id,
@@ -119,6 +128,13 @@ export default class FilenSyncPlugin extends Plugin {
 			() => this.getOrCreateRemoteFs(),
 			() => this.db,
 			{
+				onOpeningCheckChange: (check) => this.mobileIndicator.onOpeningCheckChange(check),
+				getAutoSyncBlockReason: () =>
+					!this.hasSavedAuth()
+						? "Connect Filen to sync"
+						: this.settings.reconciliationNeeded || needsRemoteReconciliation()
+							? "Transfer recovery needed — select Sync now"
+							: null,
 				onStatusChange: (state) => {
 					this.statusBarState = state;
 					if (state.syncCompleted) {
@@ -129,7 +145,6 @@ export default class FilenSyncPlugin extends Plugin {
 						void this.saveSettings();
 					}
 					this.updateStatusDisplays();
-					this.noticeController.onStatusChange(state);
 				},
 				onLogActivity: (message) => {
 					this.logActivity(message);
@@ -219,6 +234,12 @@ export default class FilenSyncPlugin extends Plugin {
 				}
 				return true;
 			},
+		});
+
+		this.addCommand({
+			id: "show-sync-progress",
+			name: "Show sync progress",
+			callback: () => this.showSyncProgressNoticeOnDemand(),
 		});
 
 		this.addCommand({
@@ -341,6 +362,7 @@ export default class FilenSyncPlugin extends Plugin {
 		this.unloaded = true;
 		this.coordinator.close();
 		this.noticeController?.closeNotice();
+		this.mobileIndicator?.close();
 		if (this.activityLogsSaveTimer !== null) {
 			window.clearTimeout(this.activityLogsSaveTimer);
 			this.activityLogsSaveTimer = null;
@@ -649,7 +671,7 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	refreshFloatingIndicator(): void {
-		// Automatic mobile indicator retired in favor of quiet ribbon icon
+		this.mobileIndicator?.refreshVisibility();
 	}
 
 	private showSyncProgressNoticeOnDemand(): void {
@@ -1286,6 +1308,8 @@ export default class FilenSyncPlugin extends Plugin {
 	private updateStatusDisplays(): void {
 		this.renderStatusBar();
 		this.updateRibbonIcon();
+		this.mobileIndicator?.onStatusChange(this.statusBarState);
+		this.noticeController?.onStatusChange(this.statusBarState);
 	}
 
 	private updateRibbonIcon(): void {
@@ -1602,8 +1626,7 @@ export default class FilenSyncPlugin extends Plugin {
 			);
 		if (this.settings.syncIntervalMinutes > 0)
 			parts.push(`every ${this.settings.syncIntervalMinutes} min`);
-		if (this.settings.syncStartupDelaySeconds > 0)
-			parts.push(`${this.settings.syncStartupDelaySeconds}s after startup`);
+		parts.push("after opening");
 		return parts.length > 0 ? parts.join(", ") : "off";
 	}
 }

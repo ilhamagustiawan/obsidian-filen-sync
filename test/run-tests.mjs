@@ -967,7 +967,6 @@ test("SyncCoordinator offline awareness and error notice throttling", async () =
 				syncPaused: false,
 				syncOnSave: true,
 				syncIntervalMinutes: 5,
-				syncStartupDelaySeconds: 0,
 			},
 			() => ({ checkConnect: async () => {}, close: () => {} }),
 			() => ({}),
@@ -1226,6 +1225,15 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 				.minimumAutoSyncIntervalSeconds,
 			30,
 		);
+
+		for (const legacyDelay of [0, 5, 60]) {
+			assert.equal(
+				"syncStartupDelaySeconds" in
+					FilenSyncSettings.fromSaved({ syncStartupDelaySeconds: legacyDelay }),
+				false,
+			);
+		}
+		assert.equal("syncStartupDelaySeconds" in DEFAULT_SETTINGS, false);
 
 		const parsedFull = FilenSyncSettings.fromSaved({ statusBarIndicatorStyle: "full" });
 		assert.equal(parsedFull.statusBarIndicatorStyle, "full");

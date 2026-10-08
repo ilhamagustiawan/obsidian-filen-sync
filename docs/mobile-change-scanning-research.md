@@ -10,15 +10,15 @@ Retain manual/initial/preview verification, periodic missed-event detection, and
 
 ## 1. What is already implemented
 
-| Existing mechanism | Actual behavior and limit |
-| --- | --- |
-| Vault inventory | `walkLocal()` uses `getAllLoadedFiles()` rather than recursively listing disk directories. Obsidian documents this method as returning files and folders. Replacing it with an adapter traversal would not remove the current hashing bottleneck. [F-engine][O-api] |
-| Hash reuse | `LocalHashCache` reuses SHA-256 only for the same `TFile` object, mtime, ctime, size, and an age under **five minutes**. Vault events invalidate paths, including same-stat edits. Forced scans bypass reuse. [F-cache][F-coordinator] |
-| Edit hints | Create/modify/delete/rename events populate a revisioned pending-path map; rename includes old and new paths. Eligible automatic runs read hinted files and their baselines only. [F-coordinator][F-engine] |
-| Narrow-pass safety | Narrow mode requires fresh local/remote snapshots, a successful no-change remote probe, file-only hints, no force flag, and no replan. Folder changes, stale caches, remote changes, and probe errors fall back to full reconciliation. [F-engine][F-tests] |
-| Remote tree cache | Current source uses **five minutes**, not the 30-minute value mentioned in an older plan. `checkEvents()` uses account events with `filter: "all"`; any nonempty result is treated as change. [F-engine][F-remote][F-old-plan] |
-| First-sync equality | Eligible no-baseline files with equal size/mtime compare local SHA-512 to validated Filen metadata; missing/invalid hashes fall back to downloading remote bytes. This optimization already exists. [F-engine][F-hash] |
-| Remote setup reductions | One-shot verified-root reuse, a scanned directory UUID index, and callback-scoped mutation sessions are already present. Do not propose these as new scan improvements. [F-remote] |
+| Existing mechanism      | Actual behavior and limit                                                                                                                                                                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Vault inventory         | `walkLocal()` uses `getAllLoadedFiles()` rather than recursively listing disk directories. Obsidian documents this method as returning files and folders. Replacing it with an adapter traversal would not remove the current hashing bottleneck. [F-engine][O-api] |
+| Hash reuse              | `LocalHashCache` reuses SHA-256 only for the same `TFile` object, mtime, ctime, size, and an age under **five minutes**. Vault events invalidate paths, including same-stat edits. Forced scans bypass reuse. [F-cache][F-coordinator]                              |
+| Edit hints              | Create/modify/delete/rename events populate a revisioned pending-path map; rename includes old and new paths. Eligible automatic runs read hinted files and their baselines only. [F-coordinator][F-engine]                                                         |
+| Narrow-pass safety      | Narrow mode requires fresh local/remote snapshots, a successful no-change remote probe, file-only hints, no force flag, and no replan. Folder changes, stale caches, remote changes, and probe errors fall back to full reconciliation. [F-engine][F-tests]         |
+| Remote tree cache       | Current source uses **five minutes**, not the 30-minute value mentioned in an older plan. `checkEvents()` uses account events with `filter: "all"`; any nonempty result is treated as change. [F-engine][F-remote][F-old-plan]                                      |
+| First-sync equality     | Eligible no-baseline files with equal size/mtime compare local SHA-512 to validated Filen metadata; missing/invalid hashes fall back to downloading remote bytes. This optimization already exists. [F-engine][F-hash]                                              |
+| Remote setup reductions | One-shot verified-root reuse, a scanned directory UUID index, and callback-scoped mutation sessions are already present. Do not propose these as new scan improvements. [F-remote]                                                                                  |
 
 ### Why mobile wakeups are expensive
 
@@ -103,18 +103,18 @@ Remote account events also trigger conservative full rescans even when unrelated
 
 Extend the existing benchmark and safety fixtures with these workloads. Existing fixtures use mocked Obsidian/Filen objects and are not device throughput evidence. [F-bench][F-tests]
 
-| Workload | Proposed acceptance evidence |
-| --- | --- |
-| Foreground after 30 seconds, unchanged vault | One coalesced reconciliation; zero local content reads while hashes are valid; explicit remote-cache/probe decision. |
-| Three-minute interval, unchanged vault | Full path inventory without forced content reads for valid entries; overdue entries still verified. |
-| One-file edit in a large vault | Read/hash the changed file only in eligible narrow mode; compare actual mode, baseline calls, and unrelated reads. |
-| Same-stat edit with event | Event invalidation forces verification even when metadata matches. |
-| Same-stat edit without event | Finite verification deadline discovers it; foreground does not refresh the deadline without reading bytes. |
-| Cold start / expired hashes / manual / preview | Content verification remains fresh; compare serial versus bounded hashing and peak bytes. |
-| First sync with mostly identical content | Eligible candidates read local bytes once for both hashes, make no remote-content downloads, and establish a consistent baseline. |
-| Remote change / event failure / folder rename / cache expiry | Conservative fallback; plans match a full fresh reconciliation. |
-| Edit during scan or failed worker | Drain in-flight work, reject/replan as required, and do not publish a partial or stale snapshot. |
-| Large attachments plus many notes | Enforced memory budget; no unbounded read/decrypt launch added by plugin changes. |
+| Workload                                                     | Proposed acceptance evidence                                                                                                      |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Foreground after 30 seconds, unchanged vault                 | One coalesced reconciliation; zero local content reads while hashes are valid; explicit remote-cache/probe decision.              |
+| Three-minute interval, unchanged vault                       | Full path inventory without forced content reads for valid entries; overdue entries still verified.                               |
+| One-file edit in a large vault                               | Read/hash the changed file only in eligible narrow mode; compare actual mode, baseline calls, and unrelated reads.                |
+| Same-stat edit with event                                    | Event invalidation forces verification even when metadata matches.                                                                |
+| Same-stat edit without event                                 | Finite verification deadline discovers it; foreground does not refresh the deadline without reading bytes.                        |
+| Cold start / expired hashes / manual / preview               | Content verification remains fresh; compare serial versus bounded hashing and peak bytes.                                         |
+| First sync with mostly identical content                     | Eligible candidates read local bytes once for both hashes, make no remote-content downloads, and establish a consistent baseline. |
+| Remote change / event failure / folder rename / cache expiry | Conservative fallback; plans match a full fresh reconciliation.                                                                   |
+| Edit during scan or failed worker                            | Drain in-flight work, reject/replan as required, and do not publish a partial or stale snapshot.                                  |
+| Large attachments plus many notes                            | Enforced memory budget; no unbounded read/decrypt launch added by plugin changes.                                                 |
 
 Record device, OS, Obsidian version, vault file count/bytes, included attachment distribution, network conditions, trigger, actual mode, per-stage wall time, read/hash counts, UI responsiveness, and peak in-flight bytes. Compare identical workloads before/after. Do not claim a device speedup until measured.
 

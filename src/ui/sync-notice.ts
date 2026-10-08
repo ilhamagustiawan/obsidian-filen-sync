@@ -1,6 +1,11 @@
 import { Notice, setIcon } from "obsidian";
 import type { StatusBarState } from "../sync/coordinator";
-import { formatFilename, formatSyncProgress, formatTransferDetails } from "./sync-presentation";
+import {
+	formatFilename,
+	formatSyncProgress,
+	formatTransferDetails,
+	transferPercent,
+} from "./sync-presentation";
 
 export class SyncNoticeController {
 	private activeNotice: Notice | null = null;
@@ -48,7 +53,7 @@ export class SyncNoticeController {
 			return;
 		}
 
-		// Automatic compact notices are retired; ribbon icon is the only automatic mobile status surface.
+		// Automatic progress uses the compact mobile row; this notice is explicit details only.
 	}
 
 	showOnDemand(state: StatusBarState): void {
@@ -329,15 +334,13 @@ export class SyncNoticeController {
 		this.iconSpan.addClass("filen-notice-spin");
 
 		const progress = state.progress;
-		const total = progress?.phase === "transferring" ? (progress.total ?? 0) : 0;
-		const current = progress?.current ?? 0;
+		const percent = transferPercent(progress);
 		const path = progress?.path ?? "";
 
-		this.titleEl.setText("Filen Sync");
+		this.titleEl.setText(percent === 100 ? "Finishing sync…" : "Filen Sync");
 
-		if (total > 0 && progress) {
-			const boundedCurrent = Math.min(current, total);
-			const pct = Math.min(100, Math.max(0, Math.round((boundedCurrent / total) * 100)));
+		if (percent !== null && progress) {
+			const pct = percent;
 			this.badgeEl.setText(`${pct}%`);
 			this.barFill.removeClass("is-indeterminate");
 			this.barFill.style.width = `${pct}%`;

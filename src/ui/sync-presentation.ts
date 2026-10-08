@@ -1,12 +1,22 @@
 import type { SyncProgress } from "../sync/types";
 
-export const shouldShowMobileSyncIndicator = (_isMobile = false, _enabled = false): boolean =>
-	false;
+export const shouldShowMobileSyncIndicator = (isMobile = false, enabled = false): boolean =>
+	isMobile && enabled;
 
 export const shouldShowFloatingIndicator = shouldShowMobileSyncIndicator;
 
 export const shouldShowAutomaticProgressNotice = (_isMobile = false, _enabled = false): boolean =>
 	false;
+
+/** Transfer progress is not whole-run completion; byte totals include in-flight work. */
+export function transferPercent(progress?: SyncProgress): number | null {
+	if (progress?.phase !== "transferring") return null;
+	const useBytes = Number.isFinite(progress.totalBytes) && (progress.totalBytes ?? 0) > 0;
+	const total = useBytes ? progress.totalBytes! : progress.total;
+	const current = useBytes ? (progress.completedBytes ?? 0) : progress.current;
+	if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(current)) return null;
+	return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
 
 export function formatBytes(bytes: number): string {
 	if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";

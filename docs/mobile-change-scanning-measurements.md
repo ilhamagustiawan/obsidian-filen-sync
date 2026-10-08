@@ -10,10 +10,10 @@ policy defaults are enabled.
 
 Workload B - first sync of 100 identical files (1 ms controlled remote latency):
 
-| Revision | Local planning reads | Remote equality downloads | Result |
-| --- | --- | --- | --- |
-| Before (local hash read + separate SHA-512 read, fallback downloads) | 200 | 100 | 100 files downloaded to verify |
-| After (one stable read per file computes SHA-256 + SHA-512) | **100** | **0** | identical, no downloads |
+| Revision                                                             | Local planning reads | Remote equality downloads | Result                         |
+| -------------------------------------------------------------------- | -------------------- | ------------------------- | ------------------------------ |
+| Before (local hash read + separate SHA-512 read, fallback downloads) | 200                  | 100                       | 100 files downloaded to verify |
+| After (one stable read per file computes SHA-256 + SHA-512)          | **100**              | **0**                     | identical, no downloads        |
 
 Both fingerprints always refer to the same verified bytes. Absent/invalid remote
 hashes keep the download fallback, which still recognizes identical content
@@ -24,10 +24,10 @@ without falsely declaring identity.
 Workload D - cold re-verification of 200 files (2 KiB each, 1 ms controlled
 latency, `maxWorkers: 2`, `maxInFlightBytes: 8 MiB` accounted):
 
-| Mode | Elapsed | Local reads | Peak workers | Peak in-flight (accounted) |
-| --- | --- | --- | --- | --- |
-| Serial hashing | 11.2 ms | 200 | 1 | — |
-| Byte-bounded concurrent hashing | **7.1 ms** | 200 | 2 | 0.0 MiB (sub-budget files) |
+| Mode                            | Elapsed    | Local reads | Peak workers | Peak in-flight (accounted) |
+| ------------------------------- | ---------- | ----------- | ------------ | -------------------------- |
+| Serial hashing                  | 11.2 ms    | 200         | 1            | —                          |
+| Byte-bounded concurrent hashing | **7.1 ms** | 200         | 2            | 0.0 MiB (sub-budget files) |
 
 One-file auto-sync under the pool: 1 planning read, ~2 ms, no regression.
 

@@ -1,3 +1,108 @@
+/* Mobile status owns a small row below the view header, never the global status bar. */
+.filen-mobile-sync-row {
+	display: flex;
+	flex: 0 0 auto;
+	justify-content: flex-end;
+	align-items: center;
+	gap: 4px;
+	padding: 0 8px 4px;
+	min-width: 0;
+}
+
+.filen-mobile-sync-chip {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	min-height: 44px;
+	max-width: 360px;
+	padding: 8px 12px;
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: none;
+	overflow: hidden;
+}
+
+.filen-mobile-sync-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.filen-mobile-sync-icon {
+	display: inline-flex;
+	flex-shrink: 0;
+}
+
+.filen-mobile-sync-row[data-kind="syncing"] .filen-mobile-sync-chip {
+	color: var(--interactive-accent);
+}
+
+.filen-mobile-sync-row[data-kind="warning"] .filen-mobile-sync-chip {
+	color: var(--text-warning);
+}
+
+.filen-mobile-sync-row[data-kind="error"] .filen-mobile-sync-chip {
+	color: var(--text-error);
+}
+
+.filen-mobile-sync-bar {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	height: 2px;
+	background: var(--background-modifier-border);
+}
+
+.filen-mobile-sync-bar::after {
+	content: "";
+	display: block;
+	height: 100%;
+	width: var(--filen-progress, 35%);
+	background: var(--interactive-accent);
+}
+
+.filen-mobile-sync-bar.is-indeterminate::after {
+	animation: filen-mobile-progress 1.4s ease-in-out infinite alternate;
+}
+
+.filen-mobile-sync-dismiss {
+	min-width: 44px;
+	min-height: 44px;
+	padding: 8px;
+	color: var(--text-muted);
+	background: transparent;
+	box-shadow: none;
+}
+
+.filen-mobile-sync-announcement {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+@keyframes filen-mobile-progress {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(180%);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.filen-mobile-sync-bar.is-indeterminate::after {
+		animation: none;
+	}
+}
+
 .filen-sync-status-item.is-mobile-hidden {
 	display: none;
 }

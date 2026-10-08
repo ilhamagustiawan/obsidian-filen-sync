@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 let presentation;
-test("sync presentation disables automatic mobile overlays in favor of quiet ribbon icon", async () => {
+test("sync presentation enables only the mobile chip and keeps automatic notices disabled", async () => {
 	await mkdir(resolve("tmp"), { recursive: true });
 	const dir = await mkdtemp(resolve("tmp/sync-indicator-"));
 	try {
@@ -20,7 +20,7 @@ test("sync presentation disables automatic mobile overlays in favor of quiet rib
 		});
 		presentation = await import(pathToFileURL(outfile).href);
 		assert.equal(presentation.shouldShowMobileSyncIndicator(false, true), false);
-		assert.equal(presentation.shouldShowMobileSyncIndicator(true, true), false);
+		assert.equal(presentation.shouldShowMobileSyncIndicator(true, true), true);
 		assert.equal(presentation.shouldShowMobileSyncIndicator(true, false), false);
 		assert.equal(presentation.shouldShowAutomaticProgressNotice(false, true), false);
 		assert.equal(presentation.shouldShowAutomaticProgressNotice(true, true), false);
@@ -31,6 +31,31 @@ test("sync presentation disables automatic mobile overlays in favor of quiet rib
 });
 
 test("sync presentation labels phases and only reports valid transfer totals", () => {
+	assert.equal(
+		presentation.transferPercent({ phase: "scanning-local", current: 2, total: 2 }),
+		null,
+	);
+	assert.equal(
+		presentation.transferPercent({ phase: "transferring", current: 1, total: 0 }),
+		null,
+	);
+	assert.equal(
+		presentation.transferPercent({ phase: "transferring", current: NaN, total: 10 }),
+		null,
+	);
+	assert.equal(
+		presentation.transferPercent({ phase: "transferring", current: 1, total: Infinity }),
+		null,
+	);
+	assert.equal(
+		presentation.transferPercent({ phase: "transferring", current: -1, total: 10 }),
+		0,
+	);
+	assert.equal(
+		presentation.transferPercent({ phase: "transferring", current: 12, total: 10 }),
+		100,
+	);
+	assert.equal(presentation.transferPercent({ phase: "transferring", current: 1, total: 2 }), 50);
 	assert.equal(
 		presentation.formatSyncProgress({ phase: "scanning-local", current: 0, total: 0 }),
 		"Scanning local files",
@@ -287,7 +312,7 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 		assert.match(countEl.textContent, /1\.0 KB\/8\.0 KB/);
 		assert.match(countEl.textContent, /^Syncing · /);
 		assert.doesNotMatch(countEl.textContent, /Last synced/);
-		assert.equal(notice.noticeEl.children[0].children[0].children[1].textContent, "0%");
+		assert.equal(notice.noticeEl.children[0].children[0].children[1].textContent, "13%");
 		assert.equal(notice.noticeEl.children[0].children[3].textContent, "Last synced 1m ago");
 
 		// 3. Coalescing to 10 Hz (100 ms) while on-demand notice is active

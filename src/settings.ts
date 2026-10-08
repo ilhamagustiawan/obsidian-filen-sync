@@ -44,7 +44,6 @@ export type FilenSyncSettings = {
 	syncOnSaveDelaySeconds: number;
 	minimumAutoSyncIntervalSeconds: number;
 	syncIntervalMinutes: number;
-	syncStartupDelaySeconds: number;
 	syncPaused: boolean;
 	statusBarIndicatorStyle: "icon" | "full";
 	syncProgressNoticeMode: SyncProgressNoticeMode;
@@ -73,7 +72,6 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	syncOnSaveDelaySeconds: 2,
 	minimumAutoSyncIntervalSeconds: 10,
 	syncIntervalMinutes: 3,
-	syncStartupDelaySeconds: 0,
 	syncPaused: false,
 	statusBarIndicatorStyle: "icon",
 	syncProgressNoticeMode: "never",
@@ -146,10 +144,6 @@ export const FilenSyncSettings = {
 			syncIntervalMinutes: readNumber(
 				value.syncIntervalMinutes,
 				DEFAULT_SETTINGS.syncIntervalMinutes,
-			),
-			syncStartupDelaySeconds: readNumber(
-				value.syncStartupDelaySeconds,
-				DEFAULT_SETTINGS.syncStartupDelaySeconds,
 			),
 			syncPaused: readBoolean(value.syncPaused, DEFAULT_SETTINGS.syncPaused),
 			statusBarIndicatorStyle: value.statusBarIndicatorStyle === "full" ? "full" : "icon",
@@ -399,7 +393,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			"Auto-sync",
 			this.plugin.settings.reconciliationNeeded
 				? "Automatic sync is paused until a successful full two-way sync reconciles an interrupted transfer."
-				: "Optional background sync triggers.",
+				: "Sync checks automatically after opening. Save and interval triggers are optional.",
 		);
 
 		new Setting(section)
@@ -411,6 +405,19 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 					this.plugin.refreshAutoSync();
 				}),
+			);
+
+		new Setting(section)
+			.setName("Show mobile sync progress")
+			.setDesc("Show a compact progress indicator below the note header on mobile.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showFloatingSyncIndicator)
+					.onChange(async (value) => {
+						this.plugin.settings.showFloatingSyncIndicator = value;
+						await this.plugin.saveSettings();
+						this.plugin.refreshFloatingIndicator();
+					}),
 			);
 
 		new Setting(section)
@@ -503,23 +510,6 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 						this.plugin.settings.syncIntervalMinutes = value;
 						await this.plugin.saveSettings();
 						this.plugin.refreshAutoSync();
-					}),
-			);
-
-		new Setting(section)
-			.setName("Sync after startup")
-			.setDesc("Set 0 to disable.")
-			.addText((text) =>
-				text
-					.setPlaceholder("0")
-					.setValue(String(this.plugin.settings.syncStartupDelaySeconds))
-					.onChange(async (value) => {
-						const parsed = Number.parseInt(value, 10);
-						if (Number.isFinite(parsed) && parsed >= 0) {
-							this.plugin.settings.syncStartupDelaySeconds = parsed;
-							await this.plugin.saveSettings();
-							this.plugin.refreshAutoSync();
-						}
 					}),
 			);
 

@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-filen-sync",
-	"version": "1.4.0",
+	"version": "1.5.0",
 	"description": "Sync your Obsidian vault with Filen using a direct folder mirror, optional auto-sync, conflict copies, and file versions.",
 	"keywords": [],
 	"homepage": "https://github.com/ilhamagustiawan/obsidian-filen-sync#readme",
@@ -24,7 +24,7 @@
 		"lint:fix": "oxlint --fix",
 		"fmt": "oxfmt",
 		"fmt:check": "oxfmt --check",
-		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs test/remote-fs.test.mjs test/scan-policy.test.mjs"
+		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/mobile-sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs test/remote-fs.test.mjs test/scan-policy.test.mjs"
 	},
 	"dependencies": {
 		"@filen/sdk": "0.4.2",

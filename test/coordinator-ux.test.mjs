@@ -5,7 +5,7 @@ import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-async function fixture(run) {
+async function fixture(run, options = {}) {
 	await mkdir(resolve("tmp"), { recursive: true });
 	const dir = await mkdtemp(resolve("tmp/coordinator-ux-"));
 	const oldWindow = globalThis.window;
@@ -68,12 +68,13 @@ async function fixture(run) {
 			minimumAutoSyncIntervalSeconds: 10,
 			syncPaused: false,
 			syncIntervalMinutes: 3,
-			syncStartupDelaySeconds: 0,
 			ignorePatterns: [],
 			skipLargeFiles: false,
 			skipSizeLargerThanMB: 50,
+			...options.settings,
 		};
 		const activities = [];
+		const openingChecks = [];
 		const vaultFiles = [];
 		coordinator = new SyncCoordinator(
 			{
@@ -94,6 +95,8 @@ async function fixture(run) {
 			() => ({}),
 			{
 				onStatusChange: (s) => states.push(s),
+				onOpeningCheckChange: (s) => openingChecks.push(s),
+				getAutoSyncBlockReason: options.blockReason,
 				onLogActivity: (msg) => activities.push(msg),
 				confirmLocalDeletes: async () => true,
 				confirmBulkOperations: async () => true,
@@ -105,9 +108,13 @@ async function fixture(run) {
 			invalidateLocal: () => {},
 			close: () => {},
 		};
-		coordinator.setupAutoSync(() => true);
+		// Most tests isolate later events; opening scheduling has dedicated coverage below.
+		coordinator.startupInitialized = !options.startup;
+		coordinator.setupAutoSync(() => options.hasAuth ?? true);
 		await run({
 			coordinator,
+			settings,
+			openingChecks,
 			events,
 			states,
 			file,
@@ -138,6 +145,105 @@ test("pending changes deduplicate, keep status neutral idle, and clear after suc
 		assert.equal(coordinator.pendingCount, 0);
 		assert.equal(states.at(-1).kind, "success");
 	}));
+
+test("opening schedules one routine check even with save and interval disabled", () =>
+	fixture(
+		async ({ coordinator, timers, openingChecks, states }) => {
+			assert.equal(timers.size, 1);
+			assert.equal([...timers.values()][0].ms, 1000);
+			assert.equal(openingChecks.at(-1).kind, "scheduled");
+			let calls = 0;
+			coordinator.syncEngine.sync = async (_p, _c, _a, _d, _b, _x, options) => {
+				calls++;
+				assert.equal(options.fullScan, false);
+				assert.equal(options.initialSync, undefined);
+				return { applied: 0, conflicts: 0 };
+			};
+			await runNextDebounce(timers);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(calls, 1);
+			assert.equal(states.at(-1).syncCompleted, true);
+			assert.equal(openingChecks.at(-1).kind, "cleared");
+			coordinator.refreshAutoSync(() => true);
+			assert.equal(timers.size, 0, "settings refresh does not rearm startup");
+		},
+		{ startup: true, settings: { syncOnSave: false, syncIntervalMinutes: 0 } },
+	));
+
+test("manual sync consumes an opening check; focus and visibility do not add a duplicate", () =>
+	fixture(
+		async ({ coordinator, timers, domListeners, openingChecks }) => {
+			await domListeners.get("w-focus")();
+			await domListeners.get("d-visibilitychange")();
+			assert.equal(timers.size, 1);
+			let calls = 0;
+			coordinator.syncEngine.sync = async () => {
+				calls++;
+				await domListeners.get("w-focus")();
+				return { applied: 0, conflicts: 0 };
+			};
+			await coordinator.runSync("Sync", "both", { isManual: true });
+			assert.equal(calls, 1);
+			assert.equal(timers.size, 0);
+			assert.equal(openingChecks.at(-1).kind, "cleared");
+		},
+		{ startup: true },
+	));
+
+test("opening checks respect pause, credentials, and recovery holds", async () => {
+	for (const options of [
+		{ settings: { syncPaused: true }, expected: "Sync paused" },
+		{ hasAuth: false, expected: "Connect Filen to sync" },
+		{ blockReason: () => "Transfer recovery needed", expected: "Transfer recovery needed" },
+	]) {
+		await fixture(
+			async ({ timers, openingChecks }) => {
+				assert.equal(timers.size, 0);
+				assert.deepEqual(openingChecks.at(-1), { kind: "blocked", text: options.expected });
+			},
+			{ ...options, startup: true },
+		);
+	}
+});
+
+test("offline opening recovers on reconnect without optional triggers", async () => {
+	const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+	const network = { onLine: false };
+	Object.defineProperty(globalThis, "navigator", { configurable: true, value: network });
+	try {
+		await fixture(
+			async ({ coordinator, timers, domListeners, openingChecks }) => {
+				assert.equal(timers.size, 0);
+				assert.equal(openingChecks.at(-1).kind, "blocked");
+				network.onLine = true;
+				// An offline save may already have left queued work without a live timer.
+				coordinator.pendingAutoSync = true;
+				await domListeners.get("w-online")();
+				assert.equal(timers.size, 1);
+				assert.equal(openingChecks.at(-1).kind, "scheduled");
+				await runNextDebounce(timers);
+				await new Promise((resolve) => setImmediate(resolve));
+				assert.equal(openingChecks.at(-1).kind, "cleared");
+				coordinator.close();
+				assert.equal(timers.size, 0);
+			},
+			{ startup: true, settings: { syncOnSave: false, syncIntervalMinutes: 0 } },
+		);
+	} finally {
+		if (original) Object.defineProperty(globalThis, "navigator", original);
+		else delete globalThis.navigator;
+	}
+});
+
+test("unload cancels the opening timer", () =>
+	fixture(
+		async ({ coordinator, timers, openingChecks }) => {
+			coordinator.close();
+			assert.equal(timers.size, 0);
+			assert.equal(openingChecks.at(-1).kind, "cleared");
+		},
+		{ startup: true },
+	));
 test("edit during sync stays queued and leaves status in neutral idle", () =>
 	fixture(async ({ coordinator, events, states, file }) => {
 		events.get("modify")(file);
@@ -417,10 +523,10 @@ test("conflicts in vault produce persistent warning, informative notice, and cle
 	}));
 
 const runNextDebounce = async (timers) => {
-	const debounce = [...timers.values()].find((t) => t.ms > 0);
-	if (!debounce) return false;
-	timers.delete(debounce);
-	await debounce.fn();
+	const entry = [...timers.entries()].find(([, timer]) => timer.ms > 0);
+	if (!entry) return false;
+	timers.delete(entry[0]);
+	await entry[1].fn();
 	return true;
 };
 

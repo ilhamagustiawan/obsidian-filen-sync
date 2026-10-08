@@ -12,7 +12,7 @@ test("initial command requests verified two-way sync and preserves warning state
 		await writeFile(
 			stub,
 			`export class Plugin {constructor(app,manifest){this.app=app;this.manifest=manifest;this.commands=[];}register(){} registerEvent(){} addSettingTab(){} addStatusBarItem(){return null;} addRibbonIcon(){return {addClass(){},setAttr(){}};} addCommand(command){this.commands.push(command);}}
-  export class Modal {} export class Notice {} export class PluginSettingTab {} export class Setting {} export class Menu {} export class TFile {} export class TFolder {}
+  export class ItemView {} export class Modal {} export class Notice {} export class PluginSettingTab {} export class Setting {} export class Menu {} export class TFile {} export class TFolder {}
   export const Platform={isMobile:true}; export const setIcon=()=>{}; export const setTooltip=()=>{}; export const normalizePath=p=>p; export const requestUrl=()=>{throw Error('No network');};`,
 		);
 		const sdk = join(dir, "sdk.mjs");
