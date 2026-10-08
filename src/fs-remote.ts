@@ -1,9 +1,16 @@
+import { scopeTrash, type DeletedItem } from "./sync/trash-scope";
+import type { DeletedMapping } from "./db";
+export type { DeletedItem } from "./sync/trash-scope";
 import { FilenSDK } from "@filen/sdk";
 import { createObsidianAxiosLike } from "./obsidian-axios-adapter";
 import type { FilenAuth } from "./settings";
 import { downloadFileChunks, uploadFileChunks } from "./sync/chunk-transfers";
 import { isValidFilenSha512, normalizeFilenHash } from "./sync/content-hash";
-import { validateRemoteRoot, validateSyncPath } from "./sync/path-validation";
+import {
+	assertNoPathCollisions,
+	validateRemoteRoot,
+	validateSyncPath,
+} from "./sync/path-validation";
 
 export type RemoteEntry = {
 	path: string;
@@ -27,6 +34,8 @@ export type RemoteFileVersion = {
 };
 
 export type RemoteFs = {
+	listDeleted?(mappings: DeletedMapping[]): Promise<DeletedItem[]>;
+	restoreDeleted?(item: DeletedItem, mappings: DeletedMapping[]): Promise<void>;
 	walk(options?: { noCreate?: boolean }): Promise<RemoteEntry[]>;
 	readFile(
 		path: string,
@@ -522,6 +531,91 @@ export class FilenRemoteFs implements RemoteFs {
 			remoteHash,
 			version: typeof file.version === "number" ? file.version : undefined,
 		};
+	}
+
+	async listDeleted(mappings: DeletedMapping[]): Promise<DeletedItem[]> {
+		const identity = await this.getTargetIdentity({ noCreate: true });
+		const client = await this.getClient();
+		const items = await client.cloud().listTrash();
+		const parents = new Map<
+			string,
+			Promise<{ parent: string; name: string; trash: boolean } | undefined>
+		>();
+		return scopeTrash(
+			identity.rootUuid,
+			items.map((item) => ({
+				uuid: item.uuid,
+				parent: item.parent,
+				name: item.name,
+				isDir: item.type === "directory",
+				size: item.size,
+				deletedAt: normalizeRemoteTimestampMs(item.timestamp),
+			})),
+			mappings,
+			(uuid) => {
+				let request = parents.get(uuid);
+				if (!request) {
+					request = client
+						.cloud()
+						.getDirectory({ uuid })
+						.then((dir) => ({
+							parent: dir.parent,
+							name: dir.metadataDecrypted.name,
+							trash: dir.trash,
+						}))
+						.catch(() => undefined);
+					parents.set(uuid, request);
+				}
+				return request;
+			},
+		);
+	}
+
+	async restoreDeleted(item: DeletedItem, mappings: DeletedMapping[]): Promise<void> {
+		const current = (await this.listDeleted(mappings)).find(
+			(entry) => entry.uuid === item.uuid,
+		);
+		if (
+			!current ||
+			current.path !== item.path ||
+			current.parent !== item.parent ||
+			current.name !== item.name ||
+			current.isDir !== item.isDir
+		)
+			throw new Error(
+				"Deleted item changed or no longer belongs to this vault. Refresh the list.",
+			);
+		if (current.parentMissing)
+			throw new Error(
+				"Restore the original parent folder in Filen first, then refresh this list.",
+			);
+		const inventory = await this.walk({ noCreate: true });
+		assertNoPathCollisions([
+			...inventory.map((entry) => ({ path: entry.path, isDir: entry.isDir })),
+			{ path: item.path, isDir: item.isDir },
+		]);
+		const client = await this.getClient();
+		client.init(client.config);
+		configureSdkRetryBounds(client);
+		const parentPath = item.path.split("/").slice(0, -1).join("/");
+		const parent = await client
+			.fs()
+			.pathToItemUUID({ path: this.join(parentPath), type: "directory" });
+		if (parent !== item.parent)
+			throw new Error(
+				"Original parent moved or was replaced. Restore its original location in Filen first.",
+			);
+		const occupied =
+			(await client.fs().pathToItemUUID({ path: this.join(item.path), type: "file" })) ??
+			(await client.fs().pathToItemUUID({ path: this.join(item.path), type: "directory" }));
+		if (occupied !== null)
+			throw new Error("The destination is occupied. Move it before restoring.");
+		if (item.isDir) await client.cloud().restoreDirectory({ uuid: item.uuid });
+		else await client.cloud().restoreFile({ uuid: item.uuid });
+		client.init(client.config);
+		configureSdkRetryBounds(client);
+		this.scannedDirectoryUuids = null;
+		this.verifiedRootForSync = null;
 	}
 
 	async getFileVersions(path: string): Promise<RemoteFileVersion[]> {

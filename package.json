@@ -24,13 +24,15 @@
 		"lint:fix": "oxlint --fix",
 		"fmt": "oxfmt",
 		"fmt:check": "oxfmt --check",
-		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/mobile-sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs test/remote-fs.test.mjs test/scan-policy.test.mjs"
+		"test": "node --test test/run-tests.mjs test/sync-ux.test.mjs test/coordinator-ux.test.mjs test/initial-sync.test.mjs test/transfer-progress.test.mjs test/sync-indicator.test.mjs test/mobile-sync-indicator.test.mjs test/activity-logs.test.mjs test/benchmark-workloads.test.mjs test/remote-fs.test.mjs test/scan-policy.test.mjs test/conflict-history.test.mjs"
 	},
 	"dependencies": {
 		"@filen/sdk": "0.4.2",
+		"diff-match-patch": "1.0.5",
 		"localforage": "^1.10.0"
 	},
 	"devDependencies": {
+		"@types/diff-match-patch": "1.0.36",
 		"@types/node": "^20.19.43",
 		"esbuild": "^0.28.1",
 		"esbuild-plugin-polyfill-node": "^0.3.0",

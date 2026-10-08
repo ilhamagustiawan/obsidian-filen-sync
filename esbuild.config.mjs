@@ -1,5 +1,6 @@
 import esbuild from "esbuild";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import process from "process";
 import { polyfillNode } from "esbuild-plugin-polyfill-node";
 
@@ -15,7 +16,11 @@ const keyUtilsStubPath = path.resolve("stubs/js-crypto-key-utils/index.js");
 
 const context = await esbuild.context({
 	banner: {
-		js: banner,
+		js:
+			banner +
+			"\n/* diff-match-patch 1.0.5, Copyright 2018 The diff-match-patch Authors.\n" +
+			readFileSync("licenses/diff-match-patch.txt", "utf8") +
+			"\n*/\n",
 	},
 	entryPoints: ["src/main.ts"],
 	bundle: true,

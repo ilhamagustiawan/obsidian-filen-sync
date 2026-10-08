@@ -1,3 +1,7 @@
+import { selectedSettingsPaths } from "./sync/settings-paths";
+import { DeletedFilesModal } from "./ui/deleted-files-modal";
+import { ConflictResolverModal } from "./ui/conflict-resolver-modal";
+import { syncIconPresentation } from "./ui/sync-presentation";
 import type { App, TAbstractFile } from "obsidian";
 import { Menu, Modal, Notice, Platform, Plugin, TFile, setIcon, setTooltip } from "obsidian";
 import {
@@ -33,11 +37,11 @@ import {
 	type StatusBarState,
 	type SyncRunResult,
 } from "./sync/coordinator";
-import { formatLastSyncSummary, formatSyncProgress } from "./ui/sync-presentation";
+import { formatLastSyncSummary } from "./ui/sync-presentation";
 import { SyncNoticeController } from "./ui/sync-notice";
 import { MobileSyncIndicator } from "./ui/mobile-sync-indicator";
 import { sha256Hex } from "./sync/executor";
-import { getOriginalPathFromConflictPath } from "./sync/conflict-utils";
+
 import { SyncPreviewModal } from "./ui/sync-preview-modal";
 import { DiagnosticHistoryModal } from "./ui/diagnostic-history-modal";
 import type { SyncDirection, SyncPreviewResult, TargetIdentityInfo } from "./sync/types";
@@ -55,6 +59,11 @@ const hasSavedVaultName = (value: unknown): value is { vaultName: string } =>
 export default class FilenSyncPlugin extends Plugin {
 	settings!: FilenSyncSettings;
 	private db: SyncDb | null = null;
+	private dbReadOnly = false;
+	private resolver: ConflictResolverModal | null = null;
+	private ownedModals = new Set<Modal>();
+	private reviewPending = false;
+	private reviewTimer: number | null = null;
 	private targetGeneration = 0;
 	private targetBindingKey: string | null = null;
 	private targetPreparation: Promise<void> | null = null;
@@ -119,6 +128,7 @@ export default class FilenSyncPlugin extends Plugin {
 			() => this.settings.showFloatingSyncIndicator,
 			() => this.showSyncProgressNoticeOnDemand(),
 			(event) => this.openStatusBarMenu(event),
+			() => this.iconModel(),
 		);
 
 		this.coordinator = new SyncCoordinator(
@@ -128,6 +138,7 @@ export default class FilenSyncPlugin extends Plugin {
 			() => this.getOrCreateRemoteFs(),
 			() => this.db,
 			{
+				onReviewConflicts: () => this.scheduleConflictReview(),
 				onOpeningCheckChange: (check) => this.mobileIndicator.onOpeningCheckChange(check),
 				getAutoSyncBlockReason: () =>
 					!this.hasSavedAuth()
@@ -171,32 +182,8 @@ export default class FilenSyncPlugin extends Plugin {
 			);
 		}
 
-		this.syncRibbonIconEl = this.addRibbonIcon(
-			"refresh-cw",
-			"Filen: sync menu",
-			(evt: MouseEvent) => {
-				if (Platform.isMobile) {
-					const bounds = this.syncRibbonIconEl?.getBoundingClientRect();
-					if (evt && evt.clientX && evt.clientY) {
-						this.openStatusBarMenu(evt);
-					} else if (bounds) {
-						this.openStatusBarMenuAt(bounds.left, bounds.bottom);
-					} else {
-						this.openStatusBarMenu(evt);
-					}
-					return;
-				}
-				if (this.coordinator.active) {
-					this.showSyncProgressNoticeOnDemand();
-				} else if (
-					this.statusBarState.kind === "warning" ||
-					this.coordinator.conflictCount > 0
-				) {
-					this.openStatusBarMenu(evt);
-				} else {
-					void this.syncNow();
-				}
-			},
+		this.syncRibbonIconEl = this.addRibbonIcon("refresh-cw", "Filen: sync menu", (evt) =>
+			this.openStatusBarMenu(evt),
 		);
 		this.syncRibbonIconEl.addClass("filen-sync-ribbon-sync");
 
@@ -220,19 +207,8 @@ export default class FilenSyncPlugin extends Plugin {
 		this.addCommand({
 			id: "review-conflicts",
 			name: "Review conflict files",
-			checkCallback: (checking: boolean) => {
-				const conflicts = this.coordinator?.getConflictFiles() ?? [];
-				if (checking) {
-					return conflicts.length > 0;
-				}
-				const first = conflicts[0];
-				if (first) {
-					void this.app.workspace.getLeaf(false).openFile(first);
-					new Notice(
-						`Opened ${first.name} (${conflicts.length} conflict file(s) in vault).`,
-					);
-				}
-				return true;
+			callback: () => {
+				void this.openConflictResolver();
 			},
 		});
 
@@ -360,6 +336,11 @@ export default class FilenSyncPlugin extends Plugin {
 
 	onunload() {
 		this.unloaded = true;
+		if (this.reviewTimer !== null) window.clearTimeout(this.reviewTimer);
+		this.reviewTimer = null;
+		this.reviewPending = false;
+		for (const modal of this.ownedModals) modal.close();
+		this.ownedModals.clear();
 		this.coordinator.close();
 		this.noticeController?.closeNotice();
 		this.mobileIndicator?.close();
@@ -524,6 +505,10 @@ export default class FilenSyncPlugin extends Plugin {
 		this.maybePromptForSetup();
 	}
 
+	refreshSyncConfiguration(): void {
+		this.coordinator.invalidateEngine();
+	}
+
 	async saveSettings() {
 		await this.saveData({ ...this.settings });
 	}
@@ -588,7 +573,12 @@ export default class FilenSyncPlugin extends Plugin {
 				identity.userId,
 				identity.rootUuid,
 			]);
-			if (this.db !== null && this.targetBindingKey === bindingKey) return;
+			if (
+				this.db !== null &&
+				this.targetBindingKey === bindingKey &&
+				(!this.dbReadOnly || options.readOnly)
+			)
+				return;
 			const db = await SyncDb.open(
 				{
 					vaultId: this.settings.vaultId,
@@ -606,6 +596,7 @@ export default class FilenSyncPlugin extends Plugin {
 				}
 				const previousDb = this.db;
 				this.db = db;
+				this.dbReadOnly = options.readOnly ?? false;
 				this.targetBindingKey = bindingKey;
 				await previousDb?.close();
 				this.coordinator.invalidateEngine();
@@ -991,17 +982,30 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private openVersionHistory(file: TFile): void {
+		void this.openVerifiedVersionHistory(file);
+	}
+
+	private async openVerifiedVersionHistory(file: TFile): Promise<void> {
 		try {
+			await this.prepareSyncTarget();
+			if (this.unloaded) return;
 			const remote = this.getOrCreateRemoteFs();
-			new FileVersionModal({
-				app: this.app,
-				remote,
-				filePath: file.path,
-				fileName: file.name,
-				onRestored: async () => {
-					await this.runRestoreSync();
-				},
-			}).open();
+			const db = this.db!;
+			this.openManagedModal(
+				new FileVersionModal({
+					db,
+					pluginId: this.manifest.id,
+					verifyTarget: () => this.verifyDialogTarget(db),
+					onLocalRestored: (path) => this.coordinator.queueResolvedChange(path),
+					app: this.app,
+					remote,
+					filePath: file.path,
+					fileName: file.name,
+					onRestored: async () => {
+						await this.runRestoreSync();
+					},
+				}),
+			);
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : "Failed to open version history.");
 		}
@@ -1057,169 +1061,173 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private buildStatusBarMenu(): Menu {
 		const menu = new Menu();
-		const conflictFiles = this.coordinator?.getConflictFiles() ?? [];
-		if (conflictFiles.length > 0) {
-			menu.addItem((item) =>
-				item
-					.setTitle(`⚠️ ${conflictFiles.length} conflict(s) to review`)
-					.setIcon("alert-circle")
-					.setDisabled(true),
+		const add = (
+			target: Menu,
+			title: string,
+			icon: string,
+			action: () => void,
+			disabled = false,
+		) =>
+			target.addItem((item) =>
+				item.setTitle(title).setIcon(icon).setDisabled(disabled).onClick(action),
 			);
-			for (const file of conflictFiles.slice(0, 5)) {
-				const originalPath = getOriginalPathFromConflictPath(file.path);
-				const originalName = originalPath.split("/").pop() ?? originalPath;
-				menu.addItem((item) => {
-					item.setTitle(`Review: ${originalName} (conflict copy)`);
-					item.setIcon("alert-triangle");
-					item.onClick(async () => {
-						await this.app.workspace.getLeaf(false).openFile(file);
-					});
-				});
-			}
-			if (conflictFiles.length > 5) {
-				menu.addItem((item) =>
-					item
-						.setTitle(`…and ${conflictFiles.length - 5} more conflict file(s)`)
-						.setDisabled(true),
-				);
-			}
-			menu.addSeparator();
-		}
-
-		if (this.coordinator.isReplanHeld) {
-			menu.addItem((item) =>
-				item
-					.setTitle("Sync needs review — select Sync now")
-					.setIcon("alert-circle")
-					.setDisabled(true),
-			);
-		} else {
-			menu.addItem((item) => item.setTitle(this.statusBarState.text).setDisabled(true));
-		}
-		menu.addItem((item) =>
-			item
-				.setTitle(`${this.coordinator.pendingCount} local changes pending`)
-				.setDisabled(true),
-		);
-		menu.addItem((item) => item.setTitle(this.lastSyncSummary()).setDisabled(true));
-		if (this.lastSyncResultSummary) {
-			menu.addItem((item) =>
-				item.setTitle(this.lastSyncResultSummary ?? "").setDisabled(true),
-			);
-		}
-		menu.addItem((item) => {
-			item.setTitle("Show sync progress");
-			item.setIcon("align-left");
-			item.onClick(() => this.showSyncProgressNoticeOnDemand());
-		});
-		menu.addSeparator();
-
-		if (this.statusBarState.kind === "syncing") {
-			menu.addItem((item) => {
-				item.setTitle("Open activity log");
-				item.setIcon("align-left");
-				item.onClick(() => {
-					this.openActivityLogs();
-				});
+		const count = this.coordinator.conflictCount;
+		if (count)
+			add(menu, `Review conflicts (${count})`, "triangle-alert", () => {
+				void this.openConflictResolver();
 			});
-		} else {
-			menu.addItem((item) => {
-				const title =
-					this.coordinator.isReplanHeld || this.statusBarState.kind === "error"
-						? "Retry now"
-						: this.statusBarState.kind === "warning"
-							? "Review and sync"
-							: "Sync now";
-				item.setTitle(title);
-				item.setIcon("refresh-cw");
-				item.onClick(() => {
-					void this.syncNow();
-				});
-			});
-			menu.addItem((item) => {
-				item.setTitle("Preview changes");
-				item.setIcon("eye");
-				item.onClick(() => {
-					this.previewChanges("both");
-				});
-			});
-			const activeFile = this.app.workspace.getActiveFile();
-			if (activeFile instanceof TFile) {
-				menu.addItem((item) => {
-					item.setTitle(`Force sync "${activeFile.name}"`);
-					item.setIcon("file-up");
-					item.onClick(() => {
-						void this.forceSyncFile(activeFile);
-					});
-				});
-			}
-			menu.addItem((item) => {
-				item.setTitle("Push local files");
-				item.setIcon("arrow-up");
-				item.onClick(() => {
-					void this.pushLocal();
-				});
-			});
-			menu.addItem((item) => {
-				item.setTitle("Pull remote files");
-				item.setIcon("arrow-down");
-				item.onClick(() => {
-					void this.pullRemote();
-				});
-			});
-			menu.addItem((item) => {
-				item.setTitle("Preview push (local → Filen)");
-				item.setIcon("arrow-up");
-				item.onClick(() => {
-					this.previewChanges("push");
-				});
-			});
-			menu.addItem((item) => {
-				item.setTitle("Preview pull (Filen → local)");
-				item.setIcon("arrow-down");
-				item.onClick(() => {
-					this.previewChanges("pull");
-				});
-			});
-		}
-
-		menu.addSeparator();
-		menu.addItem((item) => {
-			item.setTitle(this.settings.syncPaused ? "Resume auto-sync" : "Pause auto-sync");
-			item.setIcon(this.settings.syncPaused ? "circle-play" : "pause");
-			item.onClick(() => {
+		add(
+			menu,
+			this.settings.syncPaused ? "Resume" : "Pause",
+			this.settings.syncPaused ? "circle-play" : "circle-pause",
+			() => {
 				void this.coordinator.toggleSyncPaused(() => this.canAutoSync());
-			});
+			},
+		);
+		const active = this.app.workspace.getActiveFile();
+		add(
+			menu,
+			"Version history",
+			"history",
+			() => {
+				if (active) this.openVersionHistory(active);
+			},
+			!active || active.extension !== "md",
+		);
+		add(menu, "Open Sync log", "align-left", () => this.openActivityLogs());
+		add(menu, "Deleted files", "trash-2", () => {
+			void this.openDeletedFiles();
 		});
-
-		if (this.statusBarState.kind !== "syncing") {
-			menu.addItem((item) => {
-				item.setTitle("Open activity log");
-				item.setIcon("align-left");
-				item.onClick(() => {
-					this.openActivityLogs();
-				});
-			});
-			menu.addItem((item) => {
-				item.setTitle("Open diagnostic plan history");
-				item.setIcon("history");
-				item.onClick(() => {
-					this.openDiagnosticHistory();
-				});
-			});
-		}
-
+		add(menu, "Sync settings", "settings", () => this.openSettingsTab());
 		menu.addSeparator();
+		add(
+			menu,
+			"Sync now",
+			"refresh-cw",
+			() => {
+				void this.syncNow();
+			},
+			this.coordinator.active,
+		);
+		add(menu, "Show sync progress", "align-left", () => this.showSyncProgressNoticeOnDemand());
 		menu.addItem((item) => {
-			item.setTitle(
-				this.hasSavedAuth() ? "Open Obsidian Filen Sync settings" : "Connect Filen",
-			);
-			item.setIcon("settings");
-			item.onClick(() => {
-				this.openSettingsTab();
+			item.setTitle("Advanced").setIcon("sliders-horizontal");
+			const advanced = (item as unknown as { setSubmenu(): Menu }).setSubmenu();
+			add(advanced, "Preview changes", "eye", () => this.previewChanges("both"));
+			if (active)
+				add(advanced, `Force sync "${active.name}"`, "file-up", () => {
+					void this.forceSyncFile(active);
+				});
+			add(advanced, "Push local files", "arrow-up", () => {
+				void this.pushLocal();
 			});
+			add(advanced, "Pull remote files", "arrow-down", () => {
+				void this.pullRemote();
+			});
+			add(advanced, "Preview push (local → Filen)", "arrow-up", () =>
+				this.previewChanges("push"),
+			);
+			add(advanced, "Preview pull (Filen → local)", "arrow-down", () =>
+				this.previewChanges("pull"),
+			);
+			add(advanced, "Open diagnostic plan history", "history", () =>
+				this.openDiagnosticHistory(),
+			);
 		});
 		return menu;
+	}
+
+	private openManagedModal(modal: Modal): void {
+		this.ownedModals.add(modal);
+		const close = modal.onClose.bind(modal);
+		modal.onClose = () => {
+			this.ownedModals.delete(modal);
+			close();
+		};
+		modal.open();
+	}
+
+	private async verifyDialogTarget(db: SyncDb): Promise<void> {
+		await this.prepareSyncTarget();
+		if (this.unloaded || this.db?.targetKey !== db.targetKey)
+			throw new Error(
+				"Sync target changed. Close this dialog and reopen it for the current target.",
+			);
+	}
+
+	private async openDeletedFiles(): Promise<void> {
+		try {
+			await this.prepareSyncTarget(false, { readOnly: true });
+			if (!this.db || this.unloaded) return;
+			const db = this.db;
+			this.openManagedModal(
+				new DeletedFilesModal(
+					this.app,
+					this.getOrCreateRemoteFs(),
+					db,
+					(path) => {
+						this.coordinator.invalidateEngine();
+						this.coordinator.queueResolvedChange(path);
+					},
+					() => this.verifyDialogTarget(db),
+				),
+			);
+		} catch (e) {
+			new Notice(e instanceof Error ? e.message : "Could not open deleted files.");
+		}
+	}
+
+	private scheduleConflictReview(): void {
+		this.reviewPending = true;
+		if (this.reviewTimer !== null || this.unloaded) return;
+		this.reviewTimer = window.setTimeout(() => {
+			this.reviewTimer = null;
+			if (!this.reviewPending || this.unloaded) return;
+			const doc = typeof activeDocument === "undefined" ? document : activeDocument;
+			if (
+				doc.visibilityState === "hidden" ||
+				this.resolver ||
+				doc.querySelector(".modal-container")
+			) {
+				this.scheduleConflictReview();
+				return;
+			}
+			this.reviewPending = false;
+			void this.openConflictResolver();
+		}, 1000);
+	}
+
+	private async openConflictResolver(): Promise<void> {
+		if (this.resolver) return;
+		try {
+			await this.prepareSyncTarget();
+			if (!this.db || this.unloaded) return;
+			this.reviewPending = false;
+			const db = this.db;
+			this.resolver = new ConflictResolverModal({
+				verifyTarget: () => this.verifyDialogTarget(db),
+				app: this.app,
+				db,
+				pluginId: this.manifest.id,
+				files: () => this.coordinator.getConflictFiles(),
+				selectedSettings: selectedSettingsPaths(
+					this.app.vault.configDir,
+					this.manifest.id,
+					this.settings.syncSettings,
+					this.settings.selectedSettings,
+				),
+				onResolved: (path) => {
+					this.coordinator.queueResolvedChange(path);
+					this.updateStatusDisplays();
+				},
+				onClosed: () => {
+					this.resolver = null;
+				},
+			});
+			this.openManagedModal(this.resolver);
+		} catch (e) {
+			new Notice(e instanceof Error ? e.message : "Could not open conflict review.");
+		}
 	}
 
 	private maybePromptForSetup(): void {
@@ -1313,210 +1321,37 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private updateRibbonIcon(): void {
-		if (this.syncRibbonIconEl === null) return;
-		this.syncRibbonIconEl.removeClass(
-			"is-syncing",
-			"is-error",
-			"is-warning",
-			"is-pending",
-			"is-success",
-		);
-
-		if (this.statusBarState.kind === "syncing") {
-			this.syncRibbonIconEl.addClass("is-syncing");
-			setIcon(this.syncRibbonIconEl, "refresh-cw");
-			if (
-				this.statusBarState.progress?.phase === "transferring" &&
-				this.statusBarState.progress.total > 0
-			) {
-				const pct = Math.round(
-					(this.statusBarState.progress.current / this.statusBarState.progress.total) *
-						100,
-				);
-				const pathDetail = this.statusBarState.progress.path
-					? ` · ${this.statusBarState.progress.path.split("/").pop()}`
-					: "";
-				const tooltip = `Filen: Syncing ${this.statusBarState.progress.current}/${this.statusBarState.progress.total} (${pct}%)${pathDetail}\nSelect to open sync menu`;
-				setTooltip(this.syncRibbonIconEl, tooltip);
-				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			} else {
-				const tooltip = `Filen: ${this.statusBarState.text}\nSelect to open sync menu`;
-				setTooltip(this.syncRibbonIconEl, tooltip);
-				this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			}
-			return;
-		}
-
-		if (this.coordinator.isReplanHeld) {
-			this.syncRibbonIconEl.addClass("is-error");
-			setIcon(this.syncRibbonIconEl, "alert-circle");
-			const tooltip = "Filen: Sync needs review — select Sync now\nSelect to open sync menu";
-			setTooltip(this.syncRibbonIconEl, tooltip);
-			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "error") {
-			this.syncRibbonIconEl.addClass("is-error");
-			setIcon(this.syncRibbonIconEl, "alert-circle");
-			const tooltip = `Filen: Sync failed (${this.statusBarState.detail})\nSelect to open sync menu`;
-			setTooltip(this.syncRibbonIconEl, tooltip);
-			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "warning") {
-			this.syncRibbonIconEl.addClass("is-warning");
-			setIcon(
-				this.syncRibbonIconEl,
-				this.statusBarState.text.toLowerCase().includes("offline")
-					? "cloud-off"
-					: "alert-circle",
-			);
-			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}\nSelect to open sync menu`;
-			setTooltip(this.syncRibbonIconEl, tooltip);
-			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "pending" || this.coordinator.retryAt !== null) {
-			this.syncRibbonIconEl.addClass("is-pending");
-			setIcon(this.syncRibbonIconEl, "clock");
-			const tooltip = `Filen: ${this.statusBarState.text}\n${this.statusBarState.detail}\nSelect to open sync menu`;
-			setTooltip(this.syncRibbonIconEl, tooltip);
-			this.syncRibbonIconEl.setAttr("aria-label", tooltip);
-			return;
-		}
-
-		setIcon(this.syncRibbonIconEl, "refresh-cw");
-		const tooltip =
-			this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0
-				? `Filen: Up to date (${formatRelativeTime(this.lastSyncTimestamp)})\nSelect to open sync menu`
-				: "Filen: Select to open sync menu";
-		setTooltip(this.syncRibbonIconEl, tooltip);
-		this.syncRibbonIconEl.setAttr("aria-label", tooltip);
+		if (!this.syncRibbonIconEl) return;
+		const model = this.iconModel();
+		setIcon(this.syncRibbonIconEl, model.icon);
+		this.syncRibbonIconEl.setAttr("data-sync-state", model.state);
+		setTooltip(this.syncRibbonIconEl, `Filen: ${model.label}. Select to open sync menu`);
 	}
 
 	private renderStatusBar(): void {
-		if (
-			this.statusBarItemEl === null ||
-			this.statusBarIconEl === null ||
-			this.statusBarTextEl === null
-		)
-			return;
-		if (Platform.isMobile) {
-			this.statusBarItemEl.addClass("is-mobile-hidden");
-			return;
-		}
-		this.statusBarItemEl.removeClass("is-mobile-hidden");
-
-		this.statusBarItemEl.removeClass(
-			"is-idle",
-			"is-pending",
-			"is-syncing",
-			"is-success",
-			"is-warning",
-			"is-error",
+		if (!this.statusBarItemEl || !this.statusBarIconEl || !this.statusBarTextEl) return;
+		this.statusBarItemEl.toggleClass("is-mobile-hidden", Platform.isMobile);
+		this.statusBarItemEl.toggleClass(
+			"is-icon-only",
+			this.settings.statusBarIndicatorStyle === "icon",
 		);
-
-		if (this.settings.statusBarIndicatorStyle === "icon") {
-			this.statusBarItemEl.addClass("is-icon-only");
-		} else {
-			this.statusBarItemEl.removeClass("is-icon-only");
-		}
-
-		if (!this.hasSavedAuth()) {
-			setIcon(this.statusBarIconEl, "cloud-off");
-			this.statusBarTextEl.setText("Filen: disconnected");
-			this.statusBarItemEl.addClass("is-idle");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		if (this.settings.syncPaused && this.statusBarState.kind !== "syncing") {
-			setIcon(this.statusBarIconEl, "pause");
-			this.statusBarTextEl.setText("Filen: paused");
-			this.statusBarItemEl.addClass("is-warning");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		if (this.isOffline() && this.statusBarState.kind !== "syncing") {
-			setIcon(this.statusBarIconEl, "cloud-off");
-			this.statusBarTextEl.setText("Filen: offline");
-			this.statusBarItemEl.addClass("is-warning");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "syncing") {
-			setIcon(this.statusBarIconEl, "refresh-cw");
-			const progress = this.statusBarState.progress;
-			this.statusBarTextEl.setText(
-				`Filen: ${progress?.phase ? formatSyncProgress(progress) : this.statusBarState.text}`,
-			);
-			this.statusBarItemEl.addClass("is-syncing");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "error") {
-			const retryAt = this.coordinator.retryAt;
-			setIcon(this.statusBarIconEl, retryAt === null ? "alert-circle" : "clock");
-			this.statusBarTextEl.setText(
-				retryAt === null
-					? "Filen: error"
-					: `Filen: Retry in ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))}s`,
-			);
-			this.statusBarItemEl.addClass("is-error");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		if (this.statusBarState.kind === "warning") {
-			const retryAt = this.coordinator.retryAt;
-			const retry =
-				retryAt !== null
-					? `Retry in ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))}s`
-					: null;
-			setIcon(this.statusBarIconEl, retry ? "clock" : "alert-circle");
-			this.statusBarTextEl.setText(`Filen: ${retry ?? this.statusBarState.text}`);
-			this.statusBarItemEl.addClass("is-warning");
-			const tooltip = this.buildStatusTooltip();
-			setTooltip(this.statusBarItemEl, tooltip);
-			this.statusBarItemEl.setAttr("aria-label", tooltip);
-			this.statusBarItemEl.setAttr("title", tooltip);
-			return;
-		}
-
-		// Idle / success state: native Obsidian Sync uses the sync icon "refresh-cw"
-		setIcon(this.statusBarIconEl, "refresh-cw");
-		if (this.lastSyncTimestamp !== null && this.lastSyncTimestamp > 0) {
-			const relative = formatRelativeTime(this.lastSyncTimestamp);
-			this.statusBarTextEl.setText(`Filen: idle · ${relative}`);
-		} else {
-			this.statusBarTextEl.setText("Filen: idle");
-		}
-		this.statusBarItemEl.addClass("is-idle");
+		const model = this.iconModel();
+		this.statusBarItemEl.setAttr("data-sync-state", model.state);
+		setIcon(this.statusBarIconEl, model.icon);
+		this.statusBarTextEl.setText(`Filen: ${model.label}`);
 		const tooltip = this.buildStatusTooltip();
 		setTooltip(this.statusBarItemEl, tooltip);
 		this.statusBarItemEl.setAttr("aria-label", tooltip);
-		this.statusBarItemEl.setAttr("title", tooltip);
+	}
+
+	private iconModel() {
+		return syncIconPresentation(this.statusBarState, {
+			connected: this.hasSavedAuth(),
+			offline: this.isOffline(),
+			paused: this.settings.syncPaused,
+			pending: this.coordinator.pendingCount,
+			conflicts: this.coordinator.conflictCount,
+		});
 	}
 
 	private lastSyncSummary(): string {

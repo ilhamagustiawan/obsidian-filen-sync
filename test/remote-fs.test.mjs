@@ -29,6 +29,10 @@ before(async () => {
   createDirectory: async ({name,parent}) => { m.creates++; await m.delay(); if (m.createFailure) throw new Error('create failed'); const uuid = 'made-' + name; m.created.push({name,parent,uuid}); return uuid; },
   fileExists: async ({name,parent}) => { m.fileExistsCalls++; await m.delay(); return m.fileExistsResponse?.({name,parent}) ?? (m.files.has(name) ? { exists: true, uuid: m.files.get(name).uuid } : { exists: false }); },
   trashFile: async ({uuid}) => { m.trashed.push(uuid); return true; },
+  listTrash: async () => m.trash,
+  getDirectory: async ({uuid}) => { const dir=m.dirsByUuid.get(uuid); if(!dir) throw Error('unknown directory'); return dir; },
+  restoreFile: async ({uuid}) => { m.restored.push(uuid); m.trash=m.trash.filter(i=>i.uuid!==uuid); },
+  restoreDirectory: async ({uuid}) => { m.restored.push(uuid); m.trash=m.trash.filter(i=>i.uuid!==uuid); },
   getFile: async ({uuid}) => { const file = m.filesByUuid.get(uuid); if (!file) throw new Error('not found'); return file; }
  }; }
  getWorker() {
@@ -101,6 +105,9 @@ function fixture({ delayMs = 0, tree = {} } = {}) {
 		logouts: 0,
 		created: [],
 		trashed: [],
+		trash: [],
+		restored: [],
+		dirsByUuid: new Map(),
 		files: new Map(),
 		filesByUuid: new Map(),
 		fileExistsCalls: 0,
@@ -433,4 +440,74 @@ test("rm revalidates remote identity, version and hash before trashing", async (
 		/Remote file changed before deletion: note\.md\. Replan the sync\./,
 	);
 	assert.equal(mock.trashed.length, 0);
+});
+
+test("trash browser scopes SDK entries to root ancestry and revalidates individual restoration", async () => {
+	const remote = fixture();
+	mock.trash = [
+		{
+			uuid: "deleted",
+			parent: "root-1",
+			name: "note.md",
+			type: "file",
+			size: 1,
+			timestamp: 1000,
+		},
+		{
+			uuid: "foreign",
+			parent: "other-root",
+			name: "other.md",
+			type: "file",
+			size: 1,
+			timestamp: 1000,
+		},
+	];
+	const listed = await remote.listDeleted([]);
+	assert.deepEqual(
+		listed.map((i) => i.path),
+		["note.md"],
+	);
+	await remote.restoreDeleted(listed[0], []);
+	assert.deepEqual(mock.restored, ["deleted"]);
+	await assert.rejects(remote.restoreDeleted(listed[0], []), /no longer belongs/);
+});
+test("trash restoration rejects occupied destinations and missing original parents", async () => {
+	const remote = fixture();
+	mock.trash = [
+		{
+			uuid: "deleted",
+			parent: "root-1",
+			name: "note.md",
+			type: "file",
+			size: 1,
+			timestamp: 1000,
+		},
+	];
+	const item = (await remote.listDeleted([]))[0];
+	mock.paths.set("/Obsidian/note.md", "occupied");
+	await assert.rejects(remote.restoreDeleted(item, []), /occupied/);
+	assert.equal(mock.restored.length, 0);
+	mock.paths.delete("/Obsidian/note.md");
+	mock.trash = [
+		{
+			uuid: "parent",
+			parent: "root-1",
+			name: "folder",
+			type: "directory",
+			size: 1,
+			timestamp: 1000,
+		},
+		{
+			uuid: "child",
+			parent: "parent",
+			name: "note.md",
+			type: "file",
+			size: 1,
+			timestamp: 1000,
+		},
+	];
+	const child = (await remote.listDeleted([])).find((i) => i.uuid === "child");
+	assert.equal(child.parentMissing, true);
+	await assert.rejects(remote.restoreDeleted(child, []), /parent folder/);
+	assert.equal(mock.restored.length, 0);
 });

@@ -14,6 +14,7 @@ type PathFilterConfig = {
 	pluginId: string;
 	ignorePatterns: string[];
 	maxFileSizeBytes?: number;
+	selectedSettings?: string[];
 };
 
 type CompiledIgnoreRule = {
@@ -68,6 +69,15 @@ export const createSyncPathFilter = (config: PathFilterConfig): SyncPathFilter =
 			return "ignored";
 		}
 
+		if (
+			normalizedPath === config.configDir ||
+			normalizedPath.startsWith(`${config.configDir}/`)
+		) {
+			return config.selectedSettings?.includes(normalizedPath) &&
+				!normalizedPath.startsWith(`${config.configDir}/plugins/${config.pluginId}/`)
+				? "included"
+				: "ignored";
+		}
 		for (const rule of rules) {
 			if (matchesRule(normalizedPath, rule)) {
 				return "ignored";

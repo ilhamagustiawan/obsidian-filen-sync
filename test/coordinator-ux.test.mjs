@@ -97,6 +97,7 @@ async function fixture(run, options = {}) {
 				onStatusChange: (s) => states.push(s),
 				onOpeningCheckChange: (s) => openingChecks.push(s),
 				getAutoSyncBlockReason: options.blockReason,
+				onReviewConflicts: options.onReviewConflicts,
 				onLogActivity: (msg) => activities.push(msg),
 				confirmLocalDeletes: async () => true,
 				confirmBulkOperations: async () => true,
@@ -478,6 +479,7 @@ test("conflicts in vault produce persistent warning, informative notice, and cle
 			stat: { size: 100 },
 		});
 		vaultFiles.push(conflictFile);
+		events.get("create")(conflictFile);
 
 		await coordinator.runSync("Auto-sync", "both", { isManual: false });
 
@@ -664,3 +666,31 @@ test("interval and startup runs use the routine reconcile policy, not forced sca
 		await settle();
 		assert.equal(optionsSeen.at(-1)?.fullScan, true, "folder-driven runs stay forced");
 	}));
+
+test("new conflicts request one review after partial failure and paused resolutions remain queued", async () => {
+	let reviews = 0;
+	await fixture(
+		async ({ coordinator, events, TFile, settings }) => {
+			coordinator.syncEngine.sync = async () => {
+				events.get("create")(
+					Object.assign(new TFile(), {
+						path: "note.sync-conflict-local-device-1.md",
+						stat: { size: 1 },
+					}),
+				);
+				throw Error("partial failure");
+			};
+			await coordinator.runSync("Sync now", "both", { silent: true });
+			assert.equal(reviews, 1);
+			assert.equal(coordinator.conflictCount, 1);
+			coordinator.syncEngine.sync = async () => ({ applied: 0, conflicts: 0 });
+			await coordinator.runSync("Sync now", "both", { silent: true });
+			assert.equal(reviews, 1, "existing copies do not reopen review");
+			settings.syncPaused = true;
+			coordinator.queueResolvedChange("note.md");
+			assert.equal(settings.syncPaused, true);
+			assert.equal(coordinator.pendingCount, 1);
+		},
+		{ onReviewConflicts: () => reviews++ },
+	);
+});

@@ -38,6 +38,12 @@ class Element {
 			this.parentElement = null;
 		}
 	}
+	appendChild(child) {
+		this.insertBefore(child, null);
+	}
+	setAttribute(key, value) {
+		this.setAttr(key, value);
+	}
 	setAttr(key, value) {
 		this.attributes.set(key, String(value));
 	}
@@ -52,290 +58,117 @@ class Element {
 	}
 }
 
-test("mobile chip lifecycle, progress, routing, and cleanup", async (t) => {
-	const dir = await mkdtemp(join(tmpdir(), "filen-mobile-chip-"));
-	const originalWindow = globalThis.window;
-	const originalDocument = globalThis.document;
-	const originalNow = Date.now;
+test("persistent mobile sidebar status shares the menu and survives remounts", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "filen-mobile-status-"));
+	const originalWindow = globalThis.window,
+		originalDocument = globalThis.document;
 	try {
 		const stub = join(dir, "obsidian.mjs");
 		await writeFile(
 			stub,
-			`export class ItemView {} export class Plugin {}
-			export const Platform = {isMobile:true};
-			export const setIcon = (el, icon) => el.setAttr('data-icon', icon);`,
+			`export const Platform = {isMobile:true}; export const setIcon = (el, icon) => el.setAttr('data-icon', icon);`,
 		);
-		const outfile = join(dir, "chip.mjs");
+		const outfile = join(dir, "indicator.mjs");
 		await build({
-			stdin: {
-				contents:
-					'export {MobileSyncIndicator} from "./src/ui/mobile-sync-indicator.ts"; export {Platform} from "obsidian";',
-				resolveDir: process.cwd(),
-			},
+			entryPoints: ["src/ui/mobile-sync-indicator.ts"],
 			outfile,
 			bundle: true,
 			format: "esm",
 			platform: "node",
 			plugins: [
 				{
-					name: "stub",
+					name: "obsidian",
 					setup(b) {
 						b.onResolve({ filter: /^obsidian$/ }, () => ({ path: stub }));
 					},
 				},
 			],
 		});
-		const { MobileSyncIndicator, Platform } = await import(pathToFileURL(outfile).href);
-		const makeView = () => {
-			const containerEl = new Element();
-			const header = containerEl.createEl("header");
-			const contentEl = containerEl.createEl("article");
-			return { containerEl, contentEl, header };
+		const { MobileSyncIndicator } = await import(pathToFileURL(outfile).href);
+		const events = new Map(),
+			cleanups = [],
+			timers = new Map();
+		let enabled = true,
+			menus = 0,
+			next = 0;
+		let sidebar = new Element();
+		const workspace = {
+			rightSplit: { containerEl: sidebar },
+			on(name, fn) {
+				events.set(name, fn);
+				return name;
+			},
 		};
-		const syncing = (manual = false, progress = undefined) => ({
-			kind: "syncing",
-			text: "Connecting…",
-			detail: "Connecting to Filen",
-			updatedAt: 1,
-			isManual: manual,
-			progress,
-		});
-		const success = {
+		const plugin = {
+			app: { workspace },
+			registerEvent() {},
+			register(fn) {
+				cleanups.push(fn);
+			},
+			registerDomEvent(el, name, fn) {
+				el[name] = fn;
+				cleanups.push(() => delete el[name]);
+			},
+		};
+		globalThis.document = { createElement: (tag) => new Element(tag) };
+		globalThis.window = {
+			setTimeout(fn) {
+				const id = ++next;
+				timers.set(id, fn);
+				return id;
+			},
+			clearTimeout(id) {
+				timers.delete(id);
+			},
+		};
+		const indicator = new MobileSyncIndicator(
+			plugin,
+			() => enabled,
+			() => assert.fail("all taps open menu"),
+			() => menus++,
+		);
+		indicator.refreshVisibility();
+		const button = sidebar.children[0];
+		assert.ok(button);
+		assert.equal(button.attributes.get("data-sync-state"), "pending");
+		button.click({});
+		assert.equal(menus, 1);
+		indicator.onStatusChange({
 			kind: "success",
-			text: "up to date",
-			detail: "No changes",
-			updatedAt: 2,
 			syncCompleted: true,
-		};
-		const fixture = () => {
-			let now = 1000,
-				next = 1,
-				enabled = true,
-				view = makeView(),
-				details = 0,
-				menu = 0;
-			const timers = new Map(),
-				events = new Map(),
-				cleanup = [];
-			Date.now = () => now;
-			Platform.isMobile = true;
-			globalThis.window = {
-				setTimeout(fn, delay) {
-					const id = next++;
-					timers.set(id, { fn, at: now + delay });
-					return id;
-				},
-				clearTimeout(id) {
-					timers.delete(id);
-				},
-			};
-			globalThis.document = { createElement: (tag) => new Element(tag) };
-			const plugin = {
-				app: {
-					workspace: {
-						on: (name, fn) => {
-							events.set(name, fn);
-							return name;
-						},
-						getActiveViewOfType: () => view,
-					},
-				},
-				registerEvent: (name) => cleanup.push(() => events.delete(name)),
-				register: (fn) => cleanup.push(fn),
-				registerDomEvent: (el, name, fn) => {
-					el[name] = fn;
-					cleanup.push(() => delete el[name]);
-				},
-			};
-			const chip = new MobileSyncIndicator(
-				plugin,
-				() => enabled,
-				() => details++,
-				() => menu++,
-			);
-			return {
-				chip,
-				timers,
-				events,
-				get view() {
-					return view;
-				},
-				get row() {
-					return view?.containerEl.children.find(
-						(el) => el.className === "filen-mobile-sync-row",
-					);
-				},
-				get label() {
-					return this.row?.children[0].children[1].textContent;
-				},
-				get actions() {
-					return { details, menu };
-				},
-				setEnabled(value) {
-					enabled = value;
-					chip.refreshVisibility();
-				},
-				switchView(value) {
-					view = value;
-					events.get("active-leaf-change")();
-				},
-				tick(ms) {
-					const target = now + ms;
-					for (;;) {
-						const job = [...timers]
-							.filter(([, job]) => job.at <= target)
-							.sort((a, b) => a[1].at - b[1].at)[0];
-						if (!job) break;
-						timers.delete(job[0]);
-						now = job[1].at;
-						job[1].fn();
-					}
-					now = target;
-				},
-				close() {
-					cleanup.forEach((fn) => fn());
-				},
-			};
-		};
-
-		await t.test("opening feedback is immediate, no-op result lasts two seconds", () => {
-			const f = fixture();
-			f.chip.onOpeningCheckChange({ kind: "scheduled", scheduledAt: 2000 });
-			assert.equal(f.label, "Checking shortly…");
-			assert.deepEqual(f.view.containerEl.children, [f.view.header, f.row, f.view.contentEl]);
-			f.chip.onStatusChange(syncing());
-			f.chip.onOpeningCheckChange({ kind: "cleared" });
-			f.tick(100);
-			assert.equal(f.label, "Connecting…");
-			f.chip.onStatusChange(success);
-			assert.equal(f.label, "Up to date");
-			f.tick(1999);
-			assert.ok(f.row);
-			f.tick(1);
-			assert.equal(f.row, undefined);
-			f.close();
+			text: "up to date",
+			detail: "",
+			updatedAt: 1,
 		});
-
-		await t.test("routine quick checks stay quiet; slow runs show progress", () => {
-			const f = fixture();
-			f.chip.onStatusChange(syncing());
-			f.tick(299);
-			assert.equal(f.row, undefined);
-			f.chip.onStatusChange(success);
-			f.tick(1000);
-			assert.equal(f.row, undefined);
-			f.chip.onStatusChange(syncing());
-			f.tick(300);
-			assert.equal(f.label, "Connecting…");
-			f.chip.onStatusChange(success);
-			assert.equal(f.label, "Up to date");
-			f.close();
-		});
-
-		await t.test(
-			"manual progress uses bytes, limits rendering, and never implies early completion",
-			() => {
-				const f = fixture();
-				f.chip.onStatusChange(syncing(true));
-				assert.equal(f.label, "Connecting…");
-				const progress = {
-					phase: "transferring",
-					current: 0,
-					total: 2,
-					path: "large.bin",
-					completedBytes: 50,
-					totalBytes: 100,
-				};
-				for (let i = 0; i < 20; i++) f.chip.onStatusChange(syncing(true, progress));
-				assert.equal(f.timers.size, 1);
-				f.tick(100);
-				const bar = f.row.children[0].children[2];
-				assert.equal(bar.attributes.get("aria-valuenow"), "50");
-				assert.equal(f.label, "Syncing · 0 of 2 changes");
-				f.chip.onStatusChange(syncing(true, { ...progress, completedBytes: 100 }));
-				f.tick(100);
-				assert.equal(f.label, "Finishing…");
-				f.chip.onStatusChange({ ...success, kind: "idle", detail: "Edits queued" });
-				assert.equal(f.label, "Changes queued");
-				f.close();
-			},
-		);
-
-		await t.test(
-			"issues remain and dismiss without clearing underlying state; new runs reappear",
-			() => {
-				const f = fixture();
-				const error = {
-					kind: "error",
-					text: "Sync failed",
-					detail: "Network error",
-					updatedAt: 1,
-				};
-				f.chip.onStatusChange(error);
-				f.tick(10000);
-				assert.equal(f.label, "Sync failed");
-				f.row.children[0].click({});
-				assert.deepEqual(f.actions, { menu: 1, details: 0 });
-				f.row.children[2].click();
-				assert.equal(f.row, undefined);
-				f.chip.onStatusChange({ ...error, detail: "Retry in 10s" });
-				assert.equal(f.row, undefined);
-				f.chip.onStatusChange(syncing(true));
-				assert.ok(f.row);
-				f.row.children[0].click({});
-				assert.equal(f.actions.details, 1);
-				f.chip.onStatusChange(error);
-				assert.ok(f.row);
-				f.close();
-			},
-		);
-
-		await t.test("one row follows views and retains state when no suitable view exists", () => {
-			const f = fixture();
-			f.switchView(null);
-			f.chip.onStatusChange(syncing(true));
-			const view = makeView();
-			f.switchView(view);
-			assert.equal(f.label, "Connecting…");
-			const row = f.row;
-			const second = makeView();
-			f.switchView(second);
-			assert.equal(f.row, row);
-			assert.deepEqual(view.containerEl.children, [view.header, view.contentEl]);
-			f.setEnabled(false);
-			assert.equal(f.row, undefined);
-			f.setEnabled(true);
-			assert.equal(f.row, row);
-			Platform.isMobile = false;
-			f.chip.refreshVisibility();
-			assert.equal(f.row, undefined);
-			f.close();
-			assert.equal(f.timers.size, 0);
-			assert.equal(f.events.size, 0);
-		});
-
-		await t.test(
-			"old completion timers cannot hide another run; closed chips never remount",
-			() => {
-				const f = fixture();
-				f.chip.onStatusChange(syncing(true));
-				f.chip.onStatusChange(success);
-				f.tick(1500);
-				f.chip.onStatusChange(syncing(true));
-				f.tick(1000);
-				assert.ok(f.row);
-				f.close();
-				assert.equal(f.row, undefined);
-				f.chip.onStatusChange(syncing(true));
-				f.tick(5000);
-				assert.equal(f.row, undefined);
-				assert.equal(f.timers.size, 0);
-			},
-		);
+		assert.equal(button.attributes.get("data-sync-state"), "synced");
+		assert.equal(button.children[0].attributes.get("data-icon"), "circle-check");
+		assert.equal(timers.size, 0, "completion remains visible");
+		indicator.onStatusChange({ kind: "syncing", text: "Syncing", detail: "", updatedAt: 1 });
+		assert.equal(timers.size, 1);
+		for (const fn of timers.values()) fn();
+		timers.clear();
+		assert.equal(button.attributes.get("data-sync-state"), "syncing");
+		sidebar = new Element();
+		workspace.rightSplit.containerEl = sidebar;
+		events.get("layout-change")();
+		assert.equal(sidebar.children[0], button, "same button remounts in rebuilt sidebar");
+		indicator.onStatusChange({ kind: "error", text: "Error", detail: "", updatedAt: 1 });
+		button.click({});
+		assert.equal(menus, 2);
+		enabled = false;
+		indicator.refreshVisibility();
+		assert.equal(sidebar.children.length, 0);
+		enabled = true;
+		indicator.refreshVisibility();
+		assert.equal(sidebar.children.length, 1);
+		for (const fn of cleanups) fn();
+		assert.equal(sidebar.children.length, 0);
+		assert.equal(timers.size, 0);
+		events.get("layout-change")();
+		assert.equal(sidebar.children.length, 0, "unloaded indicator never remounts");
 	} finally {
 		globalThis.window = originalWindow;
 		globalThis.document = originalDocument;
-		Date.now = originalNow;
 		await rm(dir, { recursive: true, force: true });
 	}
 });

@@ -1404,3 +1404,130 @@
 		transition: none !important;
 	}
 }
+
+/* Shared sync state presentation. */
+[data-sync-state="synced"] {
+	color: var(--color-green);
+}
+[data-sync-state="syncing"],
+[data-sync-state="pending"],
+[data-sync-state="paused"] {
+	color: var(--color-purple);
+}
+[data-sync-state="disconnected"],
+[data-sync-state="error"] {
+	color: var(--color-red);
+}
+[data-sync-state="conflict"] {
+	color: var(--color-orange);
+}
+[data-sync-state="syncing"] svg {
+	animation: filen-sync-spin 1.5s linear infinite;
+}
+.filen-mobile-sidebar-status {
+	margin: 12px;
+	align-self: flex-end;
+	min-width: 44px;
+	min-height: 44px;
+}
+.notice.filen-sync-progress-notice {
+	position: fixed;
+	top: 50%;
+	left: 50%;
+	right: auto;
+	bottom: auto;
+	transform: translate(-50%, -50%);
+	width: min(440px, calc(100vw - 32px));
+	max-height: calc(100dvh - 48px);
+	overflow-y: auto;
+	z-index: 10000;
+}
+.filen-progress-close {
+	padding: 2px 8px;
+	margin-left: auto;
+}
+.filen-sync-version-modal,
+.filen-conflict-resolver {
+	width: min(1120px, calc(100vw - 32px));
+}
+.filen-sync-version-modal .modal-content {
+	height: min(720px, 80dvh);
+}
+.filen-sync-version-sidebar {
+	flex: 0 0 30%;
+	width: auto;
+}
+.filen-sync-version-main {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+}
+.filen-sync-version-content {
+	overflow: auto;
+}
+.filen-version-sources {
+	display: flex;
+	gap: 6px;
+	padding: 12px;
+	flex-wrap: wrap;
+}
+.filen-review-layout {
+	display: grid;
+	grid-template-columns: 30% 1fr;
+	height: min(680px, 75dvh);
+	gap: 16px;
+}
+.filen-review-list,
+.filen-review-preview {
+	overflow: auto;
+	min-width: 0;
+}
+.filen-review-list button {
+	display: block;
+	margin: 6px 0;
+	max-width: 100%;
+	overflow-wrap: anywhere;
+	height: auto;
+}
+.filen-review-choice {
+	display: block;
+	border: 1px solid var(--background-modifier-border);
+	padding: 12px;
+	margin: 8px 0;
+}
+.filen-review-preview pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+.filen-deleted-list {
+	max-height: 70dvh;
+	overflow: auto;
+}
+.filen-deleted-list button {
+	margin-left: 12px;
+}
+@media (max-width: 640px) {
+	.filen-review-layout {
+		grid-template-columns: 1fr;
+		height: auto;
+	}
+	.filen-review-list {
+		max-height: 25dvh;
+	}
+	.filen-review-preview {
+		max-height: 60dvh;
+	}
+	.filen-sync-version-modal {
+		width: calc(100vw - 16px);
+	}
+	.filen-sync-version-header {
+		flex-wrap: wrap;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	[data-sync-state="syncing"] svg,
+	.filen-notice-spin,
+	.is-indeterminate {
+		animation: none !important;
+	}
+}

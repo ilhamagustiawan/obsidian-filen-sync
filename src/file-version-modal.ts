@@ -1,7 +1,18 @@
-import { Modal, Notice, Platform, TFile, type App } from "obsidian";
+import { confirmAction } from "./ui/confirm";
+import { preserveRecovery, readRecovery } from "./sync/recovery";
+import type { SyncDb, RecoveryRecord } from "./db";
+import { sha256Hex } from "./sync/content-hash";
+import { decodeText } from "./sync/merge";
+import { Component, MarkdownRenderer, Modal, Notice, Platform, TFile, type App } from "obsidian";
 import type { RemoteFileVersion, RemoteFs } from "./fs-remote";
 
+type HistoryVersion = RemoteFileVersion & { recovery?: RecoveryRecord };
+
 type FileVersionModalConfig = {
+	db?: SyncDb;
+	verifyTarget?: () => Promise<void>;
+	pluginId?: string;
+	onLocalRestored?: (path: string) => void;
 	app: App;
 	remote: RemoteFs;
 	filePath: string;
@@ -11,7 +22,7 @@ type FileVersionModalConfig = {
 
 type VersionGroup = {
 	dateLabel: string;
-	versions: RemoteFileVersion[];
+	versions: HistoryVersion[];
 	expanded: boolean;
 };
 
@@ -30,7 +41,7 @@ type ModalState =
 	| {
 			kind: "ready";
 			groups: VersionGroup[];
-			selected: RemoteFileVersion | null;
+			selected: HistoryVersion | null;
 			preview: PreviewState;
 			showDiff: boolean;
 			restoring: boolean;
@@ -41,6 +52,15 @@ export class FileVersionModal extends Modal {
 	private state: ModalState = { kind: "loading-versions" };
 	private previewEl: HTMLElement | null = null;
 	private currentFileText = "";
+	private closed = false;
+	private previewGeneration = 0;
+	private renderer: Component | null = null;
+	private allVersions: HistoryVersion[] = [];
+	private source: "filen" | "local" = "filen";
+	private resizeCleanup: (() => void) | null = null;
+	private isNarrow(): boolean {
+		return Platform.isMobile || this.modalEl.ownerDocument.defaultView!.innerWidth <= 640;
+	}
 
 	constructor(private readonly config: FileVersionModalConfig) {
 		super(config.app);
@@ -48,6 +68,10 @@ export class FileVersionModal extends Modal {
 	}
 
 	async onOpen(): Promise<void> {
+		const win = this.modalEl.ownerDocument.defaultView!;
+		const resize = () => this.render();
+		win.addEventListener("resize", resize);
+		this.resizeCleanup = () => win.removeEventListener("resize", resize);
 		this.render();
 
 		// Read current local content for diff view
@@ -61,8 +85,35 @@ export class FileVersionModal extends Modal {
 		}
 
 		try {
-			const raw = await this.config.remote.getFileVersions(this.config.filePath);
-			const sorted = dedupeAndSort(raw);
+			let raw: RemoteFileVersion[] = [];
+			try {
+				raw = await this.config.remote.getFileVersions(this.config.filePath);
+			} catch (e) {
+				if (!this.closed)
+					new Notice(
+						`Filen versions unavailable: ${e instanceof Error ? e.message : "Could not load versions"}`,
+					);
+			}
+			const recovery = (await this.config.db?.getRecovery?.(this.config.filePath)) ?? [];
+			if (this.closed) return;
+			this.allVersions = [
+				...raw,
+				...recovery.map((r) => ({
+					uuid: r.id,
+					version: 0,
+					timestamp: r.timestamp,
+					bucket: "",
+					region: "",
+					chunks: 0,
+					recovery: r,
+				})),
+			];
+			if (!raw.length && recovery.length) this.source = "local";
+			const sorted = dedupeAndSort(
+				this.allVersions.filter((v) =>
+					this.source === "local" ? !!v.recovery : !v.recovery,
+				),
+			);
 			const groups = groupByDate(sorted);
 			const firstGroup = groups[0];
 			if (firstGroup !== undefined) firstGroup.expanded = true;
@@ -85,17 +136,27 @@ export class FileVersionModal extends Modal {
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
+			if (this.closed) return;
 			this.state = { kind: "error-versions", message };
 			this.render();
 		}
 	}
 
 	onClose(): void {
+		this.resizeCleanup?.();
+		this.resizeCleanup = null;
+		this.closed = true;
+		this.previewGeneration++;
+		this.renderer?.unload();
+		this.renderer = null;
 		this.contentEl.empty();
 		this.previewEl = null;
 	}
 
 	private render(): void {
+		if (this.closed) return;
+		this.renderer?.unload();
+		this.renderer = null;
 		this.contentEl.empty();
 		this.previewEl = null;
 
@@ -116,7 +177,7 @@ export class FileVersionModal extends Modal {
 
 		const state = this.state;
 
-		if (Platform.isMobile) {
+		if (this.isNarrow()) {
 			if (state.mobileView === "list") {
 				this.renderSidebar(this.contentEl, state);
 			} else {
@@ -136,6 +197,33 @@ export class FileVersionModal extends Modal {
 		container: HTMLElement,
 		state: Extract<ModalState, { kind: "ready" }>,
 	): void {
+		const sources = container.createDiv({ cls: "filen-version-sources" });
+		for (const [value, label] of [
+			["filen", "Filen versions"],
+			["local", "Local recovery"],
+		] as const) {
+			const button = sources.createEl("button", {
+				text: label,
+				cls: this.source === value ? "mod-cta" : "",
+			});
+			button.onclick = () => {
+				this.source = value;
+				this.previewGeneration++;
+				state.groups = groupByDate(
+					dedupeAndSort(
+						this.allVersions.filter((v) =>
+							value === "local" ? !!v.recovery : !v.recovery,
+						),
+					),
+				);
+				if (state.groups[0]) state.groups[0].expanded = true;
+				state.selected = null;
+				state.preview = { kind: "idle" };
+				this.render();
+				const first = state.groups[0]?.versions[0];
+				if (first) void this.selectVersion(first);
+			};
+		}
 		if (state.groups.length === 0) {
 			container.createDiv({
 				cls: "filen-sync-version-empty",
@@ -175,7 +263,7 @@ export class FileVersionModal extends Modal {
 				row.setAttr("data-uuid", version.uuid);
 				row.setText(formatTime(version.timestamp));
 				row.addEventListener("click", () => {
-					if (Platform.isMobile) {
+					if (this.isNarrow()) {
 						state.mobileView = "preview";
 					}
 					void this.selectVersion(version);
@@ -190,7 +278,7 @@ export class FileVersionModal extends Modal {
 	): void {
 		const header = container.createDiv({ cls: "filen-sync-version-header" });
 
-		if (Platform.isMobile) {
+		if (this.isNarrow()) {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			const backBtn = header.createEl("button", {
 				text: "← Back",
@@ -228,6 +316,8 @@ export class FileVersionModal extends Modal {
 			void this.restore(state);
 		});
 
+		header.createEl("button", { text: "Close", cls: "filen-version-close" }).onclick = () =>
+			this.close();
 		this.previewEl = container.createDiv({ cls: "filen-sync-version-content" });
 		this.renderPreviewContent(state);
 	}
@@ -235,6 +325,8 @@ export class FileVersionModal extends Modal {
 	private renderPreviewContent(state: Extract<ModalState, { kind: "ready" }>): void {
 		const el = this.previewEl;
 		if (el === null) return;
+		this.renderer?.unload();
+		this.renderer = null;
 		el.empty();
 
 		const { preview, showDiff, selected } = state;
@@ -277,19 +369,36 @@ export class FileVersionModal extends Modal {
 					lineEl.addClass("filen-sync-version-diff-removed");
 			}
 		} else {
-			el.setText(preview.text);
+			this.renderer = new Component();
+			this.renderer.load();
+			const renderer = this.renderer;
+			const rendered = el.createDiv({ cls: "markdown-rendered" });
+			void MarkdownRenderer.render(
+				this.app,
+				preview.text,
+				rendered,
+				this.config.filePath,
+				renderer,
+			)
+				.then(() => {
+					if (this.renderer !== renderer || this.closed) renderer.unload();
+				})
+				.catch(() => {
+					if (rendered.isConnected) rendered.setText(preview.text);
+				});
 		}
 	}
 
-	private async selectVersion(version: RemoteFileVersion): Promise<void> {
-		if (this.state.kind !== "ready") return;
+	private async selectVersion(version: HistoryVersion): Promise<void> {
+		if (this.closed || this.state.kind !== "ready") return;
+		const generation = ++this.previewGeneration;
 		const state = this.state;
 
 		state.selected = version;
 		state.preview = { kind: "loading" };
 
 		// Update sidebar selection highlight in-place (desktop only)
-		if (!Platform.isMobile) {
+		if (!this.isNarrow()) {
 			for (const row of Array.from(
 				this.contentEl.querySelectorAll<HTMLElement>(".filen-sync-version-row"),
 			)) {
@@ -308,24 +417,47 @@ export class FileVersionModal extends Modal {
 		this.renderPreviewContent(state);
 
 		try {
-			const bytes = await this.config.remote.readFileVersion(version);
+			const bytes =
+				version.recovery && this.config.db
+					? await readRecovery(this.app, this.config.db, version.recovery)
+					: await this.config.remote.readFileVersion(version);
+			if (this.closed || generation !== this.previewGeneration) return;
 			let text: string;
 			try {
-				text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+				text =
+					decodeText(bytes) ??
+					(() => {
+						throw new Error("Binary or oversized revision");
+					})();
 			} catch {
-				if (this.state.kind === "ready" && this.state.selected?.uuid === version.uuid) {
+				if (
+					!this.closed &&
+					generation === this.previewGeneration &&
+					this.state.kind === "ready" &&
+					this.state.selected?.uuid === version.uuid
+				) {
 					this.state.preview = { kind: "binary" };
 					this.renderPreviewContent(this.state);
 				}
 				return;
 			}
-			if (this.state.kind === "ready" && this.state.selected?.uuid === version.uuid) {
+			if (
+				!this.closed &&
+				generation === this.previewGeneration &&
+				this.state.kind === "ready" &&
+				this.state.selected?.uuid === version.uuid
+			) {
 				this.state.preview = { kind: "ready", text };
 				this.renderPreviewContent(this.state);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
-			if (this.state.kind === "ready" && this.state.selected?.uuid === version.uuid) {
+			if (
+				!this.closed &&
+				generation === this.previewGeneration &&
+				this.state.kind === "ready" &&
+				this.state.selected?.uuid === version.uuid
+			) {
 				this.state.preview = { kind: "error", message };
 				this.renderPreviewContent(this.state);
 			}
@@ -337,7 +469,58 @@ export class FileVersionModal extends Modal {
 		const version = state.selected;
 		state.restoring = true;
 		this.render();
+		if (
+			!(await confirmAction(
+				this.app,
+				"Restore revision",
+				`Restore ${this.config.filePath} to the revision from ${formatDate(version.timestamp)} at ${formatTime(version.timestamp)}? Current content will be saved in local recovery.`,
+				"Restore",
+			))
+		) {
+			state.restoring = false;
+			this.render();
+			return;
+		}
+		if (this.closed) return;
+		state.restoring = true;
+		this.render();
 		try {
+			await this.config.verifyTarget?.();
+			if (!this.config.db) throw new Error("Verified recovery storage is unavailable.");
+			const current = this.app.vault.getAbstractFileByPath(this.config.filePath);
+			if (current instanceof TFile) {
+				const bytes = new Uint8Array(await this.app.vault.readBinary(current));
+				await preserveRecovery(
+					this.app,
+					this.config.db,
+					this.config.pluginId ?? "obsidian-filen-sync",
+					this.config.filePath,
+					bytes,
+					"Before restoring revision",
+				);
+				if (
+					(await sha256Hex(new Uint8Array(await this.app.vault.readBinary(current)))) !==
+					(await sha256Hex(bytes))
+				)
+					throw new Error("Current file changed before restoration.");
+			}
+			if (version.recovery) {
+				if (!(current instanceof TFile)) throw new Error("Current file is unavailable.");
+				const before = await sha256Hex(
+					new Uint8Array(await this.app.vault.readBinary(current)),
+				);
+				const bytes = await readRecovery(this.app, this.config.db, version.recovery);
+				if (
+					(await sha256Hex(new Uint8Array(await this.app.vault.readBinary(current)))) !==
+					before
+				)
+					throw new Error("Current file changed before restoration.");
+				await this.app.vault.modifyBinary(current, bytes.slice().buffer);
+				this.config.onLocalRestored?.(this.config.filePath);
+				new Notice("Restored local recovery revision.");
+				this.close();
+				return;
+			}
 			await this.config.remote.restoreFileVersion(this.config.filePath, version.uuid);
 			try {
 				await this.config.onRestored();
@@ -373,8 +556,8 @@ export class FileVersionModal extends Modal {
 
 // --- Helpers ---
 
-const dedupeAndSort = (versions: RemoteFileVersion[]): RemoteFileVersion[] => {
-	const byUuid = new Map<string, RemoteFileVersion>();
+const dedupeAndSort = (versions: HistoryVersion[]): HistoryVersion[] => {
+	const byUuid = new Map<string, HistoryVersion>();
 	for (const v of versions) {
 		if (v.uuid.length === 0) continue;
 		const existing = byUuid.get(v.uuid);
@@ -386,8 +569,8 @@ const dedupeAndSort = (versions: RemoteFileVersion[]): RemoteFileVersion[] => {
 	});
 };
 
-const groupByDate = (versions: RemoteFileVersion[]): VersionGroup[] => {
-	const groups = new Map<string, RemoteFileVersion[]>();
+const groupByDate = (versions: HistoryVersion[]): VersionGroup[] => {
+	const groups = new Map<string, HistoryVersion[]>();
 	for (const v of versions) {
 		const label = formatDate(v.timestamp);
 		let g = groups.get(label);
@@ -416,11 +599,21 @@ const formatTime = (epochMs: number): string =>
 	new Date(epochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 // LCS-based line diff.
-const computeDiff = (oldText: string, newText: string): DiffLine[] => {
+export const computeDiff = (oldText: string, newText: string): DiffLine[] => {
 	const a = oldText.split("\n");
 	const b = newText.split("\n");
 	const m = a.length;
 	const n = b.length;
+	if (
+		new TextEncoder().encode(oldText + newText).length > 1024 * 1024 ||
+		(m + 1) * (n + 1) > 1_000_000
+	)
+		return [
+			{
+				kind: "unchanged",
+				text: "Comparison exceeds preview limits. Turn off Show changes to view this revision.",
+			},
+		];
 
 	// Flat row-major storage avoids 2-D array index safety issues.
 	const dp = new Int32Array((m + 1) * (n + 1));

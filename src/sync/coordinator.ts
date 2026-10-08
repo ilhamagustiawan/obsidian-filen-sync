@@ -1,3 +1,4 @@
+import { selectedSettingsPaths } from "./settings-paths";
 import type { App, EventRef, TAbstractFile } from "obsidian";
 import { Notice, Platform, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "../db";
@@ -83,6 +84,7 @@ const RESUME_RECONCILE_SKIP_MS = 60_000;
 
 export type CoordinatorCallbacks = {
 	onStatusChange: (state: StatusBarState) => void;
+	onReviewConflicts?: () => void;
 	onOpeningCheckChange?: (state: OpeningCheckState) => void;
 	getAutoSyncBlockReason?: () => string | null;
 	onLogActivity: (message: string) => void;
@@ -100,6 +102,8 @@ export type OpeningCheckState =
 
 export class SyncCoordinator {
 	private isSyncing = false;
+	private conflictsIndex: Map<string, TFile> | null = null;
+	private savedNewConflicts = false;
 	private isPreviewActive = false;
 	private isOffline = false;
 	private consecutiveNetworkFailures = 0;
@@ -166,7 +170,13 @@ export class SyncCoordinator {
 	}
 
 	getConflictFiles(): TFile[] {
-		return (this.app.vault.getFiles?.() ?? []).filter((f) => isConflictFilePath(f.path));
+		if (this.conflictsIndex === null)
+			this.conflictsIndex = new Map(
+				(this.app.vault.getFiles?.() ?? [])
+					.filter((f) => isConflictFilePath(f.path))
+					.map((f) => [f.path, f]),
+			);
+		return [...this.conflictsIndex.values()];
 	}
 
 	get conflictCount(): number {
@@ -757,6 +767,10 @@ export class SyncCoordinator {
 			return { kind: "failed", message };
 		} finally {
 			this.isSyncing = false;
+			if (this.savedNewConflicts) {
+				this.savedNewConflicts = false;
+				this.callbacks.onReviewConflicts?.();
+			}
 			if (this.invalidateAfterRun) {
 				this.invalidateAfterRun = false;
 				this.invalidateEngine();
@@ -765,15 +779,54 @@ export class SyncCoordinator {
 		}
 	}
 
+	queueResolvedChange(path: string): void {
+		this.syncEngine?.invalidateLocal(path);
+		this.pendingPaths.set(path, ++this.changeRevision);
+		this.publishPending();
+		if (!this.settings.syncPaused && this.autoSyncHasSavedAuth)
+			this.scheduleAutoSync(
+				this.settings.syncOnSaveDelaySeconds * 1000,
+				this.autoSyncHasSavedAuth,
+				false,
+			);
+	}
+
 	setupAutoSync(hasSavedAuth: () => boolean): void {
 		this.autoSyncHasSavedAuth = hasSavedAuth;
 		const startup = !this.startupInitialized;
 		this.startupInitialized = true;
 		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes } = this.settings;
 
+		this.getConflictFiles();
 		const handleVaultChange = (action: string) => (file: TAbstractFile, oldPath?: string) => {
-			this.syncEngine?.invalidateLocal(file.path);
-			if (oldPath !== undefined) this.syncEngine?.invalidateLocal(oldPath);
+			const index = this.conflictsIndex!;
+			for (const [path, entry] of index) {
+				if (
+					file instanceof TFolder &&
+					action === "renamed" &&
+					oldPath &&
+					path.startsWith(`${oldPath}/`)
+				) {
+					index.delete(path);
+					index.set(entry.path, entry);
+					continue;
+				}
+				if (
+					entry === file ||
+					(oldPath && (path === oldPath || path.startsWith(`${oldPath}/`))) ||
+					(action === "deleted" &&
+						(path === file.path || path.startsWith(`${file.path}/`)))
+				)
+					index.delete(path);
+			}
+			if (file instanceof TFile && action !== "deleted" && isConflictFilePath(file.path)) {
+				index.set(file.path, file);
+				if (this.isSyncing && action === "created") this.savedNewConflicts = true;
+			}
+
+			this.syncEngine?.invalidateLocal(file.path, file instanceof TFolder);
+			if (oldPath !== undefined)
+				this.syncEngine?.invalidateLocal(oldPath, file instanceof TFolder);
 			if (action === "deleted" || action === "renamed") {
 				if (
 					isConflictFilePath(file.path) ||
@@ -1061,6 +1114,12 @@ export class SyncCoordinator {
 		const pathFilter = createSyncPathFilter({
 			configDir: this.app.vault.configDir,
 			pluginId: this.pluginId,
+			selectedSettings: selectedSettingsPaths(
+				this.app.vault.configDir,
+				this.pluginId,
+				this.settings.syncSettings,
+				this.settings.selectedSettings,
+			),
 			ignorePatterns: this.settings.ignorePatterns,
 			maxFileSizeBytes: this.settings.skipLargeFiles
 				? this.settings.skipSizeLargerThanMB * 1048576

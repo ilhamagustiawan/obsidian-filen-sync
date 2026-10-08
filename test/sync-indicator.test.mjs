@@ -234,7 +234,10 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 		};
 		globalThis.clearTimeout = (id) => activeTimers.delete(id);
 		globalThis.window = globalThis;
+		const documentListeners = new Map();
 		globalThis.document = {
+			addEventListener: (name, handler) => documentListeners.set(name, handler),
+			removeEventListener: (name) => documentListeners.delete(name),
 			createDocumentFragment: () => new MockElement("fragment"),
 			body: new MockElement("body"),
 		};
@@ -365,8 +368,11 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 		assert.equal(scanNotice.noticeEl.children[0].children[3].textContent, "Last synced 1m ago");
 		assert.equal(scanFile.textContent, "");
 
-		controller.closeNotice();
+		assert.ok(documentListeners.has("keydown"), "visible progress installs Escape listener");
+		documentListeners.get("keydown")({ key: "Escape", stopPropagation() {} });
 		assert.equal(globalThis.__testActiveNotices.at(-1).hidden, true);
+		assert.equal(documentListeners.size, 0, "Escape closes and removes the document listener");
+		assert.equal(activeTimers.size, 0, "closing clears pending progress timers");
 	} finally {
 		delete globalThis.__createMockElement;
 		delete globalThis.__testActiveNotices;

@@ -1,3 +1,6 @@
+import { readLocalBytes } from "./sync/local-io";
+import { selectedSettingsPaths } from "./sync/settings-paths";
+import { scanLocal } from "./sync/local-scanner";
 import type { App } from "obsidian";
 import { normalizePath, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "./db";
@@ -92,6 +95,9 @@ type SyncEngineConfig = {
 		fastRemotePolling: boolean;
 		skipLargeFiles: boolean;
 		skipSizeLargerThanMB: number;
+		conflictResolution?: "auto" | "copy";
+		syncSettings?: boolean;
+		selectedSettings?: string[];
 	};
 	remote: RemoteFs;
 	transferConcurrency?: 1 | 2;
@@ -130,12 +136,6 @@ type ScanPolicy = {
 	narrow: boolean;
 };
 
-type HashJob = {
-	file: TFile;
-	size: number;
-	force: boolean;
-};
-
 export class SyncEngine {
 	private remoteTreeCache: RemoteTreeCache | null = null;
 	private localScanSnapshot: LocalScanSnapshot | null = null;
@@ -143,9 +143,10 @@ export class SyncEngine {
 	/** Bumped whenever external vault events invalidate paths during a scan. */
 	private invalidationEpoch = 0;
 
-	invalidateLocal(path: string): void {
+	invalidateLocal(path: string, subtree = false): void {
 		this.invalidationEpoch++;
-		this.localHashes.invalidate(path);
+		if (subtree) this.localHashes.invalidateSubtree(path);
+		else this.localHashes.invalidate(path);
 	}
 
 	constructor(private readonly config: SyncEngineConfig) {}
@@ -186,6 +187,12 @@ export class SyncEngine {
 			pluginId: this.config.pluginId,
 			ignorePatterns: this.config.settings.ignorePatterns,
 			maxFileSizeBytes,
+			selectedSettings: selectedSettingsPaths(
+				this.config.app.vault.configDir,
+				this.config.pluginId,
+				this.config.settings.syncSettings,
+				this.config.settings.selectedSettings,
+			),
 		});
 
 		let replanAttempts = 0;
@@ -287,6 +294,7 @@ export class SyncEngine {
 			forceVerified || options.fullScan === true || options.refreshRemote === true;
 
 		const narrow =
+			!this.config.settings.syncSettings &&
 			!verifyContents &&
 			!refreshRemote &&
 			replanAttempts === 0 &&
@@ -445,17 +453,15 @@ export class SyncEngine {
 				const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 				if (file instanceof TFile) {
 					if (pathFilter.isIgnored(file.path, file.stat.size)) continue;
+					const snapshot = { path: file.path, ...file.stat, file };
 					const fp = await this.localHashes.readBoth(
 						file,
 						() => this.config.app.vault.readBinary(file),
 						false,
-						{ withSha512: true },
+						{ withSha512: false },
 					);
-					candidateLocalFiles.set(file.path, {
-						path: file.path,
-						mtime: file.stat.mtime,
-						ctime: file.stat.ctime,
-						size: file.stat.size,
+					candidateLocalFiles.set(snapshot.path, {
+						...snapshot,
 						hash: fp.hash,
 						sha512: fp.sha512,
 						file,
@@ -739,6 +745,14 @@ export class SyncEngine {
 			db: this.config.db,
 			deviceId: this.config.settings.deviceId,
 			remote: this.config.remote,
+			pluginId: this.config.pluginId,
+			conflictResolution: this.config.settings.conflictResolution,
+			selectedSettings: selectedSettingsPaths(
+				this.config.app.vault.configDir,
+				this.config.pluginId,
+				this.config.settings.syncSettings,
+				this.config.settings.selectedSettings,
+			),
 		});
 
 		let applied = 0;
@@ -823,7 +837,10 @@ export class SyncEngine {
 					type: "operation-complete",
 					operation: action.operation,
 					path: action.path,
-					detail: action.detail,
+					detail:
+						action.operation === "conflict" && result.conflicts === 0
+							? "Automatically resolved; originals saved in local recovery"
+							: action.detail,
 				});
 			}
 
@@ -938,9 +955,12 @@ export class SyncEngine {
 			const localEntry = localFiles.get(path);
 			if (
 				localEntry !== undefined &&
-				!prevRecords.has(path) &&
 				localEntry.size === entry.size &&
-				localEntry.mtime === entry.mtime
+				(!prevRecords.has(path) ||
+					entry.uuid !== prevRecords.get(path)?.remoteUuid ||
+					entry.remoteHash !== prevRecords.get(path)?.remoteHash ||
+					entry.mtime !==
+						(prevRecords.get(path)?.remoteMtime ?? prevRecords.get(path)?.mtime))
 			) {
 				candidates.push({ path, entry, localEntry });
 			}
@@ -967,13 +987,13 @@ export class SyncEngine {
 					if (localEntry.sha512 !== undefined) {
 						fp = { hash: localEntry.hash, sha512: localEntry.sha512 };
 					} else {
-						const abstractFile = this.config.app.vault.getAbstractFileByPath(
-							normalizePath(path),
-						);
+						const abstractFile = localEntry.adapterOnly
+							? localEntry.file
+							: this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 						if (abstractFile instanceof TFile) {
 							const r = await this.localHashes.readBoth(
 								abstractFile,
-								() => this.config.app.vault.readBinary(abstractFile),
+								() => readLocalBytes(this.config.app, localEntry),
 								false,
 								{ withSha512: true },
 							);
@@ -1005,7 +1025,7 @@ export class SyncEngine {
 					if (abstractFile instanceof TFile) {
 						const r = await this.localHashes.readBoth(
 							abstractFile,
-							() => this.config.app.vault.readBinary(abstractFile),
+							() => readLocalBytes(this.config.app, localEntry),
 							false,
 							{ withSha512: false },
 						);
@@ -1025,12 +1045,14 @@ export class SyncEngine {
 			const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
 			downloads++;
 			const remoteSha256 = await sha256Hex(remoteBytes);
-			const abstractFile = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
+			const abstractFile = localEntry.adapterOnly
+				? localEntry.file
+				: this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 			let localSha256: string | undefined = localEntry.hash;
 			if (abstractFile instanceof TFile) {
 				const r = await this.localHashes.readBoth(
 					abstractFile,
-					() => this.config.app.vault.readBinary(abstractFile),
+					() => readLocalBytes(this.config.app, localEntry),
 					false,
 					{ withSha512: false },
 				);
@@ -1047,15 +1069,6 @@ export class SyncEngine {
 		return { resolved, comparisons, downloads };
 	}
 
-	private async hashJob(job: HashJob): Promise<void> {
-		await this.localHashes.readBoth(
-			job.file,
-			() => this.config.app.vault.readBinary(job.file),
-			job.force,
-			{ withSha512: false },
-		);
-	}
-
 	private async walkLocal(
 		pathFilter: SyncPathFilter,
 		verifyContents: boolean,
@@ -1063,95 +1076,23 @@ export class SyncEngine {
 		epoch: number,
 		exclusionsTracker?: { ignoredCount: number; tooLargeCount: number; samplePaths: string[] },
 	): Promise<LocalScan> {
-		const files = new Map<string, LocalEntry>();
-		const dirs = new Set<string>();
-		const jobs: HashJob[] = [];
-		const deferNoBaselineHashing = baselinePaths !== null;
-		for (const file of this.config.app.vault.getAllLoadedFiles()) {
-			if (file.path.length === 0) continue;
-			if (file instanceof TFile) {
-				const exclusion = pathFilter.checkExclusion(file.path, file.stat.size);
-				if (exclusion !== "included") {
-					if (exclusionsTracker) {
-						if (exclusion === "too_large") exclusionsTracker.tooLargeCount += 1;
-						else exclusionsTracker.ignoredCount += 1;
-						if (exclusionsTracker.samplePaths.length < 10) {
-							exclusionsTracker.samplePaths.push(file.path);
-						}
-					}
-					continue;
-				}
-				if (deferNoBaselineHashing && !baselinePaths.has(file.path)) {
-					// Deferred to equality resolution so both fingerprints come from one read.
-					files.set(file.path, {
-						path: file.path,
-						mtime: file.stat.mtime,
-						ctime: file.stat.ctime,
-						size: file.stat.size,
-						file,
-					});
-					continue;
-				}
-				jobs.push({
-					file,
-					size: file.stat.size,
-					force: verifyContents,
-				});
-			} else if (file instanceof TFolder) {
-				const exclusion = pathFilter.checkExclusion(file.path);
-				if (exclusion !== "included") {
-					if (exclusionsTracker) {
-						exclusionsTracker.ignoredCount += 1;
-					}
-					continue;
-				}
-				dirs.add(file.path);
-			}
-		}
-
-		const pool = this.config.hashingPool;
-		if (jobs.length > 0) {
-			if (pool !== undefined) {
-				await pool.run(
-					jobs,
-					(job) => job.size,
-					(job) => this.hashJob(job),
-				);
-			} else {
-				for (const job of jobs) {
-					await this.hashJob(job);
-				}
-			}
-			for (const job of jobs) {
-				const entry = this.localHashes.peek(job.file.path);
-				if (entry !== undefined) {
-					files.set(job.file.path, {
-						path: job.file.path,
-						mtime: job.file.stat.mtime,
-						ctime: job.file.stat.ctime,
-						size: job.file.stat.size,
-						hash: entry.hash,
-						sha512: entry.sha512,
-						file: job.file,
-					});
-				} else {
-					files.set(job.file.path, {
-						path: job.file.path,
-						mtime: job.file.stat.mtime,
-						ctime: job.file.stat.ctime,
-						size: job.file.stat.size,
-						file: job.file,
-					});
-				}
-			}
-		}
-
+		const result = await scanLocal(
+			this.config.app,
+			pathFilter,
+			this.localHashes,
+			verifyContents,
+			baselinePaths,
+			this.config.hashingPool,
+			exclusionsTracker,
+			selectedSettingsPaths(
+				this.config.app.vault.configDir,
+				this.config.pluginId,
+				this.config.settings.syncSettings,
+				this.config.settings.selectedSettings,
+			),
+		);
 		this.assertScanEpoch(epoch);
-		assertNoPathCollisions([
-			...[...files.keys()].map((path) => ({ path, isDir: false })),
-			...[...dirs].map((path) => ({ path, isDir: true })),
-		]);
-		return { files, dirs };
+		return result;
 	}
 
 	private async walkRemote(
@@ -1204,6 +1145,12 @@ export class SyncEngine {
 			pluginId: this.config.pluginId,
 			ignorePatterns: this.config.settings.ignorePatterns,
 			maxFileSizeBytes,
+			selectedSettings: selectedSettingsPaths(
+				this.config.app.vault.configDir,
+				this.config.pluginId,
+				this.config.settings.syncSettings,
+				this.config.settings.selectedSettings,
+			),
 		});
 
 		const exclusionsTracker = {

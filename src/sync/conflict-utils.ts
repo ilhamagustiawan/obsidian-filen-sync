@@ -21,5 +21,13 @@ export const isConflictFilePath = (path: string): boolean => {
 };
 
 export const getOriginalPathFromConflictPath = (conflictPath: string): string => {
-	return conflictPath.replace(/\.sync-conflict-(?:local|remote)-[a-zA-Z0-9_-]+/i, "");
+	const original = conflictPath.replace(/\.sync-conflict-(?:local|remote)-[a-zA-Z0-9_-]+/i, "");
+	if (original.startsWith("Filen Sync conflicts/settings-")) {
+		try {
+			return decodeURIComponent(original.slice("Filen Sync conflicts/settings-".length));
+		} catch {
+			return original;
+		}
+	}
+	return original;
 };

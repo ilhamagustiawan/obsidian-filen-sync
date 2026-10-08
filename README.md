@@ -38,7 +38,9 @@ Based on this comparison:
 - **Remote additions or edits** are downloaded to the vault.
 - **Local deletions** move corresponding remote files to the Filen trash.
 - **Remote deletions** prompt for confirmation before moving local files to the Obsidian system trash.
-- **Concurrent edits** (when both sides changed since the last baseline) keep a local conflict copy (`<filename>.sync-conflict-<side>-<deviceId>-<timestamp>.<ext>`) rather than overwriting either version.
+- **Concurrent edits** use **Automatically merge** by default. Markdown combines independent and identical changes against verified last-synced text. Overlapping edits, missing snapshots, invalid text, or exceeded limits create reviewable conflict copies. Other files, including canvases, use the latest modification time; local wins ties. Explicit push and pull retain their direction semantics.
+- **Selected settings JSON** merges top-level objects with local keys overriding remote keys. Nested objects and arrays are replaced as whole values. Settings sync is disabled by default; enable it and explicitly select core settings or individual plugins’ `data.json`. Workspace/cache files, plugin executables, and this plugin’s own directory remain excluded.
+- **Recovery** preserves both original versions locally before automatic conflict writes. Recovery bytes stay in the excluded plugin directory, with metadata isolated by the verified sync target. They are never automatically deleted.
 
 ### First sync
 
@@ -127,34 +129,27 @@ All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 
 ### Sync progress and status
 
-- **Desktop status bar**: A compact Filen icon uses the native Obsidian status bar area. Hover or focus to see the current phase, completed/total changed files, active file, and last successful sync. Select it to open sync actions and details.
-- **Quiet mobile status**: The persistent top-right ribbon icon is the sole automatic status indicator on mobile, keeping your notes completely unobstructed. Tapping the ribbon icon always opens the sync actions menu without accidentally initiating a sync. Routine background auto-sync failures do not produce disruptive toasts, while safety confirmations and explicit sync errors remain prominent.
-- **On-demand details**: Select **Show sync progress** from the sync actions menu, or click the sync ribbon icon during an active run on desktop, to open detailed live progress. Error details retain a **View logs →** action.
-- **Last sync & diagnostics**: The status tooltip, menu, and on-demand details show a relative last-sync time; details include the exact local timestamp. Activity logs record a concise local timing and count summary (total time, scan, plan, transfer, target prep, event probe, local scan, remote, equality, and time to first file transfer) and the actual scan mode for easy diagnosis without transmitting file names, contents, or telemetry. Failed or skipped attempts do not change last-sync time.
+Desktop status-bar, ribbon, and mobile right-sidebar buttons share the same status and always open the sync menu. Green circle/check means a complete successful run with no pending changes or unresolved issues. Purple arrows indicate syncing; purple pause indicates paused sync; purple circle indicates pending/checking. Disconnected/offline is red, conflicts are amber, and errors are red. Animations respect reduced-motion preferences.
 
-### Status bar
+The menu starts with **Review conflicts (N)** when needed, followed by **Pause/Resume**, **Version history**, **Open Sync log**, **Deleted files**, and **Sync settings**. Version history is disabled unless a Markdown note is active. **Sync now** and **Show sync progress** remain available; push, pull, previews, force upload, and diagnostics are grouped under **Advanced**.
 
-When visible, the status bar item reflects real-time sync state and provides quick access to common actions:
+**Show sync progress** opens a centered live progress popup with Close and Escape controls. Transfer totals describe transfer progress; they do not imply whole-run completion. Rendering stays throttled, and terminal results dismiss after a short delay. Automatic runs keep progress in the icons. Pausing stops subsequent automatic runs while an active operation finishes safely.
 
-- **Idle / Queued changes**: Shows a quiet, neutral idle status when ready or when local changes are queued for auto-sync. The opened sync menu reports the exact pending change count without noisy indicator flashing outside the menu.
-- **Idle**: Uses a compact Obsidian Sync-style icon by default, or icon and text when selected in settings.
-- **Syncing**: Shows scan/planning phases and completed changed-file counts only when a valid transfer total is known; reaching the transfer total does not imply the full sync has finished.
-- **Paused / Offline**: Shows warning badges when auto-sync is paused or the device is offline.
-- **Review / Error**: Conflicts and required confirmation stay visible; transient failures show a retry countdown.
-- **Action menu**: Click, right-click, or press Enter/Space on the status bar item to open a menu with options to sync now, force sync the active file, push local files, pull remote files, pause/resume auto-sync, open activity logs, or open plugin settings.
+### Mobile status
 
-### Mobile sync progress
+One persistent button lives in the right sidebar and remounts after layout changes. It uses the same menu and states as desktop. **Show mobile sync status** controls visibility without disabling synchronization. Connected, unpaused vaults check shortly after opening even when save and interval sync are disabled. Returning to the app coalesces duplicate checks; offline checks recover on reconnection. **Initial sync** keeps full verification.
 
-A compact chip below the active note header shows **Checking shortly…** when an opening check is scheduled, then live phases and transfer progress. Notes remain editable, and the chip stays outside the scrolling content and away from the keyboard.
+### Conflict review
 
-Opening checks and manual runs show progress immediately. Other automatic runs wait 300 ms to avoid flashing on quick checks. Successful results disappear after two seconds; errors, conflicts, and required confirmation remain until dismissed or resolved. Dismissing an issue does not clear it: the ribbon and sync menu retain access. Tap progress for details or an issue for the sync menu. You can also pin **Show sync progress** to the mobile toolbar.
+New unresolved copies open one centered resolver after synchronization, including partial-success runs. Opening waits until the app is foregrounded and other dialogs close. Closing the resolver makes no file changes and does not repeatedly reopen it.
 
-Disable **Show mobile sync progress** to hide the chip without disabling sync. The former **Sync after startup** setting has been removed: connected, unpaused vaults always check shortly after opening, even when save and interval sync are disabled. Old startup-delay values are ignored. Returning to the app coalesces duplicate events and skips recent successful checks when no edits are queued. Offline checks recover when connectivity returns; safety holds still require review. The separate **Initial sync** command retains its verified first-sync behavior.
+Search the paginated list grouped by original path. Each changed section requires **Keep current** or a copy alternative; identical alternatives are combined. **Saved result preview** uses the same reconstruction as saving, preserving untouched text, line endings, and final newlines. Comparison is limited to 1 MiB combined text and one million line-comparison cells. Larger or binary groups offer whole-file choices and **Open current/Open copy**.
 
-### Ribbon icons
+**Apply and trash copies** asks for confirmation, revalidates the reviewed contents, preserves the replaced original in local recovery, saves, then trashes copies. Changed or failed copies remain for review. Resolved changes enter normal sync; paused sync stays paused. Conflicting selected settings get visible copies under `Filen Sync conflicts/` so they can be reviewed despite the hidden settings directory.
 
-- **Filen: sync menu / sync now** (`refresh-cw`): Spins with smooth animation during active sync. On mobile, tapping always opens the sync actions menu safely. On desktop, clicking triggers sync now or displays live on-demand progress while active. Tooltip updates dynamically with live progress and status.
-- **Filen: open activity logs** (`list`): Opens the activity log viewer.
+### Deleted files
+
+Browse searchable Filen trash scoped to the verified remote root and target-bound historical UUID mappings. Unknown ownership is excluded. Restoring requires confirmation, fresh membership checks, and unoccupied local and remote destinations. If the original parent is unavailable, restore that parent in Filen first. Successful restores invalidate caches and queue reconciliation. No permanent-delete or empty-trash action is provided.
 
 ### File context menu
 
@@ -166,12 +161,9 @@ Right-click any file in the file explorer or active editor tab to access:
 
 ### Two-pane file version history
 
-The version history modal allows inspecting and recovering previous file revisions stored in Filen:
+The centered history window uses a date-grouped timeline on the left and independently scrolling preview on the right. Revision counts, local times, and accent selection identify the selected revision. **Filen versions** and **Local recovery** are separate sources; no author or device identity is invented.
 
-- **Version list**: Revisions grouped by date with timestamps and file sizes.
-- **Preview pane**: Displays text content or binary file information.
-- **Diff viewer**: Toggle **Show diff** to view an inline line-by-line comparison between the selected remote version and your active local file.
-- **Copy & restore**: One-click **Copy text** to clipboard or **Restore this version** (which safely restores the remote file and triggers a synchronization pass back to the vault).
+The fixed header contains the filename, **Show changes**, **Copy**, **Restore**, and Close. Normal previews use Obsidian’s Markdown renderer, including tables. **Show changes** compares the revision with the current file within bounded comparison limits. **Copy** copies source text. **Restore** confirms the file and revision, saves current bytes in local recovery, then restores and reconciles. Narrow screens use timeline/preview navigation with **Back**. Stale previews are ignored and render resources are released on selection changes and close.
 
 ### Activity logs
 
@@ -225,19 +217,19 @@ The sync baseline is maintained locally in IndexedDB inside the vault's plugin s
 
 ### Auto-sync & UI
 
-| Setting                        | Description                                                                                                                               | Default                |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| **Auto-sync paused**           | Pause background sync triggers without disabling manual commands.                                                                         | Disabled               |
-| **Sync progress notice**       | Display a live notification banner with progress bar and current file while syncing (`transfers_only`, `always`, `manual_only`, `never`). | When files are syncing |
-| **Show mobile sync progress**  | Show the compact chip below the mobile note header.                                                                                       | Enabled                |
-| **Status bar indicator style** | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                                                        | Compact icon           |
-| **Sync on file save**          | Batch file changes after the save delay; automatic runs also respect the minimum gap below.                                               | Enabled                |
-| **Sync on save delay**         | Wait this long after the latest save before syncing (1 to 30 seconds).                                                                    | `2` seconds            |
-| **Minimum automatic sync gap** | Wait at least this long between automatic sync starts (5 to 120 seconds). Manual sync is immediate.                                       | `10` seconds           |
-| **Background sync interval**   | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                                                                    | `3` minutes            |
-| **Fast remote polling**        | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.                                                  | Enabled                |
-| **Skip large files**           | Skip transferring files larger than the specified threshold.                                                                              | Enabled                |
-| **Skip size threshold**        | Maximum file size in megabytes before skipping (1 to 1000 MB).                                                                            | `50` MB                |
+| Setting                        | Description                                                                                         | Default      |
+| ------------------------------ | --------------------------------------------------------------------------------------------------- | ------------ |
+| **Auto-sync paused**           | Pause background sync triggers without disabling manual commands.                                   | Disabled     |
+| **Sync progress**              | Open centered details explicitly from the menu.                                                     | On demand    |
+| **Show mobile sync status**    | Show the persistent right-sidebar status button.                                                    | Enabled      |
+| **Status bar indicator style** | Choose between **Compact icon** (native Obsidian Sync style) or **Icon and text**.                  | Compact icon |
+| **Sync on file save**          | Batch file changes after the save delay; automatic runs also respect the minimum gap below.         | Enabled      |
+| **Sync on save delay**         | Wait this long after the latest save before syncing (1 to 30 seconds).                              | `2` seconds  |
+| **Minimum automatic sync gap** | Wait at least this long between automatic sync starts (5 to 120 seconds). Manual sync is immediate. | `10` seconds |
+| **Background sync interval**   | Periodic sync interval in minutes (0 to 60; 0 disables interval sync).                              | `3` minutes  |
+| **Fast remote polling**        | Query Filen's cloud events feed to skip full remote scans when nothing changed remotely.            | Enabled      |
+| **Skip large files**           | Skip transferring files larger than the specified threshold.                                        | Enabled      |
+| **Skip size threshold**        | Maximum file size in megabytes before skipping (1 to 1000 MB).                                      | `50` MB      |
 
 ## Ignore rules
 
@@ -264,7 +256,7 @@ Add custom vault-relative paths or glob patterns in **Settings → Obsidian File
 
 ## Known limitations
 
-- **Conflict resolution**: When conflicts arise, conflict copies are saved locally (`.sync-conflict-*`) to preserve all data. An interactive side-by-side 3-way visual merge tool is not included in-app; use Obsidian's core diff or standard diff utilities to merge text.
+- **Merge snapshots**: Markdown merging is limited to 1 MiB per version and 64 MiB of snapshots per target. Snapshots come only from verified sync/equality; evicted or missing snapshots fall back to review. Local recovery has no automatic expiry and consumes vault storage.
 - **File renames**: Detected via remote UUID tracking where available. Moves across different directory structures may be processed as delete plus create.
 - **Collaboration**: Designed for personal vault synchronization across devices; not intended as a real-time multi-user concurrent editor.
 
@@ -323,3 +315,5 @@ TEST_VAULT_PATH=/path/to/vault npm run deploy:test-vault
 AGPL-3.0-only.
 
 `@filen/sdk` is licensed under AGPLv3, and this plugin is licensed under AGPLv3 as well.
+
+Google’s diff-match-patch implementation is pinned to `1.0.5` and bundled for browser use. Its Apache 2.0 license is included in [licenses/diff-match-patch.txt](licenses/diff-match-patch.txt) and the generated bundle.

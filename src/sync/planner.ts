@@ -253,6 +253,16 @@ function planPath(
 		};
 	}
 
+	if (local.hash !== undefined && remote.hash !== undefined && local.hash === remote.hash) {
+		return {
+			path,
+			operation: "noop",
+			reasonCode: prev ? "identical_content" : "first_sync_identical",
+			detail: "Verified identical content",
+			hash: local.hash,
+		};
+	}
+
 	// A replaced remote object is a change even when its path/metadata are unchanged.
 	const remoteIdentityChanged =
 		prev?.remoteUuid !== undefined &&
@@ -271,7 +281,7 @@ function planPath(
 		prev?.hash !== undefined &&
 		local.hash === prev.hash
 	) {
-		if (remote.size === prev.size && remote.mtime === prev.mtime) {
+		if (remote.size === prev.size && remote.mtime === (prev.remoteMtime ?? prev.mtime)) {
 			return {
 				path,
 				operation: "noop",
@@ -473,6 +483,6 @@ function isRemoteChanged(remote: RemoteFileInfo, prev: SyncedFileRecord): boolea
 			prev.remoteHash !== undefined &&
 			remote.remoteHash !== prev.remoteHash) ||
 		remote.size !== prev.size ||
-		remote.mtime !== prev.mtime
+		remote.mtime !== (prev.remoteMtime ?? prev.mtime)
 	);
 }

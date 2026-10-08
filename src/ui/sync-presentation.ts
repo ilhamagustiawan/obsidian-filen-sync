@@ -1,3 +1,4 @@
+import type { StatusBarState } from "../sync/coordinator";
 import type { SyncProgress } from "../sync/types";
 
 export const shouldShowMobileSyncIndicator = (isMobile = false, enabled = false): boolean =>
@@ -65,4 +66,52 @@ export function formatLastSyncSummary(
 	formatRelativeTime: (timestamp: number) => string,
 ): string {
 	return timestamp === null ? "Not synced yet" : `Last synced ${formatRelativeTime(timestamp)}`;
+}
+
+export type SyncIconState =
+	| "synced"
+	| "syncing"
+	| "paused"
+	| "disconnected"
+	| "pending"
+	| "conflict"
+	| "error";
+/** One precedence model for every sync entry point. Persisted timestamps never imply completion. */
+export function syncIconPresentation(
+	state: StatusBarState | null,
+	options: {
+		connected?: boolean;
+		offline?: boolean;
+		paused?: boolean;
+		pending?: number;
+		conflicts?: number;
+	} = {},
+) {
+	let kind: SyncIconState;
+	if (state?.kind === "syncing") kind = "syncing";
+	else if (options.connected === false || options.offline) kind = "disconnected";
+	else if (state?.kind === "error") kind = "error";
+	else if (options.conflicts || (state?.kind === "warning" && !options.paused)) kind = "conflict";
+	else if (options.paused) kind = "paused";
+	else if (options.pending || state?.kind !== "success" || !state.syncCompleted) kind = "pending";
+	else kind = "synced";
+	const icons = {
+		synced: "circle-check",
+		syncing: "refresh-cw",
+		paused: "circle-pause",
+		disconnected: "cloud-off",
+		pending: "circle",
+		conflict: "triangle-alert",
+		error: "circle-alert",
+	};
+	const labels = {
+		synced: "Synced",
+		syncing: "Syncing",
+		paused: "Paused",
+		disconnected: "Disconnected",
+		pending: "Pending/checking",
+		conflict: "Conflicts need review",
+		error: "Sync error",
+	};
+	return { state: kind, icon: icons[kind], label: labels[kind] };
 }

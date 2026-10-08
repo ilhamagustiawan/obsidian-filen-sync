@@ -1438,6 +1438,35 @@ test("SyncDb isolates target identity by vaultId, userId, and remoteRootUuid and
 			remoteHash: "hash-remote-1",
 		});
 
+		assert.equal(db1.schemaVersion, 2);
+		await db1.setMergeBaseline("file1.md", {
+			text: "trusted text",
+			hash: "verified",
+			savedAt: 1,
+		});
+		await db1.addRecovery({
+			id: "recovery-1",
+			path: "file1.md",
+			storagePath: "excluded/path.bin",
+			hash: "hash",
+			size: 4,
+			timestamp: 1,
+			source: "local",
+		});
+		await db1.setDeletedMapping({ uuid: "deleted-uuid", path: "old.md" });
+		assert.equal(
+			(await db1.getAllFiles()).size,
+			1,
+			"text and recovery stores never enter file inventory",
+		);
+		assert.equal((await db1.getMergeBaseline("file1.md")).text, "trusted text");
+		assert.equal((await db1.getRecovery("file1.md")).length, 1);
+		await db1.setMergeBaseline("oversized.md", {
+			text: "x".repeat(1024 * 1024 + 1),
+			hash: "hash",
+			savedAt: 1,
+		});
+		assert.equal(await db1.getMergeBaseline("oversized.md"), undefined);
 		const file1 = await db1.getFile("file1.md");
 		assert.ok(file1 !== undefined);
 		assert.equal(file1.remoteHash, "hash-remote-1");
@@ -1448,6 +1477,14 @@ test("SyncDb isolates target identity by vaultId, userId, and remoteRootUuid and
 		await db2.runMigrations();
 		assert.equal(await db2.getFile("file1.md"), undefined, "isolated from different account");
 
+		assert.equal(await db2.getMergeBaseline("file1.md"), undefined);
+		assert.deepEqual(await db2.getRecovery("file1.md"), []);
+		assert.deepEqual(await db2.getDeletedMappings(), []);
+		const readonly = await SyncDb.open(binding1, { readOnly: true });
+		await assert.rejects(
+			readonly.setMergeBaseline("file1.md", { text: "bad", hash: "bad", savedAt: 2 }),
+			/read-only/,
+		);
 		// Binding 3: different remoteRootUuid
 		const binding3 = { vaultId: "vault-a", userId: 100, remoteRootUuid: "root-uuid-2" };
 		const db3 = await SyncDb.open(binding3);
@@ -1675,7 +1712,7 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 		assert.equal(trashedFile, true, "Local file was trashed after verified remote absence");
 		assert.equal(deleteResult.applied, 1);
 
-		// pushLocal updates DB baseline upon remote.writeFile success even if concurrent local edit triggers replan
+		// A concurrent edit after upload retains the old baseline for fresh reconciliation.
 		const concurrentTFile = new TFile("typing.md", 1000, 20);
 		const concurrentEntry = {
 			path: "typing.md",
@@ -1711,9 +1748,11 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 			/Local file changed during sync.*Replan the sync/u,
 		);
 
-		assert.ok(savedBaselineRecord, "Baseline was saved to DB upon successful upload");
-		assert.equal(savedBaselineRecord.remoteUuid, "uploaded-uuid");
-		assert.equal(savedBaselineRecord.mtime, 1000);
+		assert.equal(
+			savedBaselineRecord,
+			undefined,
+			"Partial success must not publish a new baseline",
+		);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

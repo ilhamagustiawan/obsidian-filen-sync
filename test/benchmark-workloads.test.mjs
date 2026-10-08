@@ -474,3 +474,40 @@ test("Benchmark Workload D: serial vs byte-bounded concurrent hashing under cont
 		`[Workload D - One-File Edit Under Pool] elapsedMs: ${editMs.toFixed(1)}ms | localReads: ${edit.scanDiagnostics?.localReads}`,
 	);
 });
+
+test("large vault routine reconciliation reads zero unchanged files with fresh hashes", async (t) => {
+	const localFiles = {},
+		remoteFiles = {};
+	for (let i = 0; i < 10_000; i++) {
+		const path = `notes/n-${i}.md`,
+			content = `Note ${i}\n`;
+		localFiles[path] = content;
+		remoteFiles[path] = { content, mtime: 1000 };
+	}
+	const pool = new ByteBoundedWorkPool({
+		maxWorkers: 2,
+		maxInFlightBytes: 8 * 1024 * 1024,
+		largeJobThresholdBytes: 8 * 1024 * 1024,
+	});
+	const fixture = createBenchmarkFixture({
+		localFiles,
+		remoteFiles,
+		baseline: Object.keys(localFiles),
+		delayMs: 0,
+		hashingPool: pool,
+	});
+	const start = performance.now();
+	await fixture.runSync();
+	const cold = performance.now() - start;
+	const reads = fixture.metrics.localReads;
+	const warmStart = performance.now();
+	const outcome = await fixture.runSync();
+	const warm = performance.now() - warmStart;
+	assert.equal(fixture.metrics.localReads - reads, 0);
+	assert.equal(outcome.scanDiagnostics.localReads, 0);
+	assert.equal(outcome.scanDiagnostics.inventoryFiles, 10_000);
+	assert.equal(outcome.applied, 0);
+	t.diagnostic(
+		`10,000 notes: cold ${cold.toFixed(1)}ms, routine reconcile ${warm.toFixed(1)}ms, 0 routine content reads`,
+	);
+});

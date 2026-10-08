@@ -9,6 +9,7 @@ import {
 
 export class SyncNoticeController {
 	private activeNotice: Notice | null = null;
+	private escapeCleanup: (() => void) | null = null;
 	private noticeEl: HTMLElement | null = null;
 	private iconSpan: HTMLElement | null = null;
 	private titleEl: HTMLElement | null = null;
@@ -142,6 +143,8 @@ export class SyncNoticeController {
 	}
 
 	closeNotice(): void {
+		this.escapeCleanup?.();
+		this.escapeCleanup = null;
 		this.clearShowTimer();
 		this.clearDismissTimer();
 		this.clearCoalesceTimer();
@@ -213,7 +216,8 @@ export class SyncNoticeController {
 			this.noticeEl = null;
 		}
 
-		const frag = document.createDocumentFragment();
+		const doc = typeof activeDocument === "undefined" ? document : activeDocument;
+		const frag = doc.createDocumentFragment();
 		const container = frag.createDiv({ cls: "filen-notice-container" });
 
 		const header = container.createDiv({ cls: "filen-notice-header" });
@@ -221,6 +225,12 @@ export class SyncNoticeController {
 		this.iconSpan = iconWrap.createSpan({ cls: "filen-notice-icon filen-notice-spin" });
 		this.titleEl = iconWrap.createSpan({ cls: "filen-notice-title", text: "Filen Sync" });
 		this.badgeEl = header.createSpan({ cls: "filen-notice-badge", text: "0%" });
+		const close = header.createEl("button", { text: "×", cls: "filen-progress-close" });
+		close.setAttr("aria-label", "Close sync progress");
+		close.addEventListener("click", (e) => {
+			e.stopPropagation();
+			this.closeNotice();
+		});
 
 		const track = container.createDiv({ cls: "filen-notice-bar-track" });
 		this.barFill = track.createDiv({ cls: "filen-notice-bar-fill" });
@@ -233,6 +243,22 @@ export class SyncNoticeController {
 		this.activeNotice = new Notice(frag, 0);
 		this.noticeEl = this.activeNotice.noticeEl;
 		this.noticeEl.addClass("filen-sync-progress-notice");
+		if (
+			doc.body?.appendChild &&
+			this.noticeEl.ownerDocument &&
+			this.noticeEl.ownerDocument !== doc
+		)
+			doc.body.appendChild(this.noticeEl);
+		if (doc.addEventListener) {
+			const escape = (e: KeyboardEvent) => {
+				if (e.key === "Escape") {
+					e.stopPropagation();
+					this.closeNotice();
+				}
+			};
+			doc.addEventListener("keydown", escape);
+			this.escapeCleanup = () => doc.removeEventListener("keydown", escape);
+		}
 
 		if (mode === "compact") {
 			this.noticeEl.addClass("filen-notice-compact");

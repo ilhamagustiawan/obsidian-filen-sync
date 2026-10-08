@@ -16,6 +16,7 @@ export type SyncedFileRecord = {
 	remoteUuid?: string;
 	/** Remote content hash from Filen metadata (SHA-512). */
 	remoteHash?: string;
+	remoteMtime?: number;
 	/** Unix-ms timestamp of the last successful sync operation for this file. */
 	lastSyncAt?: number;
 	/** Which side was last known to have the canonical version. */
@@ -27,11 +28,14 @@ export type SyncedFileRecord = {
  * Bump this when SyncedFileRecord or the DB layout changes.
  * Migrations run automatically when the stored version is lower.
  */
-export const SYNC_DB_SCHEMA_VERSION = 1;
+export const SYNC_DB_SCHEMA_VERSION = 2;
 
 export type SyncProgressNoticeMode = "transfers_only" | "always" | "manual_only" | "never";
 
 export type FilenSyncSettings = {
+	conflictResolution: "auto" | "copy";
+	syncSettings: boolean;
+	selectedSettings: string[];
 	email: string;
 	remoteRoot: string;
 	deviceId: string;
@@ -60,6 +64,9 @@ export type FilenSyncSettings = {
 const DEFAULT_REMOTE_ROOT = "/Obsidian";
 
 export const DEFAULT_SETTINGS: FilenSyncSettings = {
+	conflictResolution: "auto",
+	syncSettings: false,
+	selectedSettings: [],
 	email: "",
 	remoteRoot: DEFAULT_REMOTE_ROOT,
 	deviceId: "",
@@ -116,6 +123,9 @@ export const FilenSyncSettings = {
 		}
 
 		return {
+			conflictResolution: value.conflictResolution === "copy" ? "copy" : "auto",
+			syncSettings: readBoolean(value.syncSettings, false),
+			selectedSettings: readStringArray(value.selectedSettings),
 			email: readString(value.email, DEFAULT_SETTINGS.email),
 			remoteRoot: readString(value.remoteRoot, DEFAULT_REMOTE_ROOT),
 			deviceId: readString(value.deviceId, ""),
@@ -209,6 +219,52 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		new Setting(containerEl)
+			.setName("Conflict resolution")
+			.setDesc(
+				"Merge independent Markdown edits, selected settings, and use the newest other file. Originals remain in local recovery.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("auto", "Automatically merge")
+					.addOption("copy", "Create conflict file")
+					.setValue(this.plugin.settings.conflictResolution)
+					.onChange(async (value) => {
+						this.plugin.settings.conflictResolution =
+							value === "copy" ? "copy" : "auto";
+						await this.plugin.saveSettings();
+						this.plugin.refreshSyncConfiguration();
+					}),
+			);
+		new Setting(containerEl)
+			.setName("Sync selected settings")
+			.setDesc(
+				"Send only explicitly selected settings JSON to Filen. Restart other devices to apply changes.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.syncSettings).onChange(async (value) => {
+					this.plugin.settings.syncSettings = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshSyncConfiguration();
+				}),
+			);
+		new Setting(containerEl)
+			.setName("Selected settings paths")
+			.setDesc(
+				"One path per line relative to the config folder: app.json, appearance.json, hotkeys.json, or plugins/<id>/data.json.",
+			)
+			.addTextArea((text) =>
+				text
+					.setValue(this.plugin.settings.selectedSettings.join("\n"))
+					.onChange(async (value) => {
+						this.plugin.settings.selectedSettings = value
+							.split("\n")
+							.map((p) => p.trim())
+							.filter(Boolean);
+						await this.plugin.saveSettings();
+						this.plugin.refreshSyncConfiguration();
+					}),
+			);
 
 		this.renderAccountSection(containerEl);
 		this.renderSyncSection(containerEl);
@@ -408,8 +464,8 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(section)
-			.setName("Show mobile sync progress")
-			.setDesc("Show a compact progress indicator below the note header on mobile.")
+			.setName("Show mobile sync status")
+			.setDesc("Show a persistent sync status button in the mobile right sidebar.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.showFloatingSyncIndicator)

@@ -40,6 +40,11 @@ export class LocalHashCache {
 
 	invalidate(path: string): void {
 		this.generation++;
+		this.entries.delete(path);
+	}
+
+	invalidateSubtree(path: string): void {
+		this.generation++;
 		for (const key of this.entries.keys()) {
 			if (key === path || key.startsWith(`${path}/`)) this.entries.delete(key);
 		}
@@ -52,6 +57,26 @@ export class LocalHashCache {
 
 	prune(paths: Set<string>): void {
 		for (const key of this.entries.keys()) if (!paths.has(key)) this.entries.delete(key);
+	}
+
+	getFresh(
+		file: TFile,
+		force = false,
+		byStat = false,
+	): { hash: string; sha512?: string } | undefined {
+		const e = this.entries.get(file.path);
+		if (
+			force ||
+			!e ||
+			(!byStat && e.file !== file) ||
+			e.mtime !== file.stat.mtime ||
+			e.ctime !== file.stat.ctime ||
+			e.size !== file.stat.size ||
+			Date.now() - e.checkedAt >= LOCAL_HASH_CACHE_TTL_MS
+		)
+			return undefined;
+		this.hashHits++;
+		return { hash: e.hash, sha512: e.sha512 };
 	}
 
 	/** Returns the cached fingerprints without reading, if a fresh entry exists. */
@@ -106,6 +131,7 @@ export class LocalHashCache {
 		const hash = await sha256Hex(bytes);
 		const sha512 = opts.withSha512 ? await sha512Hex(bytes) : undefined;
 		if (
+			generation !== this.generation ||
 			file.path !== path ||
 			file.stat.mtime !== mtime ||
 			file.stat.ctime !== ctime ||

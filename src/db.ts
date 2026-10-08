@@ -11,7 +11,25 @@ export type SyncDbOptions = {
 
 // Thin IndexedDB wrapper for persisting per-file sync state.
 // Keyed by file path; values are SyncedFileRecord objects.
+export type MergeBaseline = { text: string; hash: string; savedAt: number };
+export type RecoveryRecord = {
+	id: string;
+	path: string;
+	storagePath: string;
+	hash: string;
+	size: number;
+	timestamp: number;
+	source: string;
+};
+export type DeletedMapping = { uuid: string; path: string; parentUuid?: string };
 export interface SyncDb {
+	readonly targetKey?: string;
+	getMergeBaseline?(path: string): Promise<MergeBaseline | undefined>;
+	setMergeBaseline?(path: string, baseline: MergeBaseline): Promise<void>;
+	addRecovery?(record: RecoveryRecord): Promise<void>;
+	getRecovery?(path: string): Promise<RecoveryRecord[]>;
+	setDeletedMapping?(record: DeletedMapping): Promise<void>;
+	getDeletedMappings?(): Promise<DeletedMapping[]>;
 	getFile(path: string): Promise<SyncedFileRecord | undefined>;
 	setFile(path: string, record: SyncedFileRecord): Promise<void>;
 	deleteFile(path: string): Promise<void>;
@@ -64,7 +82,7 @@ export const SyncDb = {
 			name: dbName,
 			storeName: "synced-files",
 		});
-		const db = new LocalForageDb(store, binding, options.readOnly ?? false);
+		const db = new LocalForageDb(store, binding, options.readOnly ?? false, dbName);
 		await db.loadMeta();
 		return db;
 	},
@@ -72,12 +90,84 @@ export const SyncDb = {
 
 class LocalForageDb implements SyncDb {
 	private _schemaVersion = 0;
+	private readonly baselines: ReturnType<typeof localforage.createInstance>;
+	private readonly mergeMeta: ReturnType<typeof localforage.createInstance>;
+	private baselineWrite: Promise<void> = Promise.resolve();
+	private readonly recovery: ReturnType<typeof localforage.createInstance>;
+	private readonly deleted: ReturnType<typeof localforage.createInstance>;
 
 	constructor(
 		private readonly store: ReturnType<typeof localforage.createInstance>,
 		private readonly binding: SyncDbOptions,
 		private readonly readOnly: boolean = false,
-	) {}
+		readonly targetKey: string = "",
+	) {
+		this.baselines = localforage.createInstance({ name: targetKey, storeName: "merge-text" });
+		this.mergeMeta = localforage.createInstance({ name: targetKey, storeName: "merge-meta" });
+		this.recovery = localforage.createInstance({ name: targetKey, storeName: "recovery" });
+		this.deleted = localforage.createInstance({ name: targetKey, storeName: "deleted-items" });
+	}
+
+	private assertWritable(): void {
+		if (this.readOnly) throw new Error("Cannot modify sync history in read-only mode.");
+	}
+	async getMergeBaseline(path: string): Promise<MergeBaseline | undefined> {
+		validateSyncPath(path);
+		return (await this.baselines.getItem<MergeBaseline>(path)) ?? undefined;
+	}
+	setMergeBaseline(path: string, baseline: MergeBaseline): Promise<void> {
+		const write = this.baselineWrite.then(() => this.writeMergeBaseline(path, baseline));
+		this.baselineWrite = write.catch(() => {});
+		return write;
+	}
+	private async writeMergeBaseline(path: string, baseline: MergeBaseline): Promise<void> {
+		this.assertWritable();
+		validateSyncPath(path);
+		const size = new TextEncoder().encode(baseline.text).length;
+		if (size > 1024 * 1024) {
+			await this.baselines.removeItem(path);
+			await this.mergeMeta.removeItem(path);
+			return;
+		}
+		await this.baselines.setItem(path, baseline);
+		await this.mergeMeta.setItem(path, { size, at: baseline.savedAt });
+		const entries: Array<{ path: string; size: number; at: number }> = [];
+		await this.mergeMeta.iterate<{ size: number; at: number }, void>((b, key) => {
+			entries.push({ path: key, size: b.size, at: b.at });
+		});
+		let total = entries.reduce((n, e) => n + e.size, 0);
+		for (const e of entries.sort((a, b) => a.at - b.at)) {
+			if (total <= 64 * 1024 * 1024) break;
+			await this.baselines.removeItem(e.path);
+			await this.mergeMeta.removeItem(e.path);
+			total -= e.size;
+		}
+	}
+	async addRecovery(record: RecoveryRecord): Promise<void> {
+		this.assertWritable();
+		validateSyncPath(record.path);
+		await this.recovery.setItem(record.id, record);
+	}
+	async getRecovery(path: string): Promise<RecoveryRecord[]> {
+		validateSyncPath(path);
+		const records: RecoveryRecord[] = [];
+		await this.recovery.iterate<RecoveryRecord, void>((r) => {
+			if (r.path === path) records.push(r);
+		});
+		return records.sort((a, b) => b.timestamp - a.timestamp);
+	}
+	async setDeletedMapping(record: DeletedMapping): Promise<void> {
+		this.assertWritable();
+		validateSyncPath(record.path);
+		await this.deleted.setItem(record.uuid, record);
+	}
+	async getDeletedMappings(): Promise<DeletedMapping[]> {
+		const records: DeletedMapping[] = [];
+		await this.deleted.iterate<DeletedMapping, void>((r) => {
+			records.push(r);
+		});
+		return records;
+	}
 
 	get schemaVersion(): number {
 		return this._schemaVersion;
@@ -102,6 +192,7 @@ class LocalForageDb implements SyncDb {
 			throw new Error("Cannot save invalid sync history for this path.");
 		}
 		await this.store.setItem(path, record);
+		if (record.remoteUuid) await this.setDeletedMapping({ uuid: record.remoteUuid, path });
 	}
 
 	async deleteFile(path: string): Promise<void> {
@@ -201,7 +292,7 @@ class LocalForageDb implements SyncDb {
 			});
 			await Promise.all(writes);
 
-			this._schemaVersion = SYNC_DB_SCHEMA_VERSION;
+			this._schemaVersion = 1;
 			await this.store.setItem(META_KEY, {
 				schemaVersion: this._schemaVersion,
 				binding: this.binding,
@@ -209,6 +300,16 @@ class LocalForageDb implements SyncDb {
 			migrated = true;
 		}
 
+		if (this._schemaVersion < 2) {
+			// Legacy records retain unknown remote timestamps; do not fabricate historical merge text.
+			const records = await this.getAllFiles();
+			for (const record of records.values())
+				if (record.remoteUuid)
+					await this.setDeletedMapping({ uuid: record.remoteUuid, path: record.path });
+			this._schemaVersion = 2;
+			await this.store.setItem(META_KEY, { schemaVersion: 2, binding: this.binding });
+			migrated = true;
+		}
 		return migrated;
 	}
 }

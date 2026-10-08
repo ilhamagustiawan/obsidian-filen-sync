@@ -12,7 +12,7 @@ test("initial command requests verified two-way sync and preserves warning state
 		await writeFile(
 			stub,
 			`export class Plugin {constructor(app,manifest){this.app=app;this.manifest=manifest;this.commands=[];}register(){} registerEvent(){} addSettingTab(){} addStatusBarItem(){return null;} addRibbonIcon(){return {addClass(){},setAttr(){}};} addCommand(command){this.commands.push(command);}}
-  export class ItemView {} export class Modal {} export class Notice {} export class PluginSettingTab {} export class Setting {} export class Menu {} export class TFile {} export class TFolder {}
+  export class Component {load(){} unload(){}} export const MarkdownRenderer={render:async()=>{}}; export class ItemView {} export class Modal {} export class Notice {} export class PluginSettingTab {} export class Setting {} export class Menu {constructor(){this.items=[];} addItem(fn){const item={setTitle(v){this.title=v;return this;},setIcon(){return this;},setDisabled(v){this.disabled=v;return this;},onClick(fn){this.action=fn;return this;},setSubmenu(){return this.submenu=new Menu();}};fn(item);this.items.push(item);return this;}addSeparator(){}} export class TFile {} export class TFolder {}
   export const Platform={isMobile:true}; export const setIcon=()=>{}; export const setTooltip=()=>{}; export const normalizePath=p=>p; export const requestUrl=()=>{throw Error('No network');};`,
 		);
 		const sdk = join(dir, "sdk.mjs");
@@ -74,6 +74,62 @@ test("initial command requests verified two-way sync and preserves warning state
 		plugin.coordinator.runSync = async () => ({ kind: "failed", message: "Unavailable" });
 		await plugin.initialSync();
 		assert.equal(cleared, false);
+		plugin.app.vault = { getFiles: () => [] };
+		plugin.app.workspace.getActiveFile = () => null;
+		const menu = plugin.buildStatusBarMenu();
+		assert.deepEqual(
+			menu.items.slice(0, 5).map((item) => item.title),
+			["Pause", "Version history", "Open Sync log", "Deleted files", "Sync settings"],
+		);
+		assert.equal(menu.items.find((item) => item.title === "Version history").disabled, true);
+		assert.ok(
+			menu.items
+				.find((item) => item.title === "Advanced")
+				.submenu.items.some((item) => item.title === "Push local files"),
+		);
+		const originalDocument = globalThis.document,
+			originalWindow = globalThis.window;
+		try {
+			const timers = new Map();
+			let next = 0,
+				reviews = 0,
+				otherModal = null;
+			globalThis.document = { visibilityState: "hidden", querySelector: () => otherModal };
+			globalThis.window = {
+				setTimeout(fn) {
+					const id = ++next;
+					timers.set(id, fn);
+					return id;
+				},
+				clearTimeout(id) {
+					timers.delete(id);
+				},
+			};
+			plugin.openConflictResolver = async () => reviews++;
+			const fire = () => {
+				const [id, fn] = [...timers][0];
+				timers.delete(id);
+				fn();
+			};
+			plugin.scheduleConflictReview();
+			plugin.scheduleConflictReview();
+			assert.equal(timers.size, 1);
+			fire();
+			assert.equal(reviews, 0);
+			assert.equal(timers.size, 1);
+			globalThis.document.visibilityState = "visible";
+			otherModal = {};
+			fire();
+			assert.equal(reviews, 0);
+			otherModal = null;
+			fire();
+			assert.equal(reviews, 1);
+			assert.equal(timers.size, 0);
+			assert.equal(plugin.reviewPending, false);
+		} finally {
+			globalThis.document = originalDocument;
+			globalThis.window = originalWindow;
+		}
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
