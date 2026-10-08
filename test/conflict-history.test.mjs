@@ -5,7 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-const dir = await mkdtemp(resolve("tmp/conflict-history-"));
+import { tmpdir } from "node:os";
+const dir = await mkdtemp(join(tmpdir(), "filen-conflict-history-"));
 const outfile = join(dir, "features.mjs");
 await build({
 	stdin: {
