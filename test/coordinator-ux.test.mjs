@@ -490,7 +490,7 @@ test("conflicts in vault produce persistent warning, informative notice, and cle
 		// Notice specifies conflicted file and informs about review in sync menu
 		assert.equal(notices.length, 1);
 		assert.match(notices[0], /Daily\/2026\/09\/2026-09-26\.md/);
-		assert.match(notices[0], /Review in sync menu/);
+		assert.match(notices[0], /review in the sync menu/);
 
 		// Activity log records conflict detected, not misleading "resolved"
 		assert.ok(
@@ -529,6 +529,7 @@ const runNextDebounce = async (timers) => {
 	if (!entry) return false;
 	timers.delete(entry[0]);
 	await entry[1].fn();
+	await new Promise((resolve) => setImmediate(resolve));
 	return true;
 };
 

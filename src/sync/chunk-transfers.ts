@@ -129,6 +129,7 @@ export async function uploadFileChunks(
 	ctime: number,
 	mimeType: string = "application/octet-stream",
 	onProgress?: ChunkTransferProgressCallback,
+	beforeCommit?: () => Promise<void>,
 ): Promise<{ uuid: string; size: number; chunks: number; hash: string }> {
 	const client = sdk as unknown as SdkWithInternals;
 	const fileSize = bytes.byteLength;
@@ -161,6 +162,7 @@ export async function uploadFileChunks(
 				}),
 			]);
 
+		await beforeCommit?.();
 		await client.api(3).upload().empty({
 			uuid: fileUUID,
 			name: nameEncrypted,
@@ -237,6 +239,7 @@ export async function uploadFileChunks(
 
 	await client._locks.driveWrite.acquire();
 	try {
+		await beforeCommit?.();
 		await client.api(3).upload().done({
 			uuid: fileUUID,
 			name: nameEncrypted,

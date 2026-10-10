@@ -351,7 +351,7 @@ test("planSync computes correct operations for bidirectional and one-way syncs",
 
 			const result = planSync({ localFiles, remoteFiles, prevRecords });
 			assert.equal(result.actions[0].operation, "conflict");
-			assert.equal(result.actions[0].conflictWinner, "local");
+			assert.equal(result.actions[0].conflictWinner, undefined);
 			assert.equal(result.counts.conflict, 1);
 		}
 
@@ -382,7 +382,7 @@ test("planSync computes correct operations for bidirectional and one-way syncs",
 
 			const result = planSync({ localFiles, remoteFiles, prevRecords });
 			assert.equal(result.actions[0].operation, "conflict");
-			assert.equal(result.actions[0].conflictWinner, "local");
+			assert.equal(result.actions[0].conflictWinner, undefined);
 		}
 
 		// 7. Local deleted, remote unchanged -> delete-remote
@@ -1438,7 +1438,7 @@ test("SyncDb isolates target identity by vaultId, userId, and remoteRootUuid and
 			remoteHash: "hash-remote-1",
 		});
 
-		assert.equal(db1.schemaVersion, 2);
+		assert.equal(db1.schemaVersion, 3);
 		await db1.setMergeBaseline("file1.md", {
 			text: "trusted text",
 			hash: "verified",

@@ -181,6 +181,8 @@ export type SyncOutcome = {
 	applied: number;
 	conflicts: number;
 	conflictCopies: ConflictCopy[];
+	pendingConflicts?: string[];
+	newConflicts?: string[];
 	uploaded?: number;
 	downloaded?: number;
 	deletedLocal?: number;

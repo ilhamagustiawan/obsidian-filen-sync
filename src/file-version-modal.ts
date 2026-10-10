@@ -1,3 +1,4 @@
+import { lineDiff } from "./sync/diff";
 import { confirmAction } from "./ui/confirm";
 import { preserveRecovery, readRecovery } from "./sync/recovery";
 import type { SyncDb, RecoveryRecord } from "./db";
@@ -598,52 +599,28 @@ const formatDate = (epochMs: number): string =>
 const formatTime = (epochMs: number): string =>
 	new Date(epochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-// LCS-based line diff.
+// Shared bounded Google diff; line tokens preserve display alignment.
 export const computeDiff = (oldText: string, newText: string): DiffLine[] => {
-	const a = oldText.split("\n");
-	const b = newText.split("\n");
-	const m = a.length;
-	const n = b.length;
-	if (
-		new TextEncoder().encode(oldText + newText).length > 1024 * 1024 ||
-		(m + 1) * (n + 1) > 1_000_000
-	)
+	try {
+		return lineDiff(oldText, newText).flatMap(([kind, text]) => {
+			const parts = text.split("\n");
+			if (parts[parts.length - 1] === "") parts.pop();
+			return parts.map((line) => ({
+				kind:
+					kind === 1
+						? ("added" as const)
+						: kind === -1
+							? ("removed" as const)
+							: ("unchanged" as const),
+				text: line,
+			}));
+		});
+	} catch {
 		return [
 			{
 				kind: "unchanged",
 				text: "Comparison exceeds preview limits. Turn off Show changes to view this revision.",
 			},
 		];
-
-	// Flat row-major storage avoids 2-D array index safety issues.
-	const dp = new Int32Array((m + 1) * (n + 1));
-	const at = (i: number, j: number): number => dp[i * (n + 1) + j] ?? 0;
-
-	for (let i = 1; i <= m; i++) {
-		for (let j = 1; j <= n; j++) {
-			dp[i * (n + 1) + j] =
-				a[i - 1] === b[j - 1] ? at(i - 1, j - 1) + 1 : Math.max(at(i - 1, j), at(i, j - 1));
-		}
 	}
-
-	// Trace back
-	const result: DiffLine[] = [];
-	let i = m;
-	let j = n;
-	while (i > 0 || j > 0) {
-		const aLine = a[i - 1];
-		const bLine = b[j - 1];
-		if (i > 0 && j > 0 && aLine === bLine && at(i, j) === at(i - 1, j - 1) + 1) {
-			result.push({ kind: "unchanged", text: aLine ?? "" });
-			i--;
-			j--;
-		} else if (j > 0 && (i === 0 || at(i, j - 1) >= at(i - 1, j))) {
-			result.push({ kind: "added", text: bLine ?? "" });
-			j--;
-		} else {
-			result.push({ kind: "removed", text: aLine ?? "" });
-			i--;
-		}
-	}
-	return result.reverse();
 };

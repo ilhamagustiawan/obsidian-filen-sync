@@ -1531,3 +1531,30 @@
 		animation: none !important;
 	}
 }
+
+.filen-conflict-versions {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 12px;
+}
+.filen-conflict-resolver pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 320px;
+	overflow: auto;
+}
+.filen-conflict-resolver ins {
+	background: var(--background-modifier-success);
+	text-decoration: none;
+}
+.filen-conflict-resolver del {
+	background: var(--background-modifier-error);
+}
+.filen-conflict-context {
+	color: var(--text-muted);
+}
+.filen-conflict-editor {
+	width: 100%;
+	min-height: 180px;
+	font-family: var(--font-monospace);
+}

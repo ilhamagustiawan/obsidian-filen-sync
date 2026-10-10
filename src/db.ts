@@ -2,6 +2,8 @@ import localforage from "localforage";
 import type { SyncedFileRecord } from "./settings";
 import { SYNC_DB_SCHEMA_VERSION } from "./settings";
 import { validateSyncPath } from "./sync/path-validation";
+import type { ConflictRecord } from "./sync/conflict-types";
+import { getOriginalPathFromConflictPath, isConflictFilePath } from "./sync/conflict-utils";
 
 export type SyncDbOptions = {
 	vaultId: string;
@@ -24,6 +26,10 @@ export type RecoveryRecord = {
 export type DeletedMapping = { uuid: string; path: string; parentUuid?: string };
 export interface SyncDb {
 	readonly targetKey?: string;
+	getConflict?(path: string): Promise<ConflictRecord | undefined>;
+	getConflicts?(): Promise<Map<string, ConflictRecord>>;
+	setConflict?(record: ConflictRecord): Promise<void>;
+	deleteConflict?(path: string): Promise<void>;
 	getMergeBaseline?(path: string): Promise<MergeBaseline | undefined>;
 	setMergeBaseline?(path: string, baseline: MergeBaseline): Promise<void>;
 	addRecovery?(record: RecoveryRecord): Promise<void>;
@@ -95,6 +101,7 @@ class LocalForageDb implements SyncDb {
 	private baselineWrite: Promise<void> = Promise.resolve();
 	private readonly recovery: ReturnType<typeof localforage.createInstance>;
 	private readonly deleted: ReturnType<typeof localforage.createInstance>;
+	private readonly conflicts: ReturnType<typeof localforage.createInstance>;
 
 	constructor(
 		private readonly store: ReturnType<typeof localforage.createInstance>,
@@ -106,10 +113,92 @@ class LocalForageDb implements SyncDb {
 		this.mergeMeta = localforage.createInstance({ name: targetKey, storeName: "merge-meta" });
 		this.recovery = localforage.createInstance({ name: targetKey, storeName: "recovery" });
 		this.deleted = localforage.createInstance({ name: targetKey, storeName: "deleted-items" });
+		this.conflicts = localforage.createInstance({ name: targetKey, storeName: "conflicts" });
 	}
 
 	private assertWritable(): void {
 		if (this.readOnly) throw new Error("Cannot modify sync history in read-only mode.");
+	}
+	async getConflict(path: string): Promise<ConflictRecord | undefined> {
+		validateSyncPath(path);
+		const record = await this.conflicts.getItem<ConflictRecord>(path);
+		if (record) this.validateConflict(record, path);
+		return record ?? undefined;
+	}
+	async getConflicts(): Promise<Map<string, ConflictRecord>> {
+		const records = new Map<string, ConflictRecord>();
+		await this.conflicts.iterate<ConflictRecord, void>((record, path) => {
+			this.validateConflict(record, path);
+			records.set(path, record);
+		});
+		return records;
+	}
+	async setConflict(record: ConflictRecord): Promise<void> {
+		this.assertWritable();
+		this.validateConflict(record, record.path);
+		await this.conflicts.setItem(record.path, record);
+	}
+	async deleteConflict(path: string): Promise<void> {
+		this.assertWritable();
+		validateSyncPath(path);
+		await this.conflicts.removeItem(path);
+	}
+	private validateConflict(record: ConflictRecord, path: string): void {
+		validateSyncPath(path);
+		if (
+			!record ||
+			record.path !== path ||
+			typeof record.revision !== "string" ||
+			!record.revision ||
+			!record.local ||
+			!record.remote ||
+			!["markdown", "settings", "file"].includes(record.kind) ||
+			typeof record.reason !== "string" ||
+			!Number.isFinite(record.createdAt) ||
+			(record.approval &&
+				(!("result" in record.approval) || record.approval.result === undefined))
+		)
+			throw new Error("Invalid conflict history. Sync paused to protect this target.");
+		for (const copy of record.copies ?? []) {
+			validateSyncPath(copy.path);
+			if (
+				!isConflictFilePath(copy.path) ||
+				getOriginalPathFromConflictPath(copy.path) !== path
+			)
+				throw new Error("Conflict copy does not belong to the reviewed file.");
+		}
+		for (const snapshot of [
+			record.local,
+			record.remote,
+			...(record.copies ?? []).flatMap((copy) => [copy.local, copy.remote]),
+		]) {
+			if (
+				!snapshot ||
+				!Number.isFinite(snapshot.mtime) ||
+				!Number.isFinite(snapshot.ctime) ||
+				(snapshot.identity && (!snapshot.identity.uuid || !snapshot.recovery))
+			)
+				throw new Error("Invalid conflict snapshot. Sync paused to protect originals.");
+		}
+		for (const recovery of [
+			record.local.recovery,
+			record.remote.recovery,
+			record.base,
+			record.approval?.result,
+			...(record.copies ?? []).flatMap((copy) => [copy.local.recovery, copy.remote.recovery]),
+		]) {
+			if (
+				recovery &&
+				(recovery.path !== path ||
+					typeof recovery.hash !== "string" ||
+					!/^[a-f0-9]{64}$/u.test(recovery.hash) ||
+					!Number.isSafeInteger(recovery.size) ||
+					recovery.size < 0 ||
+					!recovery.storagePath.includes(`/recovery/${this.targetKey}/`))
+			)
+				throw new Error("Conflict recovery target does not match.");
+			if (recovery) validateSyncPath(recovery.storagePath);
+		}
 	}
 	async getMergeBaseline(path: string): Promise<MergeBaseline | undefined> {
 		validateSyncPath(path);
@@ -308,6 +397,12 @@ class LocalForageDb implements SyncDb {
 					await this.setDeletedMapping({ uuid: record.remoteUuid, path: record.path });
 			this._schemaVersion = 2;
 			await this.store.setItem(META_KEY, { schemaVersion: 2, binding: this.binding });
+			migrated = true;
+		}
+		if (this._schemaVersion < 3) {
+			// Empty conflict store; existing baselines and legacy copies remain readable.
+			this._schemaVersion = 3;
+			await this.store.setItem(META_KEY, { schemaVersion: 3, binding: this.binding });
 			migrated = true;
 		}
 		return migrated;

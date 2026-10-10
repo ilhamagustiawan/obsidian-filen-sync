@@ -2,13 +2,23 @@ import { selectedSettingsPaths } from "./settings-paths";
 import type { App, EventRef, TAbstractFile } from "obsidian";
 import { Notice, Platform, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "../db";
+import type { ConflictRecord, ConflictResolution } from "./conflict-types";
+import {
+	captureConflict,
+	readLocalSide,
+	readRemoteSide,
+	type ConflictContext,
+} from "./conflict-store";
+import { applyConflict } from "./conflict-apply";
+import { sha256Hex } from "./content-hash";
+import { collectConflictCopies } from "./conflict-cleanup";
 import type { FilenRemoteFs } from "../fs-remote";
 import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { LOCAL_HASH_CACHE_TTL_MS } from "./local-hash-cache";
 import { createDefaultHashingPool, HASH_POOL_ENABLED, SyncEngine } from "../sync-engine";
 import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
-import { isConflictFilePath } from "./conflict-utils";
+import { getOriginalPathFromConflictPath, isConflictFilePath } from "./conflict-utils";
 import { saveDiagnosticRecord, truncateActionsIfNeeded } from "./diagnostic-history";
 import type {
 	SyncActivityEvent,
@@ -103,6 +113,8 @@ export type OpeningCheckState =
 export class SyncCoordinator {
 	private isSyncing = false;
 	private conflictsIndex: Map<string, TFile> | null = null;
+	private managedConflicts = new Map<string, ConflictRecord>();
+	private conflictTargetKey: string | undefined;
 	private savedNewConflicts = false;
 	private isPreviewActive = false;
 	private isOffline = false;
@@ -180,7 +192,146 @@ export class SyncCoordinator {
 	}
 
 	get conflictCount(): number {
-		return this.getConflictFiles().length;
+		return new Set([
+			...this.getConflictFiles().map((file) => getOriginalPathFromConflictPath(file.path)),
+			...this.getManagedConflicts().map((record) => record.path),
+		]).size;
+	}
+	getManagedConflicts(): ConflictRecord[] {
+		if (this.conflictTargetKey !== this.getDb()?.targetKey) return [];
+		return [...this.managedConflicts.values()];
+	}
+	async refreshConflicts(): Promise<void> {
+		const db = this.getDb();
+		const records = (await db?.getConflicts?.()) ?? new Map<string, ConflictRecord>();
+		if (db !== this.getDb()) return;
+		if (
+			this.isSyncing &&
+			[...records].some(
+				([path, record]) => this.managedConflicts.get(path)?.revision !== record.revision,
+			)
+		)
+			this.savedNewConflicts = true;
+		this.managedConflicts = records;
+		this.conflictTargetKey = db?.targetKey;
+		this.publishPending();
+	}
+	private conflictContext(db: SyncDb): ConflictContext {
+		const remote = this.getRemoteFs();
+		return {
+			app: this.app,
+			db,
+			remote,
+			pluginId: this.pluginId,
+			verifyTarget: async () => {
+				await this.callbacks.prepareTarget?.();
+				if (this.getDb()?.targetKey !== db.targetKey || this.getRemoteFs() !== remote)
+					throw new Error("Sync target changed; conflict application remains pending.");
+			},
+			selectedSettings: selectedSettingsPaths(
+				this.app.vault.configDir,
+				this.pluginId,
+				this.settings.syncSettings,
+				this.settings.selectedSettings,
+			),
+		};
+	}
+	private async conflictSession<T>(
+		targetKey: string | undefined,
+		work: (context: ConflictContext) => Promise<T>,
+	): Promise<T> {
+		if (this.isSyncing || this.isPreviewActive)
+			throw new Error("Wait for the current sync or preview to finish.");
+		this.isSyncing = true;
+		try {
+			await this.callbacks.prepareTarget?.();
+			const db = this.getDb();
+			if (!db || !targetKey || db.targetKey !== targetKey)
+				throw new Error("Sync target changed. Reopen conflict review.");
+			return await work(this.conflictContext(db));
+		} finally {
+			try {
+				await this.refreshConflicts();
+			} finally {
+				this.isSyncing = false;
+				this.invalidateEngine();
+				this.publishPending();
+				this.runPendingAutoSync();
+			}
+		}
+	}
+	async refreshConflict(path: string, targetKey: string | undefined): Promise<ConflictRecord> {
+		return this.conflictSession(targetKey, async (context) => {
+			const record = await context.db.getConflict?.(path);
+			if (!record) throw new Error("This conflict was already resolved.");
+			if (record.kind === "settings" && !context.selectedSettings?.includes(path))
+				throw new Error("Select this settings file for sync before reviewing it.");
+			if (record.approval && !record.approval.localApplied) return record;
+			const refreshed = (await captureConflict(context, path, record.reason)).record;
+			return collectConflictCopies(context, refreshed);
+		});
+	}
+	async resolveConflict(
+		resolution: ConflictResolution,
+		targetKey: string | undefined,
+	): Promise<void> {
+		await this.conflictSession(targetKey, async (context) => {
+			const record = await context.db.getConflict?.(resolution.path);
+			const apply = () => applyConflict(context, resolution);
+			if (context.remote.withMutationSession) await context.remote.withMutationSession(apply);
+			else await apply();
+			for (const copy of record?.copies ?? []) this.conflictsIndex?.delete(copy.path);
+			this.pendingPaths.delete(resolution.path);
+			this.callbacks.onLogActivity(`Conflict resolved and synced: ${resolution.path}`);
+		});
+	}
+	async resolveLegacyConflict(
+		path: string,
+		bytes: Uint8Array,
+		hash: string,
+		copies: Array<{ path: string; hash: string }>,
+		targetKey: string | undefined,
+	): Promise<void> {
+		await this.conflictSession(targetKey, async (context) => {
+			for (const copy of copies) {
+				if (
+					(await sha256Hex(
+						new Uint8Array(await this.app.vault.adapter.readBinary(copy.path)),
+					)) !== copy.hash
+				)
+					throw new Error("A legacy copy changed. Refresh the review.");
+			}
+			if ((await readLocalSide(context, path)).hash !== hash)
+				throw new Error("Local file changed. Refresh the review.");
+			const remote = await readRemoteSide(context, path);
+			const captured = await captureConflict(context, path, "Legacy conflict review");
+			if (remote.hash !== hash)
+				throw new Error(
+					"Filen differs from the reviewed current file. Reopen this conflict to review both originals.",
+				);
+			const reviewed = await collectConflictCopies(context, captured.record);
+			if (
+				reviewed.copies?.some(
+					(copy) =>
+						!copies.some(
+							(known) =>
+								known.path === copy.path &&
+								known.hash === copy.local.recovery?.hash &&
+								(!copy.remote.recovery || copy.remote.recovery.hash === known.hash),
+						),
+				)
+			)
+				throw new Error(
+					"Additional copies need review. Reopen this conflict to review them.",
+				);
+			const apply = () =>
+				applyConflict(context, { path, revision: reviewed.revision, bytes });
+			if (context.remote.withMutationSession) await context.remote.withMutationSession(apply);
+			else await apply();
+			for (const copy of reviewed.copies ?? []) this.conflictsIndex?.delete(copy.path);
+			this.pendingPaths.delete(path);
+			this.callbacks.onLogActivity(`Legacy conflict resolved and synced: ${path}`);
+		});
 	}
 
 	private publishPending(): void {
@@ -280,12 +431,14 @@ export class SyncCoordinator {
 			);
 		}
 		if (this.syncEngine === null) {
+			const context = this.conflictContext(db);
 			this.syncEngine = new SyncEngine({
 				app: this.app,
 				db,
 				pluginId: this.pluginId,
 				settings: { ...this.settings, ignorePatterns: [...this.settings.ignorePatterns] },
-				remote: this.getRemoteFs(),
+				remote: context.remote,
+				verifyTarget: context.verifyTarget,
 				hashingPool: HASH_POOL_ENABLED ? createDefaultHashingPool() : undefined,
 			});
 		}
@@ -426,6 +579,7 @@ export class SyncCoordinator {
 		try {
 			const targetPrepStart = performance.now();
 			await this.callbacks.prepareTarget?.();
+			await this.refreshConflicts();
 			if (this.callbacks.getTargetInfo) {
 				targetInfo = await this.callbacks.getTargetInfo(false);
 			}
@@ -479,6 +633,8 @@ export class SyncCoordinator {
 				},
 			);
 
+			await this.refreshConflicts();
+			if (result.newConflicts?.length) this.savedNewConflicts = true;
 			// End-to-end elapsed time includes coordinator target preparation.
 			const engineTiming = result.timing ?? { totalMs: 0 };
 			const timingWithPrep: SyncTimingSummary = {
@@ -520,16 +676,20 @@ export class SyncCoordinator {
 			const hasConflicts = result.conflicts > 0 || conflictCount > 0;
 			const effectiveConflicts = Math.max(result.conflicts, conflictCount);
 
-			if (result.conflicts > 0) {
+			if (
+				result.newConflicts === undefined
+					? result.conflicts > 0
+					: result.newConflicts.length > 0
+			) {
 				const details = result.conflictCopies?.length
 					? result.conflictCopies.map((c) => c.originalPath).join(", ")
-					: `${result.conflicts} file(s)`;
+					: (result.newConflicts?.join(", ") ?? `${result.conflicts} file(s)`);
 				new Notice(
-					`Filen Sync: Conflict detected in ${details} — conflict copy saved in vault. Review in sync menu.`,
+					`Filen Sync: Conflict detected in ${details} — files paused for review in the sync menu.`,
 					10000,
 				);
 				this.callbacks.onLogActivity(
-					`Conflict detected: ${details} — review conflict copies in sync menu.`,
+					`Conflict detected: ${details} — originals preserved; review in sync menu.`,
 				);
 			}
 
@@ -766,6 +926,11 @@ export class SyncCoordinator {
 			}
 			return { kind: "failed", message };
 		} finally {
+			try {
+				await this.refreshConflicts();
+			} catch (error) {
+				this.callbacks.onLogActivity(`Could not refresh conflict status: ${String(error)}`);
+			}
 			this.isSyncing = false;
 			if (this.savedNewConflicts) {
 				this.savedNewConflicts = false;

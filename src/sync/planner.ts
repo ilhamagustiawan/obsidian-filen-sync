@@ -11,6 +11,7 @@ export type PlanInput = {
 	remoteFiles: Map<string, RemoteFileInfo>;
 	prevRecords: Map<string, SyncedFileRecord>;
 	direction?: SyncDirection;
+	pendingConflicts?: ReadonlySet<string>;
 };
 
 export type PlanResult = {
@@ -37,6 +38,7 @@ export function planSync(input: PlanInput): PlanResult {
 		...localFiles.keys(),
 		...remoteFiles.keys(),
 		...prevRecords.keys(),
+		...(input.pendingConflicts ?? []),
 	]);
 
 	const sortedPaths = [...allPaths].sort();
@@ -55,7 +57,15 @@ export function planSync(input: PlanInput): PlanResult {
 		const remote = remoteFiles.get(path);
 		const prev = prevRecords.get(path);
 
-		const action = planPath(path, local, remote, prev, direction);
+		const action: PlannedAction = input.pendingConflicts?.has(path)
+			? {
+					path,
+					operation: "conflict",
+					reasonCode: "review_pending",
+					isOverwrite: false,
+					detail: "Paused for conflict review; both originals remain unchanged",
+				}
+			: planPath(path, local, remote, prev, direction);
 		actions.push(action);
 
 		switch (action.operation) {
@@ -106,7 +116,7 @@ function planPath(
 			// Remote was deleted
 			const localChanged = isLocalChanged(local, prev);
 			if (localChanged) {
-				// Delete-vs-modify conflict: survivor preserved, no duplicate created
+				// Delete-versus-modify requires explicit review before either side changes.
 				return {
 					path,
 					operation: "conflict",
@@ -115,8 +125,7 @@ function planPath(
 					destinationExists: false,
 					isOverwrite: false,
 					preservesSurvivor: true,
-					detail: "Remote deleted; local survivor preserved (uploaded to remote, no duplicate)",
-					conflictWinner: "local",
+					detail: "Remote deleted and local edited; paused for review",
 					hash: local.hash,
 				};
 			}
@@ -179,7 +188,7 @@ function planPath(
 			// Local was deleted
 			const remoteChanged = isRemoteChanged(remote, prev);
 			if (remoteChanged) {
-				// Delete-vs-modify conflict: survivor preserved, no duplicate created
+				// Delete-versus-modify requires explicit review before either side changes.
 				return {
 					path,
 					operation: "conflict",
@@ -188,8 +197,7 @@ function planPath(
 					destinationExists: false,
 					isOverwrite: false,
 					preservesSurvivor: true,
-					detail: "Local deleted; remote survivor preserved (downloaded to local, no duplicate)",
-					conflictWinner: "remote",
+					detail: "Local deleted and remote edited; paused for review",
 				};
 			}
 
@@ -308,19 +316,12 @@ function planPath(
 					hash: local.hash,
 				};
 			}
-			if (direction === "both") {
-				return {
+			if (direction === "both")
+				return conflictAction(
 					path,
-					operation: "conflict",
-					reasonCode: "first_sync_conflict_no_baseline",
-					destinationSide: "remote",
-					destinationExists: true,
-					isOverwrite: true,
-					detail: "No trusted baseline or matching content fingerprint (remote saved as conflict copy)",
-					conflictWinner: "local",
-					hash: local.hash,
-				};
-			}
+					"first_sync_conflict_no_baseline",
+					"No verified baseline; paused for review",
+				);
 		}
 
 		if (direction === "push") {
@@ -347,21 +348,11 @@ function planPath(
 			};
 		}
 
-		const winner = local.mtime >= remote.mtime ? "local" : "remote";
-		return {
+		return conflictAction(
 			path,
-			operation: "conflict",
-			reasonCode: "first_sync_conflict_newer",
-			destinationSide: winner === "local" ? "remote" : "local",
-			destinationExists: true,
-			isOverwrite: true,
-			detail:
-				winner === "local"
-					? "No baseline; local is newer (remote saved as conflict copy)"
-					: "No baseline; remote is newer (local saved as conflict copy)",
-			conflictWinner: winner,
-			hash: winner === "local" ? local.hash : undefined,
-		};
+			"first_sync_conflict_no_baseline",
+			"No verified baseline; paused for review",
+		);
 	}
 
 	// Both exist with baseline
@@ -444,21 +435,15 @@ function planPath(
 		};
 	}
 
-	const winner = local.mtime >= remote.mtime ? "local" : "remote";
-	return {
+	return conflictAction(
 		path,
-		operation: "conflict",
-		reasonCode: "both_changed_conflict",
-		destinationSide: winner === "local" ? "remote" : "local",
-		destinationExists: true,
-		isOverwrite: true,
-		detail:
-			winner === "local"
-				? "Both changed; local newer (remote saved as conflict copy)"
-				: "Both changed; remote newer (local saved as conflict copy)",
-		conflictWinner: winner,
-		hash: winner === "local" ? local.hash : undefined,
-	};
+		"both_changed_conflict",
+		"Both changed; safely merge or pause for review",
+	);
+}
+
+function conflictAction(path: string, reasonCode: string, detail: string): PlannedAction {
+	return { path, operation: "conflict", reasonCode, detail, isOverwrite: false };
 }
 
 function isLocalChanged(local: LocalFileInfo, prev: SyncedFileRecord): boolean {

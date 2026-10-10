@@ -6,6 +6,8 @@ import { createObsidianAxiosLike } from "./obsidian-axios-adapter";
 import type { FilenAuth } from "./settings";
 import { downloadFileChunks, uploadFileChunks } from "./sync/chunk-transfers";
 import { isValidFilenSha512, normalizeFilenHash } from "./sync/content-hash";
+import { sha256Hex } from "./sync/content-hash";
+import type { RemoteIdentity } from "./sync/conflict-types";
 import {
 	assertNoPathCollisions,
 	validateRemoteRoot,
@@ -23,6 +25,11 @@ export type RemoteEntry = {
 };
 
 export type RemoteTargetIdentity = { userId: number; rootUuid: string };
+export type ExpectedRemoteWrite = {
+	identity?: RemoteIdentity;
+	contentHash?: string;
+	beforeCommit?: () => Promise<void>;
+};
 
 export type RemoteFileVersion = {
 	uuid: string;
@@ -49,6 +56,7 @@ export type RemoteFs = {
 		ctime: number,
 		expectedRemoteUuid?: string,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
+		expected?: ExpectedRemoteWrite,
 	): Promise<RemoteEntry>;
 	rm(
 		path: string,
@@ -261,6 +269,7 @@ export class FilenRemoteFs implements RemoteFs {
 		ctime: number,
 		expectedRemoteUuid?: string,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
+		expected?: ExpectedRemoteWrite,
 	): Promise<RemoteEntry> {
 		this.verifiedRootForSync = null;
 		validateSyncPath(path);
@@ -313,6 +322,35 @@ export class FilenRemoteFs implements RemoteFs {
 			ctime,
 			undefined,
 			(_done, _total, completedBytes, totalBytes) => onProgress?.(completedBytes, totalBytes),
+			expected
+				? async () => {
+						const current = await this.stat(path);
+						const identity = expected.identity;
+						if (
+							identity
+								? !current ||
+									current.uuid !== identity.uuid ||
+									current.remoteHash !== identity.remoteHash ||
+									current.mtime !== identity.mtime ||
+									current.size !== identity.size ||
+									current.version !== identity.version
+								: current !== null
+						)
+							throw new Error(
+								`Remote file changed before upload commit: ${path}. Refresh the review.`,
+							);
+						if (
+							current &&
+							expected.contentHash !== undefined &&
+							(await sha256Hex(await this.readFile(path, current.uuid))) !==
+								expected.contentHash
+						)
+							throw new Error(
+								`Remote content changed before upload commit: ${path}. Refresh the review.`,
+							);
+						await expected.beforeCommit?.();
+					}
+				: undefined,
 		);
 		if (!this.inMutationSession) {
 			this.verifiedRootForSync = null;

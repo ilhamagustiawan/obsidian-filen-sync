@@ -1,11 +1,12 @@
 import { readLocalBytes } from "./local-io";
 import { decodeText, mergeMarkdown, mergeSettings } from "./merge";
-import { preserveRecovery } from "./recovery";
+import { captureConflict, conflictVersions, type ConflictContext } from "./conflict-store";
+import { applyConflict, resumeConflict } from "./conflict-apply";
+import type { ConflictRecord } from "./conflict-types";
 import type { App, TAbstractFile } from "obsidian";
 import { TFile, normalizePath } from "obsidian";
 import type { SyncDb } from "../db";
 import type { RemoteEntry, RemoteFs } from "../fs-remote";
-import { conflictCopyPath } from "./conflict-utils";
 import { sha256Hex } from "./content-hash";
 import type { ConflictCopy, PlannedAction, SyncedFileRecord } from "./types";
 
@@ -24,6 +25,9 @@ export type LocalEntry = {
 export type ExecutionResult = {
 	applied: number;
 	conflicts: number;
+	reviewPending?: string;
+	newConflict?: boolean;
+	cleanedCopies?: string[];
 	conflictCopy?: ConflictCopy;
 	localFile?: LocalEntry;
 	remoteFile?: RemoteEntry;
@@ -41,10 +45,45 @@ export type SyncExecutorConfig = {
 	pluginId?: string;
 	conflictResolution?: "auto" | "copy";
 	selectedSettings?: string[];
+	verifyTarget?: () => Promise<void>;
 };
 
 export class SyncExecutor {
 	constructor(private readonly config: SyncExecutorConfig) {}
+
+	private get conflictContext(): ConflictContext {
+		return { ...this.config, pluginId: this.config.pluginId ?? "obsidian-filen-sync" };
+	}
+
+	private async pendingResult(
+		record: ConflictRecord,
+		changed: boolean,
+	): Promise<ExecutionResult> {
+		return { applied: 0, conflicts: 1, reviewPending: record.path, newConflict: changed };
+	}
+
+	private async resolutionResult(path: string): Promise<ExecutionResult> {
+		const stat = await this.config.app.vault.adapter.stat(path);
+		const remote = await this.config.remote.stat?.(path);
+		const record = await this.config.db.getFile(path);
+		return {
+			applied: 1,
+			conflicts: 0,
+			localFile:
+				stat?.type === "file"
+					? {
+							path,
+							...stat,
+							hash: record?.hash,
+							adapterOnly: this.config.selectedSettings?.includes(path),
+							file: this.config.app.vault.getAbstractFileByPath(path)!,
+						}
+					: undefined,
+			remoteFile: remote ?? undefined,
+			deletedLocalPath: !stat ? path : undefined,
+			deletedRemotePath: !remote ? path : undefined,
+		};
+	}
 
 	async syncDirectories(
 		localDirs: Set<string>,
@@ -76,6 +115,22 @@ export class SyncExecutor {
 		prev?: SyncedFileRecord,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<ExecutionResult> {
+		const pending = await this.config.db.getConflict?.(action.path);
+		if (pending) {
+			if (pending.kind === "settings" && !this.config.selectedSettings?.includes(action.path))
+				return this.pendingResult(pending, false);
+			if (pending.approval && (await resumeConflict(this.conflictContext, pending)))
+				return {
+					...(await this.resolutionResult(action.path)),
+					cleanedCopies: pending.copies?.map((copy) => copy.path),
+				};
+			const refreshed = await captureConflict(
+				this.conflictContext,
+				action.path,
+				pending.reason,
+			);
+			return this.pendingResult(refreshed.record, refreshed.changed);
+		}
 		switch (action.operation) {
 			case "delete-local": {
 				if (this.config.remote.stat) {
@@ -144,6 +199,8 @@ export class SyncExecutor {
 			case "download": {
 				if (remote === undefined) return { applied: 0, conflicts: 0 };
 				const pullResult = await this.pullRemote(action.path, remote, local, onProgress);
+				if ("review" in pullResult)
+					return this.pendingResult(pullResult.review.record, pullResult.review.changed);
 				return {
 					applied: 1,
 					conflicts: 0,
@@ -153,20 +210,17 @@ export class SyncExecutor {
 			}
 
 			case "conflict": {
+				const captured = await captureConflict(
+					this.conflictContext,
+					action.path,
+					action.reasonCode ?? "Concurrent changes",
+					{ local, remote },
+				);
 				if (this.config.conflictResolution === "auto" && local && remote) {
-					const auto = await this.automaticallyResolve(action.path, local, remote);
+					const auto = await this.automaticallyResolve(captured.record);
 					if (auto) return auto;
 				}
-				const conflictRes = await this.resolveConflict(action, local, remote);
-				return {
-					applied: 1,
-					conflicts: 1,
-					conflictCopy: conflictRes.conflictCopy,
-					localFile: conflictRes.localFile,
-					remoteFile: conflictRes.remoteFile,
-					conflictLocalFile: conflictRes.conflictLocalFile,
-					conflictRemoteFile: conflictRes.conflictRemoteFile,
-				};
+				return this.pendingResult(captured.record, captured.changed);
 			}
 
 			case "noop": {
@@ -183,7 +237,8 @@ export class SyncExecutor {
 					let verifiedBytes: Uint8Array | undefined;
 					if (
 						this.config.db.setMergeBaseline &&
-						action.path.toLowerCase().endsWith(".md")
+						(action.path.toLowerCase().endsWith(".md") ||
+							this.config.selectedSettings?.includes(action.path))
 					) {
 						verifiedBytes = new Uint8Array(
 							await readLocalBytes(this.config.app, local),
@@ -227,99 +282,37 @@ export class SyncExecutor {
 	}
 
 	private async seedMergeText(path: string, bytes: Uint8Array, hash: string): Promise<void> {
-		if (!path.toLowerCase().endsWith(".md")) return;
+		if (!path.toLowerCase().endsWith(".md") && !this.config.selectedSettings?.includes(path))
+			return;
 		const text = decodeText(bytes);
 		if (text !== undefined)
 			await this.config.db.setMergeBaseline?.(path, { text, hash, savedAt: Date.now() });
 	}
 
 	private async automaticallyResolve(
-		path: string,
-		local: LocalEntry,
-		remote: RemoteEntry,
+		record: ConflictRecord,
 	): Promise<ExecutionResult | undefined> {
-		if (!this.config.db.addRecovery || !this.config.db.targetKey) return undefined;
-		assertLocalUnchanged(this.config.app, path, local);
-		const localBytes = new Uint8Array(await readLocalBytes(this.config.app, local));
-		const remoteBytes = await this.config.remote.readFile(path, remote.uuid);
-		const localHash = await sha256Hex(localBytes);
-		if (local.hash && local.hash !== localHash)
-			throw new Error(`Local file changed: ${path}. Replan the sync.`);
-		let result: Uint8Array;
-		if (path.toLowerCase().endsWith(".md") || this.config.selectedSettings?.includes(path)) {
-			const l = decodeText(localBytes),
-				r = decodeText(remoteBytes);
-			if (l === undefined || r === undefined) return undefined;
-			const stored = await this.config.db.getMergeBaseline?.(path);
-			const previous = await this.config.db.getFile(path);
-			const baseline =
-				stored &&
-				stored.hash === previous?.hash &&
-				(await sha256Hex(new TextEncoder().encode(stored.text))) === stored.hash
-					? stored
-					: undefined;
-			const merged = this.config.selectedSettings?.includes(path)
-				? mergeSettings(l, r)
-				: mergeMarkdown(baseline?.text, l, r);
-			if (merged === undefined) return undefined;
-			result = new TextEncoder().encode(merged);
-		} else result = local.mtime >= remote.mtime ? localBytes : remoteBytes;
-		await preserveRecovery(
-			this.config.app,
-			this.config.db,
-			this.config.pluginId ?? "obsidian-filen-sync",
-			path,
-			localBytes,
-			"Before automatic resolution: local",
-		);
-		await preserveRecovery(
-			this.config.app,
-			this.config.db,
-			this.config.pluginId ?? "obsidian-filen-sync",
-			path,
-			remoteBytes,
-			"Before automatic resolution: Filen",
-		);
-		await assertLocalBytesUnchanged(this.config.app, path, local, localHash);
-		await this.assertRemoteUnchanged(path, remote);
-		// Upload first. A partial failure keeps the old baseline and both recovery copies.
-		const mtime = Math.max(local.mtime, remote.mtime);
-		const uploaded = await this.config.remote.writeFile(
-			path,
-			result,
-			mtime,
-			local.ctime,
-			remote.uuid,
-		);
-		await assertLocalBytesUnchanged(this.config.app, path, local, localHash);
-		await this.config.app.vault.adapter.writeBinary(path, result.slice().buffer, {
-			mtime,
-			ctime: local.ctime,
+		const versions = await conflictVersions(this.conflictContext, record);
+		let result: Uint8Array | undefined;
+		if (record.local.recovery?.hash === record.remote.recovery?.hash) result = versions.local;
+		else if (record.kind !== "file") {
+			const local = versions.local && decodeText(versions.local);
+			const remote = versions.remote && decodeText(versions.remote);
+			const base = versions.base && decodeText(versions.base);
+			if (local === undefined || remote === undefined) return undefined;
+			const merged =
+				record.kind === "settings"
+					? mergeSettings(local, remote, base)
+					: mergeMarkdown(base, local, remote);
+			if (merged !== undefined) result = new TextEncoder().encode(merged);
+		}
+		if (result === undefined) return undefined;
+		await applyConflict(this.conflictContext, {
+			path: record.path,
+			revision: record.revision,
+			bytes: result,
 		});
-		const written = new Uint8Array(await this.config.app.vault.adapter.readBinary(path));
-		const hash = await sha256Hex(result);
-		if ((await sha256Hex(written)) !== hash)
-			throw new Error(`Resolved file changed: ${path}. Replan the sync.`);
-		await this.assertRemoteUnchanged(path, uploaded);
-		await this.config.db.setFile(path, {
-			path,
-			mtime,
-			ctime: local.ctime,
-			size: result.length,
-			hash,
-			remoteUuid: uploaded.uuid,
-			remoteHash: uploaded.remoteHash,
-			remoteMtime: uploaded.mtime,
-			lastSyncAt: Date.now(),
-			lastKnownSide: "both",
-		});
-		await this.seedMergeText(path, result, hash);
-		return {
-			applied: 1,
-			conflicts: 0,
-			localFile: { ...local, mtime, size: result.length, hash },
-			remoteFile: uploaded,
-		};
+		return this.resolutionResult(record.path);
 	}
 
 	private async assertRemoteUnchanged(path: string, expected: RemoteEntry): Promise<void> {
@@ -399,7 +392,10 @@ export class SyncExecutor {
 		remote: RemoteEntry,
 		expectedLocal?: LocalEntry,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
-	): Promise<{ local: LocalEntry; remote: RemoteEntry }> {
+	): Promise<
+		| { local: LocalEntry; remote: RemoteEntry }
+		| { review: Awaited<ReturnType<typeof captureConflict>> }
+	> {
 		const content = await this.config.remote.readFile(path, remote.uuid, onProgress);
 		const hash = await sha256Hex(content);
 		const verifiedRemote = await this.config.remote.stat?.(path);
@@ -428,7 +424,7 @@ export class SyncExecutor {
 		}
 
 		// Revalidation: if local file exists and was modified since the scan,
-		// save a conflict copy of the local modification before overwriting!
+		// pause the file for durable review before writing either original.
 		const currentFile = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 		if (currentFile !== null) {
 			if (!(currentFile instanceof TFile)) {
@@ -443,7 +439,13 @@ export class SyncExecutor {
 						new Uint8Array(await this.config.app.vault.readBinary(currentFile)),
 					)) !== expectedLocal.hash)
 			) {
-				await this.writeLocalConflictCopy(currentFile.path);
+				return {
+					review: await captureConflict(
+						this.conflictContext,
+						path,
+						"Local file changed during download",
+					),
+				};
 			}
 		}
 
@@ -488,58 +490,6 @@ export class SyncExecutor {
 		return { local: updatedLocal, remote: updatedRemote };
 	}
 
-	private async resolveConflict(
-		action: PlannedAction,
-		local?: LocalEntry,
-		remote?: RemoteEntry,
-	): Promise<{
-		conflictCopy?: ConflictCopy;
-		localFile?: LocalEntry;
-		remoteFile?: RemoteEntry;
-		conflictLocalFile?: LocalEntry;
-		conflictRemoteFile?: RemoteEntry;
-	}> {
-		if (local !== undefined && remote !== undefined) {
-			if (action.conflictWinner === "local") {
-				// Local wins: save remote as conflict copy, upload local
-				const copyInfo = await this.writeRemoteConflictCopy(action.path, remote);
-				const pushRes = await this.pushLocal(action.path, local, remote);
-				return {
-					conflictCopy: { originalPath: action.path, copyPath: copyInfo.copyPath },
-					localFile: pushRes.local,
-					remoteFile: pushRes.remote,
-					conflictLocalFile: copyInfo.local,
-				};
-			} else {
-				// Remote wins: save local as conflict copy, download remote
-				const copyInfo = await this.writeLocalConflictCopy(local.path, local);
-				const pullRes = await this.pullRemote(action.path, remote, local);
-				return {
-					conflictCopy: copyInfo
-						? { originalPath: action.path, copyPath: copyInfo.copyPath }
-						: undefined,
-					localFile: pullRes.local,
-					remoteFile: pullRes.remote,
-					conflictLocalFile: copyInfo?.local,
-				};
-			}
-		}
-
-		if (local !== undefined) {
-			// Remote deleted, local changed: re-upload local
-			const pushRes = await this.pushLocal(action.path, local);
-			return { localFile: pushRes.local, remoteFile: pushRes.remote };
-		}
-
-		if (remote !== undefined) {
-			// Local deleted, remote changed: restore remote
-			const pullRes = await this.pullRemote(action.path, remote);
-			return { localFile: pullRes.local, remoteFile: pullRes.remote };
-		}
-
-		return {};
-	}
-
 	private async deleteLocal(path: string, expected?: LocalEntry): Promise<boolean> {
 		if (expected?.adapterOnly) {
 			if (!(await this.config.app.vault.adapter.exists(path))) return true;
@@ -565,72 +515,6 @@ export class SyncExecutor {
 			await assertLocalBytesUnchanged(this.config.app, path, expected, expected.hash);
 		await this.config.app.fileManager.trashFile(file);
 		return true;
-	}
-
-	private conflictPath(path: string, side: "local" | "remote"): string {
-		const visiblePath = this.config.selectedSettings?.includes(path)
-			? `Filen Sync conflicts/settings-${encodeURIComponent(path)}`
-			: path;
-		return conflictCopyPath(visiblePath, this.config.deviceId, Date.now(), side);
-	}
-
-	private async writeLocalConflictCopy(
-		path: string,
-		expected?: LocalEntry,
-	): Promise<{ copyPath: string; local: LocalEntry } | null> {
-		const file = expected?.adapterOnly
-			? expected.file
-			: this.config.app.vault.getAbstractFileByPath(normalizePath(path));
-		if (!(file instanceof TFile)) return null;
-		const copyPath = this.conflictPath(path, "local");
-		const content = expected?.adapterOnly
-			? await readLocalBytes(this.config.app, expected)
-			: await this.config.app.vault.readBinary(file);
-		await ensureLocalFolder(this.config.app, copyPath);
-		await this.config.app.vault.adapter.writeBinary(copyPath, content, {
-			mtime: file.stat.mtime,
-			ctime: file.stat.ctime,
-		});
-		const copyFile = this.config.app.vault.getAbstractFileByPath(normalizePath(copyPath));
-		const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
-		const hash = await sha256Hex(bytes);
-		return {
-			copyPath,
-			local: {
-				path: copyPath,
-				mtime: file.stat.mtime,
-				ctime: file.stat.ctime,
-				size: bytes.byteLength,
-				hash,
-				file: copyFile ?? file,
-			},
-		};
-	}
-
-	private async writeRemoteConflictCopy(
-		path: string,
-		remote: RemoteEntry,
-	): Promise<{ copyPath: string; local: LocalEntry }> {
-		const bytes = await this.config.remote.readFile(path, remote.uuid);
-		const copyPath = this.conflictPath(path, "remote");
-		await ensureLocalFolder(this.config.app, copyPath);
-		await this.config.app.vault.adapter.writeBinary(copyPath, toArrayBuffer(bytes), {
-			mtime: remote.mtime,
-			ctime: remote.mtime,
-		});
-		const copyFile = this.config.app.vault.getAbstractFileByPath(normalizePath(copyPath));
-		const hash = await sha256Hex(bytes);
-		return {
-			copyPath,
-			local: {
-				path: copyPath,
-				mtime: remote.mtime,
-				ctime: remote.mtime,
-				size: bytes.byteLength,
-				hash,
-				file: copyFile ?? (null as unknown as TAbstractFile),
-			},
-		};
 	}
 
 	private asFile(file: TAbstractFile): TFile {

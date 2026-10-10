@@ -1,3 +1,4 @@
+import { addConflictStorage } from "./helpers/conflict-storage.mjs";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -165,6 +166,7 @@ function fixture({ local = {}, remote = {}, baseline = [], hashingPool } = {}) {
 		rm: async (path) => cloud.delete(path),
 		close: () => {},
 	};
+	addConflictStorage(app, db, files);
 	const engine = new SyncEngine({
 		app,
 		db,
@@ -576,7 +578,12 @@ test("invalid remote hashes retain the equality fallback without falsely declari
 	});
 	s2.cloud.get("diff.md").remoteHash = "invalid-hash";
 	const mismatch = await s2.run();
-	assert.equal(mismatch.applied, 1, "mismatched fallback content does not declare identity");
+	assert.equal(mismatch.applied, 0);
+	assert.deepEqual(
+		mismatch.pendingConflicts,
+		["diff.md"],
+		"mismatched content remains paused for review",
+	);
 	assert.equal(mismatch.scanDiagnostics?.equalityDownloads, 1);
 });
 

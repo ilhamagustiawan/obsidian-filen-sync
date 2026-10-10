@@ -459,9 +459,7 @@ export class SyncPreviewModal extends Modal {
 			case "delete-remote":
 				return "Delete remote";
 			case "conflict":
-				return action.preservesSurvivor
-					? "Preserve survivor"
-					: `Conflict (${action.conflictWinner ?? "local"} wins)`;
+				return action.preservesSurvivor ? "Preserve survivor" : "Merge or review conflict";
 			default:
 				return action.operation;
 		}

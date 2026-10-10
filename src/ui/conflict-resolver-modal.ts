@@ -6,6 +6,8 @@ import { sha256Hex } from "../sync/content-hash";
 import { preserveRecovery } from "../sync/recovery";
 import { reviewSections, reconstructReview, type ReviewSection } from "../sync/review-sections";
 import { confirmAction } from "./confirm";
+import type { ConflictRecord, ConflictResolution } from "../sync/conflict-types";
+import { showManagedConflict } from "./managed-conflict-review";
 
 type Version = {
 	adapterOnly?: boolean;
@@ -30,6 +32,16 @@ type Config = {
 	onClosed: () => void;
 	selectedSettings?: string[];
 	verifyTarget?: () => Promise<void>;
+	conflicts?: () => ConflictRecord[];
+	refreshConflict?: (path: string) => Promise<ConflictRecord>;
+	applyConflict?: (resolution: ConflictResolution) => Promise<void>;
+	applyLegacy?: (
+		path: string,
+		bytes: Uint8Array,
+		hash: string,
+		copies: Array<{ path: string; hash: string }>,
+	) => Promise<void>;
+	onSynced?: (path: string) => void;
 };
 export class ConflictResolverModal extends Modal {
 	private search = "";
@@ -76,7 +88,10 @@ export class ConflictResolverModal extends Modal {
 	private renderList(list: HTMLElement): void {
 		list.empty();
 		const paths = [
-			...new Set(this.config.files().map((f) => getOriginalPathFromConflictPath(f.path))),
+			...new Set([
+				...this.config.files().map((f) => getOriginalPathFromConflictPath(f.path)),
+				...(this.config.conflicts?.() ?? []).map((record) => record.path),
+			]),
 		]
 			.filter((p) => p.toLowerCase().includes(this.search.toLowerCase()))
 			.sort();
@@ -126,6 +141,31 @@ export class ConflictResolverModal extends Modal {
 		this.selected = path;
 		this.panel?.setText("Loading…");
 		try {
+			const managed = this.config.conflicts?.().find((record) => record.path === path);
+			if (managed && this.config.refreshConflict && this.config.applyConflict) {
+				const record = await this.config.refreshConflict(path);
+				if (this.closed || generation !== this.generation) return;
+				await showManagedConflict({
+					app: this.app,
+					db: this.config.db,
+					panel: this.panel!,
+					record,
+					isCurrent: () => !this.closed && generation === this.generation,
+					onBusy: (busy) => {
+						this.saving = busy;
+					},
+					apply: this.config.applyConflict,
+					onApplied: () => {
+						this.config.onSynced?.(path);
+						this.selected = "";
+						this.render();
+					},
+					onStale: () => {
+						void this.select(path);
+					},
+				});
+				return;
+			}
 			let file = this.app.vault.getAbstractFileByPath(path);
 			const adapterOnly = this.config.selectedSettings?.includes(path);
 			if (!file && adapterOnly) {
@@ -225,7 +265,10 @@ export class ConflictResolverModal extends Modal {
 		}
 		panel.createEl("h4", { text: "Saved result preview" });
 		const preview = panel.createEl("pre");
-		const save = panel.createEl("button", { text: "Apply and trash copies", cls: "mod-cta" });
+		const save = panel.createEl("button", {
+			text: this.config.applyLegacy ? "Apply and sync" : "Apply and trash copies",
+			cls: "mod-cta",
+		});
 		const update = () => {
 			try {
 				const bytes = this.result(review);
@@ -251,8 +294,10 @@ export class ConflictResolverModal extends Modal {
 				!(await confirmAction(
 					this.app,
 					"Resolve conflict",
-					`Save the preview to ${path} and move ${review.copies.length} conflict copies to trash?`,
-					"Apply and trash copies",
+					this.config.applyLegacy
+						? `Apply the reviewed result to ${path} in Obsidian and Filen now, then trash ${review.copies.length} legacy copies?`
+						: `Save the preview to ${path} and move ${review.copies.length} conflict copies to trash?`,
+					this.config.applyLegacy ? "Apply and sync" : "Apply and trash copies",
 				))
 			)
 				return;
@@ -267,23 +312,36 @@ export class ConflictResolverModal extends Modal {
 				)
 					throw new Error("Reviewed files changed. Select the file again to refresh.");
 			}
-			await preserveRecovery(
-				this.app,
-				this.config.db,
-				this.config.pluginId,
-				path,
-				review.current.bytes,
-				"Before conflict review",
-			);
-			if (review.current.adapterOnly)
-				await this.app.vault.adapter.writeBinary(path, bytes.slice().buffer);
-			else await this.app.vault.modifyBinary(review.current.file, bytes.slice().buffer);
+			if (this.config.applyLegacy) {
+				await this.config.applyLegacy(
+					path,
+					bytes,
+					review.current.hash,
+					review.copies.map((version) => ({
+						path: version.file.path,
+						hash: version.hash,
+					})),
+				);
+			} else {
+				await preserveRecovery(
+					this.app,
+					this.config.db,
+					this.config.pluginId,
+					path,
+					review.current.bytes,
+					"Before conflict review",
+				);
+				if (review.current.adapterOnly)
+					await this.app.vault.adapter.writeBinary(path, bytes.slice().buffer);
+				else await this.app.vault.modifyBinary(review.current.file, bytes.slice().buffer);
+			}
 			if (
 				(await sha256Hex(new Uint8Array(await this.readVersion(review.current)))) !==
 				(await sha256Hex(bytes))
 			)
 				throw new Error("Saved result changed; copies were retained.");
 			for (const v of review.copies) {
+				if (this.config.applyLegacy) continue; // Coordinator already verified and trashed both sides.
 				if (
 					(await sha256Hex(new Uint8Array(await this.app.vault.readBinary(v.file)))) !==
 					v.hash
@@ -291,7 +349,8 @@ export class ConflictResolverModal extends Modal {
 					throw new Error("A copy changed; remaining copies were retained.");
 				await this.app.fileManager.trashFile(v.file);
 			}
-			this.config.onResolved(path);
+			if (this.config.applyLegacy) this.config.onSynced?.(path);
+			else this.config.onResolved(path);
 			this.reviews.delete(path);
 			this.selected = "";
 			this.render();

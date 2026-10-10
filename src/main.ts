@@ -600,6 +600,7 @@ export default class FilenSyncPlugin extends Plugin {
 				this.targetBindingKey = bindingKey;
 				await previousDb?.close();
 				this.coordinator.invalidateEngine();
+				await this.coordinator.refreshConflicts();
 			} catch (error) {
 				await db.close();
 				throw error;
@@ -857,6 +858,10 @@ export default class FilenSyncPlugin extends Plugin {
 		this.setStatus("Syncing…", "syncing", `Preparing to upload ${file.path}...`);
 		try {
 			await this.prepareSyncTarget(true);
+			if (await this.db?.getConflict?.(file.path))
+				throw new Error(
+					"This file is paused for conflict review. Review it before uploading.",
+				);
 			const remote = this.getOrCreateRemoteFs();
 			const baseline = this.db ? await this.db.getFile(file.path) : null;
 			const remoteEntry = await remote.stat?.(file.path);
@@ -1210,6 +1215,13 @@ export default class FilenSyncPlugin extends Plugin {
 				db,
 				pluginId: this.manifest.id,
 				files: () => this.coordinator.getConflictFiles(),
+				conflicts: () => this.coordinator.getManagedConflicts(),
+				refreshConflict: (path) => this.coordinator.refreshConflict(path, db.targetKey),
+				applyConflict: (resolution) =>
+					this.coordinator.resolveConflict(resolution, db.targetKey),
+				applyLegacy: (path, bytes, hash, copies) =>
+					this.coordinator.resolveLegacyConflict(path, bytes, hash, copies, db.targetKey),
+				onSynced: () => this.updateStatusDisplays(),
 				selectedSettings: selectedSettingsPaths(
 					this.app.vault.configDir,
 					this.manifest.id,

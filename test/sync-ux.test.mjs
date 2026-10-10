@@ -1,3 +1,4 @@
+import { addConflictStorage } from "./helpers/conflict-storage.mjs";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -180,6 +181,7 @@ function fixture({
 		rm: async (path) => cloud.delete(path),
 		close: () => {},
 	};
+	const conflictState = addConflictStorage(app, db, files);
 	const engine = new SyncEngine({
 		app,
 		db,
@@ -196,6 +198,7 @@ function fixture({
 		transferConcurrency: concurrency,
 	});
 	return {
+		conflictState,
 		engine,
 		files,
 		cloud,
@@ -372,9 +375,9 @@ test("same-stat local edit cannot be deleted from a cached scan", async () => {
 	s.engine.remoteTreeCache.fetchedAt = 0;
 	await s.run();
 	assert.equal(new TextDecoder().decode(s.files.get("note.md").content), "new");
-	assert.equal(new TextDecoder().decode(s.cloud.get("note.md").content), "new");
+	assert.equal(s.cloud.has("note.md"), false, "delete versus edit awaits user review");
 });
-test("same-stat local edit is copied before a remote replacement", async () => {
+test("same-stat local edit pauses remote replacement without visible copies", async () => {
 	const s = fixture({
 		local: { "note.md": "old" },
 		remote: { "note.md": "old" },
@@ -389,8 +392,10 @@ test("same-stat local edit is copied before a remote replacement", async () => {
 	s.engine.remoteTreeCache.fetchedAt = 0;
 	await s.run();
 	const copies = [...s.files.entries()].filter(([path]) => path !== "note.md");
-	assert.ok(copies.some(([, file]) => new TextDecoder().decode(file.content) === "own"));
-	assert.equal(new TextDecoder().decode(s.files.get("note.md").content), "new");
+	assert.equal(copies.length, 0);
+	assert.equal(new TextDecoder().decode(s.files.get("note.md").content), "own");
+	assert.equal(new TextDecoder().decode(s.cloud.get("note.md").content), "new");
+	assert.ok(s.conflictState.conflicts.get("note.md"));
 });
 
 test("initial sync bypasses a quiet remote-events cache", async () => {
@@ -691,4 +696,28 @@ test("forced full scan options bypass narrow pass even with valid hints", async 
 	s.engine.invalidateLocal("a.md");
 	await s.run({ fullScan: true, scanHints: ["a.md"] });
 	assert.equal(s.walks, initialWalks + 3, "fullScan option forced full scan");
+});
+
+test("paused conflicts do not block unrelated transfers or advance their baseline", async () => {
+	const s = fixture({
+		local: { "conflict.md": "local", "new.md": "new" },
+		remote: { "conflict.md": "cloud" },
+	});
+	const result = await s.run();
+	assert.equal(result.applied, 1);
+	assert.deepEqual(result.pendingConflicts, ["conflict.md"]);
+	assert.ok(s.cloud.has("new.md"));
+	assert.equal(s.records.has("conflict.md"), false);
+	assert.equal(new TextDecoder().decode(s.cloud.get("conflict.md").content), "cloud");
+	assert.equal(s.conflictState.conflicts.size, 1);
+	const recoveryCount = s.conflictState.recoveries.length;
+	const repeated = await s.run();
+	assert.equal(repeated.applied, 0);
+	assert.deepEqual(repeated.newConflicts, []);
+	assert.equal(s.conflictState.recoveries.length, recoveryCount);
+	for (const direction of ["push", "pull"]) {
+		await s.engine.sync(undefined, undefined, undefined, direction, async () => true);
+		assert.equal(new TextDecoder().decode(s.cloud.get("conflict.md").content), "cloud");
+		assert.equal(new TextDecoder().decode(s.files.get("conflict.md").content), "local");
+	}
 });

@@ -100,6 +100,7 @@ type SyncEngineConfig = {
 		selectedSettings?: string[];
 	};
 	remote: RemoteFs;
+	verifyTarget?: () => Promise<void>;
 	transferConcurrency?: 1 | 2;
 	/** Byte-bounded small-file hashing pool; omit to hash serially. */
 	hashingPool?: ByteBoundedWorkPool;
@@ -447,7 +448,10 @@ export class SyncEngine {
 
 		if (isNarrow) {
 			onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
-			const candidatePaths = new Set(options.scanHints!);
+			const candidatePaths = new Set([
+				...options.scanHints!,
+				...((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+			]);
 			const candidateLocalFiles = new Map<string, LocalEntry>();
 			for (const path of candidatePaths) {
 				const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
@@ -547,6 +551,9 @@ export class SyncEngine {
 			}
 
 			planResult = planSync({
+				pendingConflicts: new Set(
+					((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+				),
 				localFiles,
 				remoteFiles: candidateRemoteFiles,
 				prevRecords: candidatePrev,
@@ -670,6 +677,9 @@ export class SyncEngine {
 			const planStart = performance.now();
 			onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
 			planResult = planSync({
+				pendingConflicts: new Set(
+					((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+				),
 				localFiles,
 				remoteFiles,
 				prevRecords: filteredPrev,
@@ -746,6 +756,7 @@ export class SyncEngine {
 			deviceId: this.config.settings.deviceId,
 			remote: this.config.remote,
 			pluginId: this.config.pluginId,
+			verifyTarget: this.config.verifyTarget,
 			conflictResolution: this.config.settings.conflictResolution,
 			selectedSettings: selectedSettingsPaths(
 				this.config.app.vault.configDir,
@@ -762,6 +773,9 @@ export class SyncEngine {
 		let deletedLocal = 0;
 		let deletedRemote = 0;
 		const conflictCopies: ConflictCopy[] = [];
+		const pendingConflicts: string[] = [];
+		const newConflicts: string[] = [];
+		const cleanedCopies = new Set<string>();
 		const total = planResult.actions.filter((action) => action.operation !== "noop").length;
 		let completed = 0;
 		const executeStart = performance.now();
@@ -792,6 +806,11 @@ export class SyncEngine {
 					});
 			};
 			report();
+			if (cleanedCopies.has(action.path)) {
+				if (action.operation !== "noop") completed++;
+				report();
+				return;
+			}
 
 			const result = await executor.execute(
 				action,
@@ -800,9 +819,14 @@ export class SyncEngine {
 				effectivePrev.get(action.path),
 				report,
 			);
+			for (const path of result.cleanedCopies ?? []) cleanedCopies.add(path);
+			if (result.cleanedCopies?.length) {
+				this.localScanSnapshot = null;
+				this.remoteTreeCache = null;
+			}
 
 			if (action.operation !== "noop") {
-				if (result.applied === 0)
+				if (result.applied === 0 && !result.reviewPending)
 					throw new Error(
 						`File changed before applying ${action.path}. Replan the sync.`,
 					);
@@ -811,6 +835,10 @@ export class SyncEngine {
 					firstTransferMs = Math.round(performance.now() - syncPassStart);
 				}
 				report();
+			}
+			if (result.reviewPending) {
+				pendingConflicts.push(result.reviewPending);
+				if (result.newConflict) newConflicts.push(result.reviewPending);
 			}
 			applied += result.applied;
 			conflicts += result.conflicts;
@@ -910,6 +938,8 @@ export class SyncEngine {
 			applied,
 			conflicts,
 			conflictCopies,
+			pendingConflicts,
+			newConflicts,
 			uploaded,
 			downloaded,
 			deletedLocal,
@@ -1215,6 +1245,9 @@ export class SyncEngine {
 		onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
 
 		const planResult = planSync({
+			pendingConflicts: new Set(
+				((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+			),
 			localFiles,
 			remoteFiles,
 			prevRecords: filteredPrev,

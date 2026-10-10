@@ -16,7 +16,7 @@ Obsidian Filen Sync mirrors vault files between Obsidian and a dedicated folder 
 - **Native status bar & quiet mobile status**: Real-time sync progress via an unobtrusive spinning ribbon icon on mobile (never obstructing your notes), and a customizable status bar item on desktop. Select **Show sync progress** on demand anytime.
 - **Two-pane file version history**: Browse remote file revisions in Filen with grouped dates, side-by-side diff comparison against your local file, one-click preview, copy, and restore.
 - **Safety rails & bulk mutation guard**: Prevents catastrophic vault wipes if a folder is emptied or unmounted; prompts for confirmation before bulk overwrites or local deletions.
-- **Conflict preservation**: Automatically detects when a file was modified both locally and remotely, saving conflict copies (`.sync-conflict-*`) to prevent silent data loss.
+- **Conflict preservation**: Automatically merges independent changes and pauses competing changes for review, preserving both originals in hidden recovery storage.
 - **Target identity isolation**: Sync baselines in local IndexedDB are strictly partitioned by vault ID, authenticated Filen user ID, and remote directory UUID to prevent baseline pollution across accounts or folders.
 - **Pre-mutation revalidation**: Re-reads and verifies local hashes and remote UUIDs immediately before uploading or deleting to prevent race conditions.
 - **Secure credential storage**: Passwords and two-factor codes stay in memory only. Derived authentication keys/tokens are stored securely in Obsidian `SecretStorage`.
@@ -38,7 +38,7 @@ Based on this comparison:
 - **Remote additions or edits** are downloaded to the vault.
 - **Local deletions** move corresponding remote files to the Filen trash.
 - **Remote deletions** prompt for confirmation before moving local files to the Obsidian system trash.
-- **Concurrent edits** use **Automatically merge** by default. Markdown combines independent and identical changes against verified last-synced text. Overlapping edits, missing snapshots, invalid text, or exceeded limits create reviewable conflict copies. Other files, including canvases, use the latest modification time; local wins ties. Explicit push and pull retain their direction semantics.
+- **Concurrent edits** use **Automatically merge** by default. Markdown and selected JSON settings combine independent changes against verified last-synced content. Competing changes, missing snapshots, invalid text, and binary conflicts pause that file for review. Pending reviews remain protected during push, pull, and force upload. Other files continue syncing.
 - **Selected settings JSON** merges top-level objects with local keys overriding remote keys. Nested objects and arrays are replaced as whole values. Settings sync is disabled by default; enable it and explicitly select core settings or individual plugins’ `data.json`. Workspace/cache files, plugin executables, and this plugin’s own directory remain excluded.
 - **Recovery** preserves both original versions locally before automatic conflict writes. Recovery bytes stay in the excluded plugin directory, with metadata isolated by the verified sync target. They are never automatically deleted.
 
@@ -48,7 +48,7 @@ On an initial sync without prior history, the plugin uses a conservative baselin
 
 - No deletions are inferred from absence on either side.
 - Files present on both sides with identical content fingerprints are verified and linked into the baseline.
-- Differing files on both sides generate a conflict copy to ensure no local or remote content is lost.
+- Differing files on both sides pause for review when a safe merge is unavailable.
 
 ## Requirements
 
@@ -141,11 +141,13 @@ One persistent button lives in the right sidebar and remounts after layout chang
 
 ### Conflict review
 
-New unresolved copies open one centered resolver after synchronization, including partial-success runs. Opening waits until the app is foregrounded and other dialogs close. Closing the resolver makes no file changes and does not repeatedly reopen it.
+New unresolved conflicts open one resolver after synchronization. Pending reviews survive restarts and remain isolated to the selected Filen target. Closing the resolver leaves both originals unchanged.
 
-Search the paginated list grouped by original path. Each changed section requires **Keep current** or a copy alternative; identical alternatives are combined. **Saved result preview** uses the same reconstruction as saving, preserving untouched text, line endings, and final newlines. Comparison is limited to 1 MiB combined text and one million line-comparison cells. Larger or binary groups offer whole-file choices and **Open current/Open copy**.
+Review the base, local, and Filen versions. Independent Markdown edits and JSON keys merge automatically; competing sections require a choice. Whole-file choices handle binary files and deletions. Editable text results are validated before saving. Comparisons use Google's diff-match-patch locally, without sending content to Google, with bounded size and execution time.
 
-**Apply and trash copies** asks for confirmation, revalidates the reviewed contents, preserves the replaced original in local recovery, saves, then trashes copies. Changed or failed copies remain for review. Resolved changes enter normal sync; paused sync stays paused. Conflicting selected settings get visible copies under `Filen Sync conflicts/` so they can be reviewed despite the hidden settings directory.
+**Apply and sync** revalidates the reviewed versions and writes the approved result to both the vault and Filen immediately. Writes are guarded but cannot be atomic across both systems; interrupted approvals retain recovery snapshots and can resume safely. Changed originals require a fresh review.
+
+After successful resolution, all reviewed legacy `.sync-conflict-*` files for that original are removed from both the vault and Filen, including duplicate copies. Cleanup uses trash, preserves hidden recovery backups, and only clears the review after verifying no copies remain. New or changed copies require review before deletion. Failed cleanup remains pending for retry.
 
 ### Deleted files
 

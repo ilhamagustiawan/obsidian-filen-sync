@@ -28,7 +28,7 @@ export type SyncedFileRecord = {
  * Bump this when SyncedFileRecord or the DB layout changes.
  * Migrations run automatically when the stored version is lower.
  */
-export const SYNC_DB_SCHEMA_VERSION = 2;
+export const SYNC_DB_SCHEMA_VERSION = 3;
 
 export type SyncProgressNoticeMode = "transfers_only" | "always" | "manual_only" | "never";
 
@@ -222,12 +222,12 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Conflict resolution")
 			.setDesc(
-				"Merge independent Markdown edits, selected settings, and use the newest other file. Originals remain in local recovery.",
+				"Merge independent note and settings edits. Competing changes pause the file for review. Originals remain in local recovery.",
 			)
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("auto", "Automatically merge")
-					.addOption("copy", "Create conflict file")
+					.addOption("copy", "Review concurrent changes")
 					.setValue(this.plugin.settings.conflictResolution)
 					.onChange(async (value) => {
 						this.plugin.settings.conflictResolution =
