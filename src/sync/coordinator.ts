@@ -1,4 +1,5 @@
 import { selectedSettingsPaths } from "./settings-paths";
+import { LocalEditPendingError } from "./local-edit-pending";
 import type { App, EventRef, TAbstractFile } from "obsidian";
 import { Notice, Platform, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "../db";
@@ -851,6 +852,26 @@ export class SyncCoordinator {
 				}
 			} else {
 				this.consecutiveNetworkFailures = 0;
+			}
+
+			// Typing invalidates a snapshot; it is not a repeated remote race and
+			// must not exhaust the bounded conflict/replan recovery budget.
+			if (options.autoSync && error instanceof LocalEditPendingError) {
+				this.pendingAutoSync = true;
+				this.pendingAutoSyncRequiresFullScan = true;
+				this.nextAutoSyncAllowedAt = Math.max(
+					this.lastSyncStartAt +
+						(this.settings.minimumAutoSyncIntervalSeconds ?? 10) * 1000,
+					Date.now() + this.settings.syncOnSaveDelaySeconds * 1000,
+				);
+				this.publishStatus({
+					kind: "pending",
+					text: "Sync pending",
+					detail: "Editing in progress; retrying after a pause.",
+					updatedAt: Date.now(),
+					isManual: false,
+				});
+				return { kind: "failed", message };
 			}
 
 			const replanRace = options.autoSync && isReplanError(error);

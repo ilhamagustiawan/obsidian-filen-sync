@@ -4,6 +4,7 @@ import { readActivityLogs, type ActivityLogEntry } from "./activity-logs";
 import type FilenSyncPlugin from "./main";
 import { DEFAULT_IGNORE_PATTERNS, normalizeIgnorePatterns } from "./path-filters";
 import { validateRemoteRoot } from "./sync/path-validation";
+import { renderAccountLogin } from "./ui/account-login";
 export { readFilenAuth, type FilenAuth } from "./auth";
 
 export type SyncedFileRecord = {
@@ -219,6 +220,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		containerEl.addClass("filen-sync-settings");
 		new Setting(containerEl)
 			.setName("Conflict resolution")
 			.setDesc(
@@ -328,59 +330,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		new Setting(section)
-			.setName("Email")
-			.setDesc("Filen account email.")
-			.addText((text) =>
-				text
-					// eslint-disable-next-line obsidianmd/ui/sentence-case
-					.setPlaceholder("name@example.com")
-					.setValue(this.plugin.settings.email)
-					.onChange(async (value) => {
-						this.plugin.settings.email = value.trim();
-						await this.plugin.saveSettings();
-						void this.plugin.refreshSyncTarget();
-					}),
-			);
-
-		new Setting(section)
-			.setName("Password")
-			.setDesc("Not stored.")
-			.addText((text) => {
-				text.inputEl.type = "password";
-				text.setPlaceholder(
-					this.plugin.hasSessionPassword() ? "••••••••" : "Password",
-				).onChange((value) => {
-					this.plugin.setSessionPassword(value);
-				});
-			});
-
-		new Setting(section)
-			.setName("Two-factor code")
-			.setDesc("If enabled.")
-			.addText((text) =>
-				text.setPlaceholder("123456").onChange((value) => {
-					this.plugin.setSessionTwoFactorCode(value.trim());
-				}),
-			);
-
-		new Setting(section)
-			.setName("Login")
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			.setDesc("Connect to Filen.")
-			.addButton((button) =>
-				button
-					.setButtonText("Login")
-					.setCta()
-					.onClick(async () => {
-						try {
-							await this.plugin.testConnection();
-							this.display();
-						} catch {
-							// Error is already handled by testConnection notice
-						}
-					}),
-			);
+		renderAccountLogin(section, this.plugin, () => this.display());
 	}
 
 	private renderSyncSection(containerEl: HTMLElement): void {

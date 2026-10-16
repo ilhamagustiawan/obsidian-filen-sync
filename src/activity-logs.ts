@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import { Modal } from "obsidian";
+import { MobileDialog } from "./ui/mobile-dialog";
 
 export const MAX_ACTIVITY_LOG_ENTRIES = 500;
 
@@ -99,7 +99,7 @@ export const inferActivityLogKind = (message: string): ActivityLogKind => {
 	return "general";
 };
 
-export class ActivityLogModal extends Modal {
+export class ActivityLogModal extends MobileDialog {
 	private unsubscribe: (() => void) | null = null;
 	private listEl: HTMLElement | null = null;
 	private summaryEl: HTMLElement | null = null;

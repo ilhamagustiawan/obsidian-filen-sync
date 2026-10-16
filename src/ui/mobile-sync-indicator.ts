@@ -7,6 +7,7 @@ export class MobileSyncIndicator {
 	private state: StatusBarState | null = null;
 	private row: HTMLElement | null = null;
 	private icon: HTMLElement | null = null;
+	private label: HTMLElement | null = null;
 	private timer: number | null = null;
 	private closed = false;
 	constructor(
@@ -64,6 +65,8 @@ export class MobileSyncIndicator {
 			this.row.className = "filen-mobile-sidebar-status clickable-icon";
 			this.row.setAttribute("type", "button");
 			this.icon = this.row.createSpan();
+			this.icon.setAttr("aria-hidden", "true");
+			this.label = this.row.createSpan({ cls: "filen-mobile-sidebar-label" });
 			this.plugin.registerDomEvent(this.row, "click", (event) => this.onMenu(event));
 		}
 		if (this.row.parentElement !== container) container.appendChild(this.row);
@@ -71,6 +74,7 @@ export class MobileSyncIndicator {
 		this.row.setAttr("data-sync-state", model.state);
 		this.row.setAttr("aria-label", `Filen: ${model.label}. Open sync menu`);
 		this.row.setAttr("title", `Filen: ${model.label}`);
+		this.label?.setText(model.label);
 		setIcon(this.icon!, model.icon);
 	}
 	close(): void {

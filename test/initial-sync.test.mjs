@@ -77,8 +77,12 @@ test("initial command requests verified two-way sync and preserves warning state
 		plugin.app.vault = { getFiles: () => [] };
 		plugin.app.workspace.getActiveFile = () => null;
 		const menu = plugin.buildStatusBarMenu();
+		assert.equal(menu.items[0].title, "Not connected");
+		assert.equal(menu.items[0].disabled, true);
+		assert.equal(menu.items[1].title, "Not synced yet");
+		assert.equal(menu.items[1].disabled, true);
 		assert.deepEqual(
-			menu.items.slice(0, 5).map((item) => item.title),
+			menu.items.slice(2, 7).map((item) => item.title),
 			["Pause", "Version history", "Open Sync log", "Deleted files", "Sync settings"],
 		);
 		assert.equal(menu.items.find((item) => item.title === "Version history").disabled, true);
@@ -130,6 +134,18 @@ test("initial command requests verified two-way sync and preserves warning state
 			globalThis.document = originalDocument;
 			globalThis.window = originalWindow;
 		}
+		// Settings needs an explicit result; connection errors are otherwise handled
+		// by notices rather than propagated to the login UI.
+		plugin.setStatus = () => {};
+		plugin.logActivity = () => {};
+		plugin.getOrCreateRemoteFs = () => ({ checkConnect: async () => {} });
+		assert.equal(await plugin.testConnection(), true);
+		plugin.getOrCreateRemoteFs = () => ({
+			checkConnect: async () => {
+				throw new Error("Offline");
+			},
+		});
+		assert.equal(await plugin.testConnection(), false);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

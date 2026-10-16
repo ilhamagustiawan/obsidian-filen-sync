@@ -1,4 +1,5 @@
-import { Modal, type App } from "obsidian";
+import type { App } from "obsidian";
+import { MobileDialog } from "./mobile-dialog";
 export function confirmAction(
 	app: App,
 	title: string,
@@ -7,7 +8,7 @@ export function confirmAction(
 ): Promise<boolean> {
 	return new Promise((resolve) => new Confirmation(app, title, message, action, resolve).open());
 }
-class Confirmation extends Modal {
+class Confirmation extends MobileDialog {
 	private answered = false;
 	constructor(
 		app: App,
@@ -17,6 +18,7 @@ class Confirmation extends Modal {
 		private answer: (value: boolean) => void,
 	) {
 		super(app);
+		this.modalEl.addClass("filen-confirm-dialog");
 	}
 	onOpen(): void {
 		this.titleEl.setText(this.heading);

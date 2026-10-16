@@ -1,11 +1,12 @@
-import { Modal, type App } from "obsidian";
+import type { App } from "obsidian";
+import { MobileDialog } from "./ui/mobile-dialog";
 
 type FilenSyncSetupModalConfig = {
 	app: App;
 	onOpenSettings: () => void;
 };
 
-export class FilenSyncSetupModal extends Modal {
+export class FilenSyncSetupModal extends MobileDialog {
 	constructor(private readonly config: FilenSyncSetupModalConfig) {
 		super(config.app);
 		this.modalEl.addClass("filen-sync-setup-modal");

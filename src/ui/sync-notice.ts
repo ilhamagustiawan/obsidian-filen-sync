@@ -1,5 +1,6 @@
 import { Notice, setIcon } from "obsidian";
 import type { StatusBarState } from "../sync/coordinator";
+import { trackVisibleViewport } from "./visible-viewport";
 import {
 	formatFilename,
 	formatSyncProgress,
@@ -10,6 +11,7 @@ import {
 export class SyncNoticeController {
 	private activeNotice: Notice | null = null;
 	private escapeCleanup: (() => void) | null = null;
+	private viewportCleanup: (() => void) | null = null;
 	private noticeEl: HTMLElement | null = null;
 	private iconSpan: HTMLElement | null = null;
 	private titleEl: HTMLElement | null = null;
@@ -143,6 +145,8 @@ export class SyncNoticeController {
 	}
 
 	closeNotice(): void {
+		this.viewportCleanup?.();
+		this.viewportCleanup = null;
 		this.escapeCleanup?.();
 		this.escapeCleanup = null;
 		this.clearShowTimer();
@@ -207,6 +211,8 @@ export class SyncNoticeController {
 		this.clearDismissTimer();
 
 		if (this.activeNotice !== null && (!this.noticeEl || !this.noticeEl.isConnected)) {
+			this.viewportCleanup?.();
+			this.viewportCleanup = null;
 			try {
 				this.activeNotice.hide();
 			} catch {
@@ -243,6 +249,10 @@ export class SyncNoticeController {
 		this.activeNotice = new Notice(frag, 0);
 		this.noticeEl = this.activeNotice.noticeEl;
 		this.noticeEl.addClass("filen-sync-progress-notice");
+		if (this.isMobile()) {
+			this.noticeEl.addClass("filen-mobile-progress");
+			this.viewportCleanup = trackVisibleViewport(this.noticeEl);
+		}
 		if (
 			doc.body?.appendChild &&
 			this.noticeEl.ownerDocument &&

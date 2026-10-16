@@ -243,6 +243,34 @@ function fixture({
 			),
 	};
 }
+test("single-device edits during upload defer that note without blocking unrelated files", async () => {
+	const s = fixture({
+		local: { "a.md": "one\n\ntwo\n", "b.md": "other", "c.md": "another" },
+		concurrency: 1,
+	});
+	const remote = s.engine.config.remote;
+	const write = remote.writeFile;
+	let edited = false;
+	remote.writeFile = async (...args) => {
+		const result = await write(...args);
+		if (args[0] === "a.md" && !edited) {
+			edited = true;
+			const file = s.files.get("a.md");
+			file.content = bytes("one\ntwo\nStill typing");
+			file.stat.size = file.content.length;
+			file.stat.mtime++;
+		}
+		return result;
+	};
+	await assert.rejects(s.run({ fullScan: true }), /Replan the sync/);
+	assert.ok(s.cloud.has("b.md"), "unrelated uploads continue");
+	assert.ok(s.cloud.has("c.md"), "later uploads are not starved");
+	assert.equal(s.records.get("a.md").hash, digest(bytes("one\n\ntwo\n")));
+	const result = await s.run({ fullScan: true });
+	assert.equal(result.conflicts, 0);
+	assert.equal(new TextDecoder().decode(s.cloud.get("a.md").content), "one\ntwo\nStill typing");
+});
+
 test("progress counts only completed changed files, not unchanged notes", async () => {
 	const s = fixture({
 		local: { "old.md": "old", "new.md": "new" },
@@ -373,6 +401,7 @@ test("same-stat local edit cannot be deleted from a cached scan", async () => {
 	s.files.get("note.md").content = bytes("new");
 	s.cloud.delete("note.md");
 	s.engine.remoteTreeCache.fetchedAt = 0;
+	await assert.rejects(s.run(), /Replan the sync/);
 	await s.run();
 	assert.equal(new TextDecoder().decode(s.files.get("note.md").content), "new");
 	assert.equal(s.cloud.has("note.md"), false, "delete versus edit awaits user review");
@@ -390,6 +419,7 @@ test("same-stat local edit pauses remote replacement without visible copies", as
 	remote.size = 3;
 	remote.remoteHash = digest(remote.content);
 	s.engine.remoteTreeCache.fetchedAt = 0;
+	await assert.rejects(s.run(), /Replan the sync/);
 	await s.run();
 	const copies = [...s.files.entries()].filter(([path]) => path !== "note.md");
 	assert.equal(copies.length, 0);

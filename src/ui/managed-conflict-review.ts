@@ -266,6 +266,9 @@ export async function showManagedConflict(config: Config): Promise<void> {
 		void apply();
 	});
 	save.addClass("mod-cta");
+	const status = panel.createEl("p", { cls: "text-muted" });
+	status.setAttr("role", "status");
+	status.setAttr("aria-live", "polite");
 	function update(): void {
 		try {
 			const bytes = result();
@@ -287,6 +290,8 @@ export async function showManagedConflict(config: Config): Promise<void> {
 		saving = true;
 		config.onBusy(true);
 		for (const input of inputs) input.disabled = true;
+		save.setText("Waiting for confirmation…");
+		status.setText("Confirm the reviewed result to continue.");
 		try {
 			const bytes = result();
 			if (
@@ -299,9 +304,17 @@ export async function showManagedConflict(config: Config): Promise<void> {
 			)
 				return;
 			if (!config.isCurrent()) return;
+			save.setText("Applying…");
+			status.setText("Applying the reviewed result to Obsidian and Filen…");
 			await config.apply({ path: record.path, revision: record.revision, bytes });
+			status.setText("Reviewed result applied and synced.");
 			if (config.isCurrent()) config.onApplied();
 		} catch (error) {
+			status.setText(
+				error instanceof Error
+					? error.message
+					: "Resolution failed; review remains pending.",
+			);
 			new Notice(
 				error instanceof Error
 					? error.message
@@ -312,6 +325,9 @@ export async function showManagedConflict(config: Config): Promise<void> {
 			saving = false;
 			config.onBusy(false);
 			for (const input of inputs) input.disabled = false;
+			save.setText(record.approval ? "Retry apply and sync" : "Apply and sync");
+			if (status.textContent === "Confirm the reviewed result to continue.")
+				status.setText("");
 			if (config.isCurrent()) update();
 		}
 	}

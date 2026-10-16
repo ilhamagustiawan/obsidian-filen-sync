@@ -1558,3 +1558,163 @@
 	min-height: 180px;
 	font-family: var(--font-monospace);
 }
+
+/* Mobile controls stay readable and tappable without changing desktop density. */
+.filen-mobile-sidebar-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: calc(100% - 24px);
+	padding: 8px 12px;
+}
+.filen-mobile-sidebar-label {
+	font-size: var(--font-ui-small);
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+.filen-mobile-sidebar-status > span:first-child {
+	display: inline-flex;
+	flex-shrink: 0;
+}
+.filen-login-feedback {
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+.filen-login-feedback:empty {
+	display: none;
+}
+.filen-login-feedback.is-error {
+	color: var(--text-error);
+}
+.is-mobile
+	:is(.filen-mobile-dialog, .filen-sync-settings, .filen-mobile-progress)
+	:is(
+		button,
+		select,
+		input:not([type="checkbox"]):not([type="radio"]),
+		summary,
+		.filen-notice-log-link
+	) {
+	min-height: 44px;
+}
+.is-mobile :is(.filen-mobile-dialog, .filen-sync-settings, .filen-mobile-progress) button,
+.is-mobile .filen-mobile-dialog .modal-close-button {
+	min-width: 44px;
+}
+.is-mobile :is(.filen-mobile-dialog, .filen-sync-settings) :is(input, textarea, select) {
+	/* Avoid iOS focus zoom while preserving larger user font preferences. */
+	font-size: max(16px, 1em);
+	max-width: 100%;
+}
+.is-mobile .filen-sync-settings .setting-item-control {
+	flex-wrap: wrap;
+	gap: 8px;
+	min-width: 0;
+}
+.is-mobile .filen-sync-settings textarea {
+	width: 100%;
+}
+.is-mobile .filen-mobile-dialog {
+	box-sizing: border-box;
+	position: fixed;
+	top: calc(var(--filen-viewport-top, 0px) + 8px);
+	left: calc(var(--filen-viewport-left, 0px) + 8px);
+	transform: none;
+	width: calc(var(--filen-viewport-width, 100vw) - 16px);
+	max-width: calc(var(--filen-viewport-width, 100vw) - 16px);
+	max-height: calc(var(--filen-viewport-height, 100dvh) - 16px);
+	margin: 0;
+	padding-top: max(16px, env(safe-area-inset-top, 0px));
+	padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+.is-mobile .filen-mobile-dialog .modal-content {
+	min-height: 0;
+	max-height: none;
+	overflow: auto;
+	overscroll-behavior: contain;
+	overflow-wrap: anywhere;
+}
+.is-phone .filen-mobile-dialog:not(.filen-confirm-dialog) {
+	height: calc(var(--filen-viewport-height, 100dvh) - 16px);
+}
+.is-mobile .filen-mobile-dialog .modal-close-button {
+	min-height: 44px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.is-mobile .filen-mobile-dialog .modal-button-container {
+	position: sticky;
+	bottom: 0;
+	background: var(--background-primary);
+	padding-block: 12px;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+.is-mobile .filen-mobile-dialog .modal-button-container button {
+	flex: 1 1 auto;
+	height: auto;
+	white-space: normal;
+}
+/* Use one main scroller for phone lists and conflict review. */
+.is-phone
+	.filen-mobile-dialog
+	:is(
+		.filen-sync-activity-log-list,
+		.filen-sync-plan-list,
+		.filen-deleted-list,
+		.filen-review-list,
+		.filen-review-preview
+	) {
+	max-height: none;
+	overflow: visible;
+}
+.is-phone .filen-mobile-dialog .filen-review-layout {
+	display: flex;
+	flex-direction: column;
+	height: auto;
+}
+.is-mobile .filen-mobile-dialog .filen-sync-version-layout {
+	height: 100%;
+	min-height: 0;
+}
+.is-mobile .filen-mobile-dialog.filen-sync-version-modal .modal-content {
+	flex: 1;
+	height: auto;
+	display: flex;
+	flex-direction: column;
+}
+.is-mobile .filen-mobile-dialog.filen-sync-version-modal {
+	height: calc(var(--filen-viewport-height, 100dvh) - 16px);
+}
+.is-mobile .filen-mobile-dialog .filen-sync-version-main {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+.is-mobile :is(.filen-sync-version-date-header, .filen-sync-version-toggle-label) {
+	min-height: 44px;
+}
+.is-mobile .filen-sync-version-row {
+	min-height: 44px;
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+}
+.is-mobile .filen-review-choice {
+	min-height: 44px;
+	box-sizing: border-box;
+}
+.is-mobile .notice.filen-mobile-progress {
+	top: calc(var(--filen-viewport-top, 0px) + var(--filen-viewport-height, 100dvh) / 2);
+	left: calc(var(--filen-viewport-left, 0px) + var(--filen-viewport-width, 100vw) / 2);
+	width: min(440px, calc(var(--filen-viewport-width, 100vw) - 32px));
+	max-height: calc(var(--filen-viewport-height, 100dvh) - 32px);
+	overscroll-behavior: contain;
+}
+.is-mobile .filen-notice-log-link {
+	display: inline-flex;
+	align-items: center;
+}

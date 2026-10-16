@@ -1,5 +1,6 @@
 import { readLocalBytes } from "./local-io";
 import { decodeText, mergeMarkdown, mergeSettings } from "./merge";
+import { LocalEditPendingError } from "./local-edit-pending";
 import { captureConflict, conflictVersions, type ConflictContext } from "./conflict-store";
 import { applyConflict, resumeConflict } from "./conflict-apply";
 import type { ConflictRecord } from "./conflict-types";
@@ -199,8 +200,6 @@ export class SyncExecutor {
 			case "download": {
 				if (remote === undefined) return { applied: 0, conflicts: 0 };
 				const pullResult = await this.pullRemote(action.path, remote, local, onProgress);
-				if ("review" in pullResult)
-					return this.pendingResult(pullResult.review.record, pullResult.review.changed);
 				return {
 					applied: 1,
 					conflicts: 0,
@@ -334,7 +333,7 @@ export class SyncExecutor {
 		remote?: RemoteEntry,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
 	): Promise<{ hash: string; local: LocalEntry; remote: RemoteEntry }> {
-		const file = this.asFile(local.file);
+		this.asFile(local.file);
 		assertLocalUnchanged(this.config.app, path, local);
 		const content = await readLocalBytes(this.config.app, local);
 		const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
@@ -345,15 +344,14 @@ export class SyncExecutor {
 		const uploaded = await this.config.remote.writeFile(
 			path,
 			bytes,
-			file.stat.mtime,
-			file.stat.ctime,
+			local.mtime,
+			local.ctime,
 			remote?.uuid,
 			onProgress,
 		);
 
-		assertLocalUnchanged(this.config.app, path, local);
-		await assertLocalBytesUnchanged(this.config.app, path, local, hash);
-
+		// The remote commit succeeded. Record exactly those bytes even if the user
+		// has continued typing, so our own upload is not a competing remote edit.
 		await this.config.db.setFile(path, {
 			path: local.path,
 			mtime: local.mtime,
@@ -366,24 +364,26 @@ export class SyncExecutor {
 			lastSyncAt: Date.now(),
 			lastKnownSide: "local",
 		});
+		await this.seedMergeText(path, bytes, hash);
+		assertLocalUnchanged(this.config.app, path, local);
+		await assertLocalBytesUnchanged(this.config.app, path, local, hash);
 
 		const updatedLocal: LocalEntry = {
 			...local,
-			mtime: file.stat.mtime,
-			ctime: file.stat.ctime,
+			mtime: local.mtime,
+			ctime: local.ctime,
 			size: bytes.byteLength,
 			hash,
 		};
 		const updatedRemote: RemoteEntry = {
 			path,
-			mtime: file.stat.mtime,
+			mtime: uploaded.mtime,
 			size: bytes.byteLength,
 			isDir: false,
 			uuid: uploaded.uuid,
 			remoteHash: uploaded.remoteHash,
 		};
 
-		await this.seedMergeText(path, bytes, hash);
 		return { hash, local: updatedLocal, remote: updatedRemote };
 	}
 
@@ -392,10 +392,7 @@ export class SyncExecutor {
 		remote: RemoteEntry,
 		expectedLocal?: LocalEntry,
 		onProgress?: (completedBytes: number, totalBytes: number) => void,
-	): Promise<
-		| { local: LocalEntry; remote: RemoteEntry }
-		| { review: Awaited<ReturnType<typeof captureConflict>> }
-	> {
+	): Promise<{ local: LocalEntry; remote: RemoteEntry }> {
 		const content = await this.config.remote.readFile(path, remote.uuid, onProgress);
 		const hash = await sha256Hex(content);
 		const verifiedRemote = await this.config.remote.stat?.(path);
@@ -423,8 +420,8 @@ export class SyncExecutor {
 				throw new Error(`Local destination appeared: ${path}. Replan the sync.`);
 		}
 
-		// Revalidation: if local file exists and was modified since the scan,
-		// pause the file for durable review before writing either original.
+		// A local edit invalidates the plan, but does not prove a content conflict.
+		// Leave both originals untouched and compare fresh snapshots next time.
 		const currentFile = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 		if (currentFile !== null) {
 			if (!(currentFile instanceof TFile)) {
@@ -439,13 +436,7 @@ export class SyncExecutor {
 						new Uint8Array(await this.config.app.vault.readBinary(currentFile)),
 					)) !== expectedLocal.hash)
 			) {
-				return {
-					review: await captureConflict(
-						this.conflictContext,
-						path,
-						"Local file changed during download",
-					),
-				};
+				throw new LocalEditPendingError(path);
 			}
 		}
 
@@ -533,12 +524,12 @@ const assertLocalBytesUnchanged = async (
 ): Promise<void> => {
 	const file = app.vault.getAbstractFileByPath(normalizePath(path));
 	if (!expected.adapterOnly && !(file instanceof TFile)) {
-		throw new Error(`Local file changed during sync: ${path}. Replan the sync.`);
+		throw new LocalEditPendingError(path);
 	}
 	const content = await readLocalBytes(app, expected);
 	const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
 	if ((await sha256Hex(bytes)) !== expectedHash) {
-		throw new Error(`Local file content changed during sync: ${path}. Replan the sync.`);
+		throw new LocalEditPendingError(path);
 	}
 };
 
@@ -550,7 +541,7 @@ const assertLocalUnchanged = (app: App, path: string, expected: LocalEntry): voi
 		current.stat.mtime !== expected.mtime ||
 		current.stat.size !== expected.size
 	) {
-		throw new Error(`Local file changed during sync: ${path}. Replan the sync.`);
+		throw new LocalEditPendingError(path);
 	}
 };
 

@@ -4,7 +4,8 @@ import { preserveRecovery, readRecovery } from "./sync/recovery";
 import type { SyncDb, RecoveryRecord } from "./db";
 import { sha256Hex } from "./sync/content-hash";
 import { decodeText } from "./sync/merge";
-import { Component, MarkdownRenderer, Modal, Notice, Platform, TFile, type App } from "obsidian";
+import { Component, MarkdownRenderer, Notice, Platform, TFile, type App } from "obsidian";
+import { MobileDialog } from "./ui/mobile-dialog";
 import type { RemoteFileVersion, RemoteFs } from "./fs-remote";
 
 type HistoryVersion = RemoteFileVersion & { recovery?: RecoveryRecord };
@@ -49,7 +50,7 @@ type ModalState =
 			mobileView: "list" | "preview";
 	  };
 
-export class FileVersionModal extends Modal {
+export class FileVersionModal extends MobileDialog {
 	private state: ModalState = { kind: "loading-versions" };
 	private previewEl: HTMLElement | null = null;
 	private currentFileText = "";
@@ -70,7 +71,13 @@ export class FileVersionModal extends Modal {
 
 	async onOpen(): Promise<void> {
 		const win = this.modalEl.ownerDocument.defaultView!;
-		const resize = () => this.render();
+		let narrow = this.isNarrow();
+		const resize = () => {
+			const next = this.isNarrow();
+			if (narrow === next) return;
+			narrow = next;
+			this.render();
+		};
 		win.addEventListener("resize", resize);
 		this.resizeCleanup = () => win.removeEventListener("resize", resize);
 		this.render();

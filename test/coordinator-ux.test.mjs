@@ -42,7 +42,7 @@ async function fixture(run, options = {}) {
 		await build({
 			stdin: {
 				contents:
-					'export {SyncCoordinator} from "./src/sync/coordinator.ts";export {TFile, Platform} from "obsidian";',
+					'export {SyncCoordinator} from "./src/sync/coordinator.ts";export {LocalEditPendingError} from "./src/sync/local-edit-pending.ts";export {TFile, Platform} from "obsidian";',
 				resolveDir: process.cwd(),
 			},
 			outfile,
@@ -58,7 +58,9 @@ async function fixture(run, options = {}) {
 				},
 			],
 		});
-		const { SyncCoordinator, TFile, Platform } = await import(pathToFileURL(outfile).href);
+		const { SyncCoordinator, TFile, Platform, LocalEditPendingError } = await import(
+			pathToFileURL(outfile).href
+		);
 		const events = new Map();
 		const states = [];
 		const file = Object.assign(new TFile(), { path: "note.md", stat: { size: 3 } });
@@ -126,6 +128,7 @@ async function fixture(run, options = {}) {
 			Platform,
 			vaultFiles,
 			TFile,
+			LocalEditPendingError,
 		});
 	} finally {
 		coordinator?.close();
@@ -135,6 +138,19 @@ async function fixture(run, options = {}) {
 		await rm(dir, { recursive: true, force: true });
 	}
 }
+test("continued local editing stays pending instead of exhausting conflict retries", () =>
+	fixture(async ({ coordinator, states, notices, LocalEditPendingError }) => {
+		coordinator.syncEngine.sync = async () => {
+			throw new LocalEditPendingError("note.md");
+		};
+		for (let i = 0; i < 5; i++) {
+			await coordinator.runSync("Auto-sync", "both", { autoSync: true });
+			assert.equal(coordinator.isReplanHeld, false);
+			assert.equal(states.at(-1).kind, "pending");
+			assert.equal(notices.length, 0);
+		}
+	}));
+
 test("pending changes deduplicate, keep status neutral idle, and clear after success", () =>
 	fixture(async ({ coordinator, events, states, file }) => {
 		events.get("modify")(file);

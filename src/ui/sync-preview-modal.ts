@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
-import { Modal, Notice } from "obsidian";
+import { Notice } from "obsidian";
+import { MobileDialog } from "./mobile-dialog";
 import type FilenSyncPlugin from "../main";
 import { getDirectionExplanation } from "../sync/direction-explanation";
 import type {
@@ -11,7 +12,7 @@ import type {
 
 const ITEMS_PER_PAGE = 50;
 
-export class SyncPreviewModal extends Modal {
+export class SyncPreviewModal extends MobileDialog {
 	private direction: SyncDirection;
 	private currentPreview: SyncPreviewResult | null = null;
 	private isLoading = false;

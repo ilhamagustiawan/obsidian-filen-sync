@@ -1,4 +1,5 @@
 import { readLocalBytes } from "./sync/local-io";
+import { LocalEditPendingError } from "./sync/local-edit-pending";
 import { selectedSettingsPaths } from "./sync/settings-paths";
 import { scanLocal } from "./sync/local-scanner";
 import type { App } from "obsidian";
@@ -218,6 +219,7 @@ export class SyncEngine {
 				this.localHashes.clear();
 				if (
 					replanAttempts < maxReplanAttempts &&
+					!(error instanceof LocalEditPendingError) &&
 					error instanceof Error &&
 					error.message.includes("Replan the sync")
 				) {
@@ -778,6 +780,7 @@ export class SyncEngine {
 		const cleanedCopies = new Set<string>();
 		const total = planResult.actions.filter((action) => action.operation !== "noop").length;
 		let completed = 0;
+		let pendingLocalEdit: LocalEditPendingError | undefined;
 		const executeStart = performance.now();
 
 		if (!isNarrow) {
@@ -812,13 +815,22 @@ export class SyncEngine {
 				return;
 			}
 
-			const result = await executor.execute(
-				action,
-				effectiveLocalFiles.get(action.path),
-				effectiveRemoteFiles.get(action.path),
-				effectivePrev.get(action.path),
-				report,
-			);
+			let result: ExecutionResult;
+			try {
+				result = await executor.execute(
+					action,
+					effectiveLocalFiles.get(action.path),
+					effectiveRemoteFiles.get(action.path),
+					effectivePrev.get(action.path),
+					report,
+				);
+			} catch (error) {
+				if (!(error instanceof LocalEditPendingError)) throw error;
+				// Do not let an actively edited note starve unrelated transfers.
+				// Keep it uncompleted and ask the coordinator to retry after idle.
+				pendingLocalEdit = error;
+				return;
+			}
 			for (const path of result.cleanedCopies ?? []) cleanedCopies.add(path);
 			if (result.cleanedCopies?.length) {
 				this.localScanSnapshot = null;
@@ -906,6 +918,7 @@ export class SyncEngine {
 		} else {
 			await runTransfers();
 		}
+		if (pendingLocalEdit) throw pendingLocalEdit;
 
 		executeMs = Math.round(performance.now() - executeStart);
 		const transferMs = Math.round(performance.now() - transferStart);

@@ -1170,6 +1170,7 @@ test("FilenSyncSettings correctly parses statusBarIndicatorStyle and defaults to
 			stub,
 			`
 			export class Modal {}
+			export const Platform = { isMobile: false };
 			export class Notice {}
 			export class PluginSettingTab {}
 			export class Setting {}
@@ -1400,6 +1401,7 @@ test("SyncDb isolates target identity by vaultId, userId, and remoteRootUuid and
 			obsidianStub,
 			`
 			export class Modal {}
+			export const Platform = { isMobile: false };
 			export class Notice {}
 			export class PluginSettingTab {}
 			export class Setting {}
@@ -1540,7 +1542,7 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 			],
 		});
 		const { TFile } = await import(pathToFileURL(stub).href);
-		const { SyncExecutor } = await import(pathToFileURL(outfile).href);
+		const { SyncExecutor, sha256Hex } = await import(pathToFileURL(outfile).href);
 
 		const fakeTFile = new TFile("note.md", 2000, 25);
 
@@ -1712,7 +1714,7 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 		assert.equal(trashedFile, true, "Local file was trashed after verified remote absence");
 		assert.equal(deleteResult.applied, 1);
 
-		// A concurrent edit after upload retains the old baseline for fresh reconciliation.
+		// A concurrent edit preserves the uploaded snapshot as the baseline, not the newer edit.
 		const concurrentTFile = new TFile("typing.md", 1000, 20);
 		const concurrentEntry = {
 			path: "typing.md",
@@ -1748,11 +1750,10 @@ test("SyncExecutor revalidates local and remote state before mutation", async ()
 			/Local file changed during sync.*Replan the sync/u,
 		);
 
-		assert.equal(
-			savedBaselineRecord,
-			undefined,
-			"Partial success must not publish a new baseline",
-		);
+		assert.equal(savedBaselineRecord.remoteUuid, "uploaded-uuid");
+		assert.equal(savedBaselineRecord.mtime, 1000);
+		assert.equal(savedBaselineRecord.size, 3);
+		assert.equal(savedBaselineRecord.hash, await sha256Hex(new Uint8Array([1, 2, 3])));
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

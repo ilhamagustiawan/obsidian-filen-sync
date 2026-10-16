@@ -142,6 +142,11 @@ test("persistent mobile sidebar status shares the menu and survives remounts", a
 		});
 		assert.equal(button.attributes.get("data-sync-state"), "synced");
 		assert.equal(button.children[0].attributes.get("data-icon"), "circle-check");
+		assert.equal(
+			button.children[1].textContent,
+			"Synced",
+			"status is readable without tooltips",
+		);
 		assert.equal(timers.size, 0, "completion remains visible");
 		indicator.onStatusChange({ kind: "syncing", text: "Syncing", detail: "", updatedAt: 1 });
 		assert.equal(timers.size, 1);

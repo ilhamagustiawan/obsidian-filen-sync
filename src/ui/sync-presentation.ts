@@ -107,9 +107,13 @@ export function syncIconPresentation(
 	const labels = {
 		synced: "Synced",
 		syncing: "Syncing",
-		paused: "Paused",
-		disconnected: "Disconnected",
-		pending: "Pending/checking",
+		paused: "Auto-sync paused",
+		disconnected: options.offline ? "Offline" : "Not connected",
+		pending: options.pending
+			? `${options.pending} pending ${options.pending === 1 ? "change" : "changes"}`
+			: state?.kind === "pending"
+				? "Checking changes"
+				: "Ready to sync",
 		conflict: "Conflicts need review",
 		error: "Sync error",
 	};

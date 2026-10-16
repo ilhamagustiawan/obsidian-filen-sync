@@ -52,6 +52,7 @@ async function loadActivityLogsModule() {
 				}
 			}
 			export class Notice {}
+			export const Platform = { isMobile: false };
 			`,
 		);
 

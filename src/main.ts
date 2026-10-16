@@ -2,8 +2,9 @@ import { selectedSettingsPaths } from "./sync/settings-paths";
 import { DeletedFilesModal } from "./ui/deleted-files-modal";
 import { ConflictResolverModal } from "./ui/conflict-resolver-modal";
 import { syncIconPresentation } from "./ui/sync-presentation";
-import type { App, TAbstractFile } from "obsidian";
-import { Menu, Modal, Notice, Platform, Plugin, TFile, setIcon, setTooltip } from "obsidian";
+import { MobileDialog } from "./ui/mobile-dialog";
+import type { App, Modal, TAbstractFile } from "obsidian";
+import { Menu, Notice, Platform, Plugin, TFile, setIcon, setTooltip } from "obsidian";
 import {
 	ActivityLogModal,
 	inferActivityLogKind,
@@ -523,7 +524,7 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	openActivityLogs(): void {
-		new ActivityLogModal(this.app, this).open();
+		this.openManagedModal(new ActivityLogModal(this.app, this));
 	}
 
 	async clearActivityLogs(): Promise<void> {
@@ -630,11 +631,11 @@ export default class FilenSyncPlugin extends Plugin {
 			new Notice("A sync is already in progress.");
 			return;
 		}
-		new SyncPreviewModal(this.app, this, direction).open();
+		this.openManagedModal(new SyncPreviewModal(this.app, this, direction));
 	}
 
 	openDiagnosticHistory(): void {
-		new DiagnosticHistoryModal(this.app, this).open();
+		this.openManagedModal(new DiagnosticHistoryModal(this.app, this));
 	}
 
 	setPreviewActive(active: boolean): void {
@@ -722,10 +723,10 @@ export default class FilenSyncPlugin extends Plugin {
 		this.coordinator.refreshAutoSync(() => this.canAutoSync());
 	}
 
-	async testConnection(): Promise<void> {
+	async testConnection(): Promise<boolean> {
 		if (this.coordinator.active) {
 			new Notice("Sync in progress.");
-			return;
+			return false;
 		}
 		this.setStatus("Testing connection…", "syncing", "Checking Filen access...");
 		this.logActivity("Connecting to server");
@@ -736,11 +737,13 @@ export default class FilenSyncPlugin extends Plugin {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			new Notice("Connection test: ok");
 			this.setStatus("Connection ok", "success", `Connected as ${this.settings.email}.`);
+			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			this.logActivity(`Connection failed: ${message}`);
 			new Notice(`Connection test failed: ${message}`);
 			this.setStatus("Connection failed", "error", message);
+			return false;
 		}
 	}
 
@@ -1066,6 +1069,11 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private buildStatusBarMenu(): Menu {
 		const menu = new Menu();
+		if (Platform.isMobile) {
+			menu.addItem((item) => item.setTitle(this.iconModel().label).setDisabled(true));
+			menu.addItem((item) => item.setTitle(this.lastSyncSummary()).setDisabled(true));
+			menu.addSeparator();
+		}
 		const add = (
 			target: Menu,
 			title: string,
@@ -1245,10 +1253,12 @@ export default class FilenSyncPlugin extends Plugin {
 	private maybePromptForSetup(): void {
 		if (this.hasSavedAuth() || this.setupPromptShown) return;
 		this.setupPromptShown = true;
-		new FilenSyncSetupModal({
-			app: this.app,
-			onOpenSettings: () => this.openSettingsTab(),
-		}).open();
+		this.openManagedModal(
+			new FilenSyncSetupModal({
+				app: this.app,
+				onOpenSettings: () => this.openSettingsTab(),
+			}),
+		);
 	}
 
 	private logActivity(
@@ -1488,7 +1498,7 @@ const confirmAction = (
 		new ConfirmActionModal(app, title, message, confirmText, resolve).open();
 	});
 
-class ConfirmActionModal extends Modal {
+class ConfirmActionModal extends MobileDialog {
 	private resolved = false;
 
 	constructor(
@@ -1499,6 +1509,7 @@ class ConfirmActionModal extends Modal {
 		private readonly resolve: (confirmed: boolean) => void,
 	) {
 		super(app);
+		this.modalEl.addClass("filen-confirm-dialog");
 	}
 
 	onOpen(): void {

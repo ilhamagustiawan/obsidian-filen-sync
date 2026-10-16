@@ -1,9 +1,10 @@
 import { assertNoPathCollisions } from "../sync/path-validation";
-import { Modal, Notice, TFile, type App } from "obsidian";
+import { Notice, TFile, type App } from "obsidian";
+import { MobileDialog } from "./mobile-dialog";
 import type { SyncDb } from "../db";
 import type { DeletedItem, RemoteFs } from "../fs-remote";
 import { confirmAction } from "./confirm";
-export class DeletedFilesModal extends Modal {
+export class DeletedFilesModal extends MobileDialog {
 	private generation = 0;
 	private closed = false;
 	private restoring = false;

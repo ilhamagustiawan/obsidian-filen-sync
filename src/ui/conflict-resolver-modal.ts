@@ -1,4 +1,5 @@
-import { Modal, Notice, TFile, type App } from "obsidian";
+import { Notice, TFile, type App } from "obsidian";
+import { MobileDialog } from "./mobile-dialog";
 import type { SyncDb } from "../db";
 import { getOriginalPathFromConflictPath } from "../sync/conflict-utils";
 import { decodeText } from "../sync/merge";
@@ -43,7 +44,7 @@ type Config = {
 	) => Promise<void>;
 	onSynced?: (path: string) => void;
 };
-export class ConflictResolverModal extends Modal {
+export class ConflictResolverModal extends MobileDialog {
 	private search = "";
 	private page = 0;
 	private selected = "";

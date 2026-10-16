@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
-import { Modal, Notice } from "obsidian";
+import { Notice } from "obsidian";
+import { MobileDialog } from "./mobile-dialog";
 import type FilenSyncPlugin from "../main";
 import { buildRedactedDiagnosticExport } from "../sync/diagnostic-export";
 import {
@@ -9,7 +10,7 @@ import {
 } from "../sync/diagnostic-history";
 import type { TargetIdentityInfo } from "../sync/types";
 
-export class DiagnosticHistoryModal extends Modal {
+export class DiagnosticHistoryModal extends MobileDialog {
 	private records: DiagnosticPlanRecord[] = [];
 	private targetInfo: TargetIdentityInfo | null = null;
 	private isLoading = true;

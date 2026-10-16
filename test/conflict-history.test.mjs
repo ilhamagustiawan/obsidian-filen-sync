@@ -241,6 +241,142 @@ test("verified identical hashes suppress timestamp conflicts and independent tim
 		"noop",
 	);
 });
+test("remote content matching the baseline is not a competing edit despite metadata changes", () => {
+	const base = bytes("one\n\ntwo\n");
+	const local = { path: "note.md", mtime: 2, ctime: 1, size: 8, hash: hash(bytes("one\ntwo\n")) };
+	const sha512 = createHash("sha512").update(base).digest("hex");
+	const prev = {
+		path: local.path,
+		mtime: 1,
+		ctime: 1,
+		size: base.length,
+		hash: hash(base),
+		remoteMtime: 1,
+		remoteUuid: "old",
+		remoteHash: sha512,
+	};
+	for (const proof of [
+		{ hash: hash(base), remoteHash: "changed-metadata" },
+		{ remoteHash: sha512.toUpperCase() },
+	]) {
+		const remote = {
+			path: local.path,
+			mtime: 3,
+			size: base.length,
+			uuid: "replacement",
+			isDir: false,
+			...proof,
+		};
+		const result = m.planSync({
+			localFiles: new Map([[local.path, local]]),
+			remoteFiles: new Map([[local.path, remote]]),
+			prevRecords: new Map([[local.path, prev]]),
+		});
+		assert.equal(result.actions[0].operation, "upload");
+	}
+});
+
+test("typing during upload records the uploaded snapshot before requesting a replan", async () => {
+	const f = fixture("one\n\ntwo\n", "one\ntwo\n", "one\ntwo\n");
+	const local = f.local();
+	const uploadedText = text(f.file.content);
+	let mergeBaseline;
+	f.db.setMergeBaseline = async (_path, baseline) => {
+		mergeBaseline = baseline;
+	};
+	const write = f.fs.writeFile;
+	f.fs.writeFile = async (...args) => {
+		const result = await write(...args);
+		f.file.content = bytes("one\n\ntwo\nStill typing");
+		f.file.stat.size = f.file.content.length;
+		f.file.stat.mtime++;
+		return result;
+	};
+	const executor = new m.SyncExecutor({
+		app: f.app,
+		db: f.db,
+		remote: f.fs,
+		deviceId: "device",
+		pluginId: "filen-sync",
+		conflictResolution: "auto",
+	});
+	await assert.rejects(
+		executor.execute({ path: "note.md", operation: "upload" }, local, f.remote),
+		/Replan the sync/,
+	);
+	assert.equal(
+		f.record.hash,
+		hash(bytes(uploadedText)),
+		"baseline describes the successfully uploaded snapshot",
+	);
+	assert.equal(f.record.remoteUuid, f.remote.uuid);
+	assert.equal(f.record.mtime, local.mtime);
+	assert.equal(mergeBaseline.text, uploadedText);
+	assert.equal(mergeBaseline.hash, f.record.hash);
+	const next = m.planSync({
+		localFiles: new Map([["note.md", f.local()]]),
+		remoteFiles: new Map([["note.md", f.remote]]),
+		prevRecords: new Map([["note.md", f.record]]),
+	});
+	assert.equal(
+		next.actions[0].operation,
+		"upload",
+		"continued single-device editing is not a conflict",
+	);
+	assert.equal(f.conflicts.size, 0);
+});
+
+test("a failed upload leaves the previous baseline intact", async () => {
+	const f = fixture();
+	const previous = structuredClone(f.record);
+	f.fs.writeFile = async () => {
+		throw new Error("Upload failed");
+	};
+	const executor = new m.SyncExecutor({
+		app: f.app,
+		db: f.db,
+		remote: f.fs,
+		deviceId: "device",
+		pluginId: "filen-sync",
+		conflictResolution: "auto",
+	});
+	await assert.rejects(
+		executor.execute({ path: "note.md", operation: "upload" }, f.local(), f.remote),
+		/Upload failed/,
+	);
+	assert.deepEqual(f.record, previous);
+	assert.equal(f.baselines.length, 0);
+});
+
+test("typing during download requests a replan without creating a persistent conflict", async () => {
+	const f = fixture("one\ntwo\n", "one\nTWO\n", "one\ntwo\n");
+	const local = f.local();
+	const read = f.fs.readFile;
+	f.fs.readFile = async (...args) => {
+		const result = await read(...args);
+		f.file.content = bytes("one\n\ntwo\n");
+		f.file.stat.size = f.file.content.length;
+		f.file.stat.mtime++;
+		return result;
+	};
+	const executor = new m.SyncExecutor({
+		app: f.app,
+		db: f.db,
+		remote: f.fs,
+		deviceId: "device",
+		pluginId: "filen-sync",
+		conflictResolution: "auto",
+	});
+	await assert.rejects(
+		executor.execute({ path: "note.md", operation: "download" }, local, f.remote),
+		/Replan the sync/,
+	);
+	assert.equal(text(f.file.content), "one\n\ntwo\n");
+	assert.equal(text(f.remote.content), "one\nTWO\n");
+	assert.equal(f.conflicts.size, 0);
+	assert.equal(f.baselines.length, 0);
+});
+
 test("automatic merging preserves originals before both writes and publishes a successful baseline", async () => {
 	const f = fixture();
 	const executor = new m.SyncExecutor({
@@ -561,6 +697,55 @@ const approve = (f, content) => {
 		bytes: content === null ? null : bytes(content),
 	});
 };
+test("managed review shows progress while applying and restores controls after failure", async () => {
+	const f = fixture("local", "remote", "base");
+	await detect(f, "manual");
+	const panel = new m.Modal(f.app).contentEl;
+	let finish;
+	let calls = 0;
+	globalThis.__autoConfirm = true;
+	try {
+		await m.showManagedConflict({
+			app: f.app,
+			db: f.db,
+			panel,
+			record: f.conflicts.get(f.file.path),
+			isCurrent: () => true,
+			apply: () => {
+				calls++;
+				return new Promise((_, reject) => {
+					finish = reject;
+				});
+			},
+			onBusy: () => {},
+			onApplied: () => {},
+			onStale: () => {},
+		});
+		const all = (el) => [el, ...el.children.flatMap(all)];
+		const editor = all(panel).find((el) => el.tag === "textarea");
+		editor.value = "Reviewed result";
+		editor.oninput();
+		const save = all(panel).find((el) => el.textContent === "Apply and sync");
+		save.onclick();
+		await new Promise(setImmediate);
+		assert.equal(calls, 1);
+		assert.equal(save.disabled, true);
+		assert.equal(save.textContent, "Applying…");
+		assert.ok(
+			all(panel).some((el) => el.attrs.role === "status" && /Applying/.test(el.textContent)),
+		);
+		save.onclick();
+		assert.equal(calls, 1);
+		finish(new Error("Connection lost"));
+		await new Promise(setImmediate);
+		assert.equal(save.disabled, false);
+		assert.equal(save.textContent, "Apply and sync");
+		assert.ok(all(panel).some((el) => /Connection lost/.test(el.textContent)));
+	} finally {
+		finish?.(new Error("test cleanup"));
+		delete globalThis.__autoConfirm;
+	}
+});
 for (const [name, base, local, remote, expected] of [
 	[
 		"independent words in one sentence",

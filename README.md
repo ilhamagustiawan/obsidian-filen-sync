@@ -137,7 +137,9 @@ The menu starts with **Review conflicts (N)** when needed, followed by **Pause/R
 
 ### Mobile status
 
-One persistent button lives in the right sidebar and remounts after layout changes. It uses the same menu and states as desktop. **Show mobile sync status** controls visibility without disabling synchronization. Connected, unpaused vaults check shortly after opening even when save and interval sync are disabled. Returning to the app coalesces duplicate checks; offline checks recover on reconnection. **Initial sync** keeps full verification.
+One persistent button lives in the right sidebar and remounts after layout changes. Its icon and readable label distinguish offline, auto-sync paused, checking, pending changes, and completion. The mobile sync menu includes the current state and last-sync time. **Show mobile sync status** controls visibility without disabling synchronization. Connected, unpaused vaults check shortly after opening even when save and interval sync are disabled. Returning to the app coalesces duplicate checks; offline checks recover on reconnection. **Initial sync** keeps full verification.
+
+Mobile login supports email and numeric two-factor keyboards, password-manager and one-time-code autofill where supported by the device, a **Show password** control, and inline connection feedback. Plugin dialogs and the progress popup fit the visible screen when the keyboard opens; phone dialogs provide larger touch targets and scrollable content. Background execution depends on iOS/Android: keep Obsidian open to finish a large first sync.
 
 ### Conflict review
 

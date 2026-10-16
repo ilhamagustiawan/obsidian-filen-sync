@@ -1,3 +1,4 @@
+import { isValidFilenSha512 } from "./content-hash";
 import type {
 	LocalFileInfo,
 	PlannedAction,
@@ -460,6 +461,17 @@ function isLocalChanged(local: LocalFileInfo, prev: SyncedFileRecord): boolean {
 }
 
 function isRemoteChanged(remote: RemoteFileInfo, prev: SyncedFileRecord): boolean {
+	// Metadata/identity changes require fresh inspection, but verified content
+	// equal to the baseline is not an independent edit. Never compare the
+	// provider's SHA-512 directly with our local SHA-256 digest.
+	if (remote.hash !== undefined && prev.hash !== undefined) return remote.hash !== prev.hash;
+	if (
+		remote.size === prev.size &&
+		isValidFilenSha512(remote.remoteHash) &&
+		isValidFilenSha512(prev.remoteHash) &&
+		remote.remoteHash.toLowerCase() === prev.remoteHash.toLowerCase()
+	)
+		return false;
 	return (
 		(remote.uuid !== undefined &&
 			prev.remoteUuid !== undefined &&
