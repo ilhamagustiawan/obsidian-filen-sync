@@ -140,7 +140,7 @@ export class ConflictResolverModal extends MobileDialog {
 	private async select(path: string): Promise<void> {
 		const generation = ++this.generation;
 		this.selected = path;
-		this.panel?.setText("Loading…");
+		this.panel?.setText("Waiting for any active sync or preview, then loading…");
 		try {
 			const managed = this.config.conflicts?.().find((record) => record.path === path);
 			if (managed && this.config.refreshConflict && this.config.applyConflict) {

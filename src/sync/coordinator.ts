@@ -118,6 +118,9 @@ export class SyncCoordinator {
 	private conflictTargetKey: string | undefined;
 	private savedNewConflicts = false;
 	private isPreviewActive = false;
+	private conflictReviewActive = false;
+	private closed = false;
+	private conflictWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
 	private isOffline = false;
 	private consecutiveNetworkFailures = 0;
 	private lastErrorNoticeTime = new Map<string, number>();
@@ -240,11 +243,17 @@ export class SyncCoordinator {
 	private async conflictSession<T>(
 		targetKey: string | undefined,
 		work: (context: ConflictContext) => Promise<T>,
+		label: string,
 	): Promise<T> {
-		if (this.isSyncing || this.isPreviewActive)
-			throw new Error("Wait for the current sync or preview to finish.");
-		this.isSyncing = true;
+		const requestedAt = performance.now();
+		await new Promise<void>((resolve, reject) => {
+			if (this.closed) return reject(new Error("Sync coordinator closed."));
+			this.conflictWaiters.push({ resolve, reject });
+			this.startNextConflict();
+		});
+		const startedAt = performance.now();
 		try {
+			if (this.closed) throw new Error("Sync coordinator closed.");
 			await this.callbacks.prepareTarget?.();
 			const db = this.getDb();
 			if (!db || !targetKey || db.targetKey !== targetKey)
@@ -257,34 +266,60 @@ export class SyncCoordinator {
 				this.isSyncing = false;
 				this.invalidateEngine();
 				this.publishPending();
+				this.startNextConflict();
 				this.runPendingAutoSync();
+				this.callbacks.onLogActivity(
+					`${label} finished (wait ${Math.round(startedAt - requestedAt)}ms, work ${Math.round(performance.now() - startedAt)}ms)`,
+				);
 			}
 		}
 	}
+	/** Reserve the operation before waking its caller, so background work cannot overtake it. */
+	private startNextConflict(): void {
+		if (this.closed || this.isSyncing || this.isPreviewActive) return;
+		const next = this.conflictWaiters.shift();
+		if (!next) return;
+		this.isSyncing = true;
+		next.resolve();
+	}
+
+	setConflictReviewActive(active: boolean): void {
+		this.conflictReviewActive = active;
+		if (!active) this.runPendingAutoSync();
+	}
 	async refreshConflict(path: string, targetKey: string | undefined): Promise<ConflictRecord> {
-		return this.conflictSession(targetKey, async (context) => {
-			const record = await context.db.getConflict?.(path);
-			if (!record) throw new Error("This conflict was already resolved.");
-			if (record.kind === "settings" && !context.selectedSettings?.includes(path))
-				throw new Error("Select this settings file for sync before reviewing it.");
-			if (record.approval && !record.approval.localApplied) return record;
-			const refreshed = (await captureConflict(context, path, record.reason)).record;
-			return collectConflictCopies(context, refreshed);
-		});
+		return this.conflictSession(
+			targetKey,
+			async (context) => {
+				const record = await context.db.getConflict?.(path);
+				if (!record) throw new Error("This conflict was already resolved.");
+				if (record.kind === "settings" && !context.selectedSettings?.includes(path))
+					throw new Error("Select this settings file for sync before reviewing it.");
+				if (record.approval && !record.approval.localApplied) return record;
+				const refreshed = (await captureConflict(context, path, record.reason)).record;
+				return collectConflictCopies(context, refreshed);
+			},
+			"Conflict review",
+		);
 	}
 	async resolveConflict(
 		resolution: ConflictResolution,
 		targetKey: string | undefined,
 	): Promise<void> {
-		await this.conflictSession(targetKey, async (context) => {
-			const record = await context.db.getConflict?.(resolution.path);
-			const apply = () => applyConflict(context, resolution);
-			if (context.remote.withMutationSession) await context.remote.withMutationSession(apply);
-			else await apply();
-			for (const copy of record?.copies ?? []) this.conflictsIndex?.delete(copy.path);
-			this.pendingPaths.delete(resolution.path);
-			this.callbacks.onLogActivity(`Conflict resolved and synced: ${resolution.path}`);
-		});
+		await this.conflictSession(
+			targetKey,
+			async (context) => {
+				const record = await context.db.getConflict?.(resolution.path);
+				const apply = () => applyConflict(context, resolution);
+				if (context.remote.withMutationSession)
+					await context.remote.withMutationSession(apply);
+				else await apply();
+				for (const copy of record?.copies ?? []) this.conflictsIndex?.delete(copy.path);
+				this.pendingPaths.delete(resolution.path);
+				this.callbacks.onLogActivity(`Conflict resolved and synced: ${resolution.path}`);
+			},
+			"Conflict application",
+		);
 	}
 	async resolveLegacyConflict(
 		path: string,
@@ -293,46 +328,52 @@ export class SyncCoordinator {
 		copies: Array<{ path: string; hash: string }>,
 		targetKey: string | undefined,
 	): Promise<void> {
-		await this.conflictSession(targetKey, async (context) => {
-			for (const copy of copies) {
+		await this.conflictSession(
+			targetKey,
+			async (context) => {
+				for (const copy of copies) {
+					if (
+						(await sha256Hex(
+							new Uint8Array(await this.app.vault.adapter.readBinary(copy.path)),
+						)) !== copy.hash
+					)
+						throw new Error("A legacy copy changed. Refresh the review.");
+				}
+				if ((await readLocalSide(context, path)).hash !== hash)
+					throw new Error("Local file changed. Refresh the review.");
+				const remote = await readRemoteSide(context, path);
+				const captured = await captureConflict(context, path, "Legacy conflict review");
+				if (remote.hash !== hash)
+					throw new Error(
+						"Filen differs from the reviewed current file. Reopen this conflict to review both originals.",
+					);
+				const reviewed = await collectConflictCopies(context, captured.record);
 				if (
-					(await sha256Hex(
-						new Uint8Array(await this.app.vault.adapter.readBinary(copy.path)),
-					)) !== copy.hash
+					reviewed.copies?.some(
+						(copy) =>
+							!copies.some(
+								(known) =>
+									known.path === copy.path &&
+									known.hash === copy.local.recovery?.hash &&
+									(!copy.remote.recovery ||
+										copy.remote.recovery.hash === known.hash),
+							),
+					)
 				)
-					throw new Error("A legacy copy changed. Refresh the review.");
-			}
-			if ((await readLocalSide(context, path)).hash !== hash)
-				throw new Error("Local file changed. Refresh the review.");
-			const remote = await readRemoteSide(context, path);
-			const captured = await captureConflict(context, path, "Legacy conflict review");
-			if (remote.hash !== hash)
-				throw new Error(
-					"Filen differs from the reviewed current file. Reopen this conflict to review both originals.",
-				);
-			const reviewed = await collectConflictCopies(context, captured.record);
-			if (
-				reviewed.copies?.some(
-					(copy) =>
-						!copies.some(
-							(known) =>
-								known.path === copy.path &&
-								known.hash === copy.local.recovery?.hash &&
-								(!copy.remote.recovery || copy.remote.recovery.hash === known.hash),
-						),
-				)
-			)
-				throw new Error(
-					"Additional copies need review. Reopen this conflict to review them.",
-				);
-			const apply = () =>
-				applyConflict(context, { path, revision: reviewed.revision, bytes });
-			if (context.remote.withMutationSession) await context.remote.withMutationSession(apply);
-			else await apply();
-			for (const copy of reviewed.copies ?? []) this.conflictsIndex?.delete(copy.path);
-			this.pendingPaths.delete(path);
-			this.callbacks.onLogActivity(`Legacy conflict resolved and synced: ${path}`);
-		});
+					throw new Error(
+						"Additional copies need review. Reopen this conflict to review them.",
+					);
+				const apply = () =>
+					applyConflict(context, { path, revision: reviewed.revision, bytes });
+				if (context.remote.withMutationSession)
+					await context.remote.withMutationSession(apply);
+				else await apply();
+				for (const copy of reviewed.copies ?? []) this.conflictsIndex?.delete(copy.path);
+				this.pendingPaths.delete(path);
+				this.callbacks.onLogActivity(`Legacy conflict resolved and synced: ${path}`);
+			},
+			"Legacy conflict application",
+		);
 	}
 
 	private publishPending(): void {
@@ -410,6 +451,9 @@ export class SyncCoordinator {
 	}
 
 	close(): void {
+		this.closed = true;
+		for (const waiter of this.conflictWaiters.splice(0))
+			waiter.reject(new Error("Sync coordinator closed."));
 		this.teardownAutoSync();
 		this.syncEngine?.close();
 		this.syncEngine = null;
@@ -465,9 +509,15 @@ export class SyncCoordinator {
 
 	setPreviewActive(active: boolean, canAutoSync?: () => boolean): void {
 		this.isPreviewActive = active;
+		if (!active) this.startNextConflict();
 		if (!active && canAutoSync) {
+			const pending = this.pendingAutoSync;
+			const fullScan = this.pendingAutoSyncRequiresFullScan;
 			this.refreshAutoSync(canAutoSync);
+			this.pendingAutoSync ||= pending;
+			this.pendingAutoSyncRequiresFullScan ||= fullScan;
 		}
+		if (!active) this.runPendingAutoSync();
 	}
 
 	async generatePreview(
@@ -532,6 +582,12 @@ export class SyncCoordinator {
 			previewId?: string;
 		} = {},
 	): Promise<SyncRunResult> {
+		if (this.closed) return { kind: "skipped", reason: "Sync coordinator closed." };
+		if (options.autoSync && this.conflictReviewActive) {
+			this.pendingAutoSync = true;
+			this.pendingAutoSyncRequiresFullScan ||= options.fullScan === true;
+			return { kind: "skipped", reason: "Conflict review in progress." };
+		}
 		if (this.isSyncing || this.isPreviewActive) {
 			const reason = this.isSyncing ? "Sync already in progress." : "Preview in progress.";
 			this.callbacks.onLogActivity(`${label} skipped: ${reason.toLowerCase()}`);
@@ -961,6 +1017,7 @@ export class SyncCoordinator {
 				this.invalidateAfterRun = false;
 				this.invalidateEngine();
 			}
+			this.startNextConflict();
 			this.runPendingAutoSync();
 		}
 	}
@@ -1207,7 +1264,7 @@ export class SyncCoordinator {
 			}
 			return;
 		}
-		if (this.isSyncing) {
+		if (this.isSyncing || this.isPreviewActive || this.conflictReviewActive) {
 			this.pendingAutoSync = true;
 			return;
 		}
@@ -1230,6 +1287,8 @@ export class SyncCoordinator {
 
 	private runPendingAutoSync(): void {
 		if (
+			this.closed ||
+			this.conflictReviewActive ||
 			this.isReplanRetryHeld ||
 			!this.pendingAutoSync ||
 			!this.hasAutoSyncEnabled() ||
@@ -1252,7 +1311,8 @@ export class SyncCoordinator {
 			this.confirmationRequired
 		)
 			return;
-		if (this.isSyncing) return;
+		if (this.isSyncing || this.isPreviewActive || this.conflictReviewActive || this.closed)
+			return;
 
 		const now = Date.now();
 		const cooldownDelayMs = Math.max(0, this.nextAutoSyncAllowedAt - now);

@@ -78,6 +78,7 @@ async function fixture(run, options = {}) {
 		const activities = [];
 		const openingChecks = [];
 		const vaultFiles = [];
+		const remote = {};
 		coordinator = new SyncCoordinator(
 			{
 				vault: {
@@ -93,8 +94,8 @@ async function fixture(run, options = {}) {
 			},
 			"filen-sync",
 			settings,
-			() => ({}),
-			() => ({}),
+			() => remote,
+			() => options.db ?? {},
 			{
 				onStatusChange: (s) => states.push(s),
 				onOpeningCheckChange: (s) => openingChecks.push(s),
@@ -150,6 +151,158 @@ test("continued local editing stays pending instead of exhausting conflict retri
 			assert.equal(notices.length, 0);
 		}
 	}));
+
+test("conflict review waits for an active sync instead of requiring a retry", () => {
+	const record = { path: "note.md", approval: {}, revision: "review-1" };
+	return fixture(
+		async ({ coordinator }) => {
+			let finishSync;
+			coordinator.syncEngine.sync = () =>
+				new Promise((resolve) => {
+					finishSync = resolve;
+				});
+			const sync = coordinator.runSync("Sync", "both", { isManual: true });
+			while (!finishSync) await new Promise((resolve) => setImmediate(resolve));
+			const review = coordinator.refreshConflict("note.md", "target");
+			const outcome = review.then(
+				(value) => ({ value }),
+				(error) => ({ error }),
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+			finishSync({ applied: 0, conflicts: 0 });
+			await sync;
+			assert.deepEqual(await outcome, { value: record });
+		},
+		{ db: { targetKey: "target", getConflict: async () => record } },
+	);
+});
+
+test("conflict application waits for sync and still validates the reviewed revision", () =>
+	fixture(
+		async ({ coordinator }) => {
+			let finishSync;
+			coordinator.syncEngine.sync = () =>
+				new Promise((resolve) => {
+					finishSync = resolve;
+				});
+			const sync = coordinator.runSync("Sync", "both", { isManual: true });
+			while (!finishSync) await new Promise((resolve) => setImmediate(resolve));
+			const apply = assert.rejects(
+				coordinator.resolveConflict(
+					{ path: "note.md", revision: "old", bytes: null },
+					"target",
+				),
+				/Review changed/,
+			);
+			finishSync({ applied: 0, conflicts: 0 });
+			await sync;
+			await apply;
+		},
+		{ db: { targetKey: "target", getConflict: async () => undefined } },
+	));
+
+test("automatic sync coalesces during conflict review and resumes once after closing", () =>
+	fixture(async ({ coordinator, timers }) => {
+		let calls = 0;
+		coordinator.syncEngine.sync = async () => {
+			calls++;
+			return { applied: 0, conflicts: 0 };
+		};
+		coordinator.setConflictReviewActive(true);
+		for (let i = 0; i < 4; i++) coordinator.requestAutoSync(() => true, false);
+		assert.equal(calls, 0);
+		assert.equal(timers.size, 0);
+		coordinator.setConflictReviewActive(false);
+		assert.equal(timers.size, 1);
+		const [id, timer] = [...timers.entries()][0];
+		timers.delete(id);
+		await timer.fn();
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(calls, 1);
+		assert.equal(timers.size, 0);
+	}));
+
+test("preview closure preserves one queued automatic sync across settings refresh", () =>
+	fixture(async ({ coordinator, timers }) => {
+		let calls = 0;
+		coordinator.syncEngine.sync = async () => {
+			calls++;
+			return { applied: 0, conflicts: 0 };
+		};
+		coordinator.setPreviewActive(true);
+		coordinator.requestAutoSync(() => true, false);
+		assert.equal(calls, 0);
+		coordinator.setPreviewActive(false, () => true);
+		assert.equal(timers.size, 1);
+		const [id, timer] = [...timers.entries()][0];
+		timers.delete(id);
+		await timer.fn();
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(calls, 1);
+	}));
+
+test("manual sync remains available during conflict review", () =>
+	fixture(async ({ coordinator }) => {
+		coordinator.setConflictReviewActive(true);
+		assert.equal(
+			(await coordinator.runSync("Sync now", "both", { isManual: true })).kind,
+			"up-to-date",
+		);
+	}));
+
+test("queued conflict reviews serialize and resume when a preview closes", () => {
+	let readers = 0,
+		peak = 0;
+	const record = { path: "note.md", approval: {} };
+	return fixture(
+		async ({ coordinator }) => {
+			coordinator.setPreviewActive(true);
+			const first = coordinator.refreshConflict("note.md", "target");
+			const second = coordinator.refreshConflict("note.md", "target");
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(peak, 0);
+			coordinator.setPreviewActive(false);
+			assert.deepEqual(await Promise.all([first, second]), [record, record]);
+			assert.equal(peak, 1);
+		},
+		{
+			db: {
+				targetKey: "target",
+				getConflict: async () => {
+					peak = Math.max(peak, ++readers);
+					await new Promise((resolve) => setImmediate(resolve));
+					readers--;
+					return record;
+				},
+			},
+		},
+	);
+});
+
+test("unload rejects queued conflict actions instead of leaving them waiting", () =>
+	fixture(async ({ coordinator }) => {
+		coordinator.setPreviewActive(true);
+		const review = assert.rejects(coordinator.refreshConflict("note.md", "target"), /closed/);
+		coordinator.close();
+		await review;
+	}));
+
+test("a target change while waiting does not apply to the new target", () => {
+	const db = { targetKey: "old" };
+	return fixture(
+		async ({ coordinator }) => {
+			coordinator.setPreviewActive(true);
+			const review = assert.rejects(
+				coordinator.refreshConflict("note.md", "old"),
+				/Sync target changed/,
+			);
+			db.targetKey = "new";
+			coordinator.setPreviewActive(false);
+			await review;
+		},
+		{ db },
+	);
+});
 
 test("pending changes deduplicate, keep status neutral idle, and clear after success", () =>
 	fixture(async ({ coordinator, events, states, file }) => {

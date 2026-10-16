@@ -697,6 +697,33 @@ const approve = (f, content) => {
 		bytes: content === null ? null : bytes(content),
 	});
 };
+test("managed review loads the three independent verified snapshots concurrently", async () => {
+	const f = fixture("local", "remote", "base");
+	await detect(f, "manual");
+	const read = f.app.vault.adapter.readBinary;
+	let release;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	let reads = 0;
+	f.app.vault.adapter.readBinary = async (path) => {
+		reads++;
+		await gate;
+		return read(path);
+	};
+	const review = m.showManagedConflict({
+		app: f.app,
+		db: f.db,
+		record: f.conflicts.get(f.file.path),
+		isCurrent: () => false,
+	});
+	await new Promise(setImmediate);
+	const startedTogether = reads;
+	release();
+	await review;
+	assert.equal(startedTogether, 3, "base, local, and remote reads should share one I/O round");
+});
+
 test("managed review shows progress while applying and restores controls after failure", async () => {
 	const f = fixture("local", "remote", "base");
 	await detect(f, "manual");

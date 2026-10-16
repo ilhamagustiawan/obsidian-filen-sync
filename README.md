@@ -145,9 +145,11 @@ Mobile login supports email and numeric two-factor keyboards, password-manager a
 
 New unresolved conflicts open one resolver after synchronization. Pending reviews survive restarts and remain isolated to the selected Filen target. Closing the resolver leaves both originals unchanged.
 
+Automatic sync waits while the resolver is open; queued requests combine into one run after closing it. Reviewing or applying a conflict waits for any active sync or preview to finish, without requiring another click. An active write is never interrupted.
+
 Review the base, local, and Filen versions. Independent Markdown edits and JSON keys merge automatically; competing sections require a choice. Whole-file choices handle binary files and deletions. Editable text results are validated before saving. Comparisons use Google's diff-match-patch locally, without sending content to Google, with bounded size and execution time.
 
-**Apply and sync** revalidates the reviewed versions and writes the approved result to both the vault and Filen immediately. Writes are guarded but cannot be atomic across both systems; interrupted approvals retain recovery snapshots and can resume safely. Changed originals require a fresh review.
+**Apply and sync** revalidates the reviewed versions and writes the approved result to both the vault and Filen once the active operation finishes. Writes are guarded but cannot be atomic across both systems; interrupted approvals retain recovery snapshots and can resume safely. Changed originals require a fresh review. Activity logs separate time waiting from time spent reviewing or applying.
 
 After successful resolution, all reviewed legacy `.sync-conflict-*` files for that original are removed from both the vault and Filen, including duplicate copies. Cleanup uses trash, preserves hidden recovery backups, and only clears the review after verifying no copies remain. New or changed copies require review before deletion. Failed cleanup remains pending for retry.
 

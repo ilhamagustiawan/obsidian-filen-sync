@@ -62,6 +62,7 @@ export default class FilenSyncPlugin extends Plugin {
 	private db: SyncDb | null = null;
 	private dbReadOnly = false;
 	private resolver: ConflictResolverModal | null = null;
+	private openingConflictReview = false;
 	private ownedModals = new Set<Modal>();
 	private reviewPending = false;
 	private reviewTimer: number | null = null;
@@ -1211,7 +1212,9 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private async openConflictResolver(): Promise<void> {
-		if (this.resolver) return;
+		if (this.resolver || this.openingConflictReview) return;
+		this.openingConflictReview = true;
+		this.coordinator.setConflictReviewActive(true);
 		try {
 			await this.prepareSyncTarget();
 			if (!this.db || this.unloaded) return;
@@ -1242,11 +1245,15 @@ export default class FilenSyncPlugin extends Plugin {
 				},
 				onClosed: () => {
 					this.resolver = null;
+					this.coordinator.setConflictReviewActive(false);
 				},
 			});
 			this.openManagedModal(this.resolver);
 		} catch (e) {
 			new Notice(e instanceof Error ? e.message : "Could not open conflict review.");
+		} finally {
+			this.openingConflictReview = false;
+			if (!this.resolver) this.coordinator.setConflictReviewActive(false);
 		}
 	}
 

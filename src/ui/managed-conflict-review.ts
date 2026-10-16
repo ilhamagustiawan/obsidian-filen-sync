@@ -30,10 +30,12 @@ export async function showManagedConflict(config: Config): Promise<void> {
 	const { record, panel } = config;
 	const read = (snapshot?: ConflictRecord["local"]["recovery"]) =>
 		snapshot ? readRecovery(config.app, config.db, snapshot) : undefined;
-	const baseBytes = await read(record.base),
-		local = await read(record.local.recovery),
-		remote = await read(record.remote.recovery);
-	const approved = await read(record.approval?.result ?? undefined);
+	const [baseBytes, local, remote, approved] = await Promise.all([
+		read(record.base),
+		read(record.local.recovery),
+		read(record.remote.recovery),
+		read(record.approval?.result ?? undefined),
+	]);
 	const copies: Array<{ label: string; bytes: Uint8Array }> = [];
 	for (const copy of record.copies ?? []) {
 		for (const side of ["local", "remote"] as const) {
@@ -305,7 +307,9 @@ export async function showManagedConflict(config: Config): Promise<void> {
 				return;
 			if (!config.isCurrent()) return;
 			save.setText("Applying…");
-			status.setText("Applying the reviewed result to Obsidian and Filen…");
+			status.setText(
+				"Applying to Obsidian and Filen after any active sync or preview finishes…",
+			);
 			await config.apply({ path: record.path, revision: record.revision, bytes });
 			status.setText("Reviewed result applied and synced.");
 			if (config.isCurrent()) config.onApplied();
