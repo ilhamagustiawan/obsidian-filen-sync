@@ -231,7 +231,12 @@ export class SyncNoticeController {
 		this.iconSpan = iconWrap.createSpan({ cls: "filen-notice-icon filen-notice-spin" });
 		this.titleEl = iconWrap.createSpan({ cls: "filen-notice-title", text: "Filen Sync" });
 		this.badgeEl = header.createSpan({ cls: "filen-notice-badge", text: "0%" });
-		const close = header.createEl("button", { text: "×", cls: "filen-progress-close" });
+		const close = header.createEl("button", {
+			cls: this.isMobile() ? "filen-progress-close clickable-icon" : "filen-progress-close",
+		});
+		close.setAttr("type", "button");
+		if (this.isMobile()) setIcon(close, "x");
+		else close.setText("×");
 		close.setAttr("aria-label", "Close sync progress");
 		close.addEventListener("click", (e) => {
 			e.stopPropagation();

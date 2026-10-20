@@ -303,6 +303,10 @@ test("SyncNoticeController suppresses automatic mobile notices and renders only 
 
 		assert.equal(globalThis.__testActiveNotices.length, 1, "Detailed notice mounted on demand");
 		const notice = globalThis.__testActiveNotices[0];
+		const close = notice.noticeEl.children[0].children[0].children[2];
+		assert.equal(close.getAttr("data-icon"), "x", "mobile close uses a small SVG icon");
+		assert.equal(close.getAttr("aria-label"), "Close sync progress");
+		assert.equal(close.getAttr("type"), "button");
 		assert.equal(
 			notice.noticeEl.hasClass("filen-notice-compact"),
 			false,

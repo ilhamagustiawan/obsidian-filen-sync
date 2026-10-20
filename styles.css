@@ -1446,6 +1446,31 @@
 	padding: 2px 8px;
 	margin-left: auto;
 }
+.filen-mobile-progress .filen-progress-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 44px;
+	width: 44px;
+	height: 44px;
+	min-width: 44px;
+	min-height: 44px;
+	padding: 0;
+	margin: -8px -8px -8px 0;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+}
+.filen-mobile-progress .filen-progress-close:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+.filen-mobile-progress .filen-progress-close svg {
+	width: 18px;
+	height: 18px;
+}
 .filen-sync-version-modal,
 .filen-conflict-resolver {
 	width: min(1120px, calc(100vw - 32px));
@@ -1563,14 +1588,49 @@
 .filen-mobile-sidebar-status {
 	display: inline-flex;
 	align-items: center;
-	gap: 8px;
-	max-width: calc(100% - 24px);
-	padding: 8px 12px;
+	justify-content: center;
+	width: 44px;
+	height: 44px;
+	flex-shrink: 0;
+	padding: 8px;
 }
-.filen-mobile-sidebar-label {
-	font-size: var(--font-ui-small);
-	white-space: normal;
-	overflow-wrap: anywhere;
+.filen-mobile-note-progress {
+	height: 2px;
+	margin-bottom: -2px;
+	flex: 0 0 2px;
+	overflow: hidden;
+	pointer-events: none;
+	z-index: 1;
+	background: var(--background-modifier-border);
+}
+.filen-mobile-note-progress[data-sync-state="syncing"] {
+	color: var(--interactive-accent);
+}
+.filen-mobile-note-progress[data-sync-state="paused"],
+.filen-mobile-note-progress[data-sync-state="conflict"] {
+	color: var(--color-orange);
+}
+.filen-mobile-note-progress-fill {
+	display: block;
+	height: 100%;
+	background: currentColor;
+}
+.filen-mobile-note-progress.is-indeterminate .filen-mobile-note-progress-fill {
+	animation: filen-mobile-progress-slide 1.5s ease-in-out infinite alternate;
+}
+@keyframes filen-mobile-progress-slide {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(185%);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.filen-mobile-note-progress.is-indeterminate .filen-mobile-note-progress-fill {
+		animation: none;
+		width: 100% !important;
+	}
 }
 .filen-mobile-sidebar-status > span:first-child {
 	display: inline-flex;

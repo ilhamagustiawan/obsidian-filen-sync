@@ -13,7 +13,7 @@ test("initial command requests verified two-way sync and preserves warning state
 			stub,
 			`export class Plugin {constructor(app,manifest){this.app=app;this.manifest=manifest;this.commands=[];}register(){} registerEvent(){} addSettingTab(){} addStatusBarItem(){return null;} addRibbonIcon(){return {addClass(){},setAttr(){}};} addCommand(command){this.commands.push(command);}}
   export class Component {load(){} unload(){}} export const MarkdownRenderer={render:async()=>{}}; export class ItemView {} export class Modal {} export class Notice {} export class PluginSettingTab {} export class Setting {} export class Menu {constructor(){this.items=[];} addItem(fn){const item={setTitle(v){this.title=v;return this;},setIcon(){return this;},setDisabled(v){this.disabled=v;return this;},onClick(fn){this.action=fn;return this;},setSubmenu(){return this.submenu=new Menu();}};fn(item);this.items.push(item);return this;}addSeparator(){}} export class TFile {} export class TFolder {}
-  export const Platform={isMobile:true}; export const setIcon=()=>{}; export const setTooltip=()=>{}; export const normalizePath=p=>p; export const requestUrl=()=>{throw Error('No network');};`,
+  export class MarkdownView {} export const Platform={isMobile:true}; export const setIcon=()=>{}; export const setTooltip=()=>{}; export const normalizePath=p=>p; export const requestUrl=()=>{throw Error('No network');};`,
 		);
 		const sdk = join(dir, "sdk.mjs");
 		await writeFile(sdk, "export class FilenSDK {}");
@@ -40,7 +40,14 @@ test("initial command requests verified two-way sync and preserves warning state
 		});
 		const { Plugin, DEFAULT_SETTINGS } = await import(pathToFileURL(outfile).href);
 		const plugin = new Plugin(
-			{ workspace: { on: () => ({}), onLayoutReady: () => {} } },
+			{
+				vault: { getFiles: () => [] },
+				workspace: {
+					on: () => ({}),
+					onLayoutReady: () => {},
+					getActiveViewOfType: () => null,
+				},
+			},
 			{ id: "filen-sync" },
 		);
 		plugin.hasSavedAuth = () => false;
