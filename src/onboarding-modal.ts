@@ -16,7 +16,7 @@ export class FilenSyncSetupModal extends MobileDialog {
 		this.contentEl.empty();
 
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
-		this.contentEl.createEl("h2", { text: "Set up Obsidian Filen Sync" });
+		this.contentEl.createEl("h2", { text: "Set up Filen Sync" });
 		this.contentEl.createEl("p", {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			text: "Mirror this vault to a dedicated Filen folder. Start with a manual sync, then enable auto-sync when you are ready.",
