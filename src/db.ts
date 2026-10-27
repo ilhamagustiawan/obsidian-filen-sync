@@ -4,6 +4,8 @@ import { SYNC_DB_SCHEMA_VERSION } from "./settings";
 import { validateSyncPath } from "./sync/path-validation";
 import type { ConflictRecord } from "./sync/conflict-types";
 import { getOriginalPathFromConflictPath, isConflictFilePath } from "./sync/conflict-utils";
+import { RecoveryIndex } from "./sync/recovery-index";
+import { writeMergeBaselineWithinBudget } from "./merge-baseline-budget";
 
 export type SyncDbOptions = {
 	vaultId: string;
@@ -95,10 +97,10 @@ export const SyncDb = {
 } as const;
 
 class LocalForageDb implements SyncDb {
+	private static readonly recoveryIndex = new RecoveryIndex();
 	private _schemaVersion = 0;
 	private readonly baselines: ReturnType<typeof localforage.createInstance>;
 	private readonly mergeMeta: ReturnType<typeof localforage.createInstance>;
-	private baselineWrite: Promise<void> = Promise.resolve();
 	private readonly recovery: ReturnType<typeof localforage.createInstance>;
 	private readonly deleted: ReturnType<typeof localforage.createInstance>;
 	private readonly conflicts: ReturnType<typeof localforage.createInstance>;
@@ -205,45 +207,37 @@ class LocalForageDb implements SyncDb {
 		return (await this.baselines.getItem<MergeBaseline>(path)) ?? undefined;
 	}
 	setMergeBaseline(path: string, baseline: MergeBaseline): Promise<void> {
-		const write = this.baselineWrite.then(() => this.writeMergeBaseline(path, baseline));
-		this.baselineWrite = write.catch(() => {});
-		return write;
+		return this.writeMergeBaseline(path, baseline);
 	}
 	private async writeMergeBaseline(path: string, baseline: MergeBaseline): Promise<void> {
 		this.assertWritable();
 		validateSyncPath(path);
-		const size = new TextEncoder().encode(baseline.text).length;
-		if (size > 1024 * 1024) {
-			await this.baselines.removeItem(path);
-			await this.mergeMeta.removeItem(path);
-			return;
-		}
-		await this.baselines.setItem(path, baseline);
-		await this.mergeMeta.setItem(path, { size, at: baseline.savedAt });
-		const entries: Array<{ path: string; size: number; at: number }> = [];
-		await this.mergeMeta.iterate<{ size: number; at: number }, void>((b, key) => {
-			entries.push({ path: key, size: b.size, at: b.at });
-		});
-		let total = entries.reduce((n, e) => n + e.size, 0);
-		for (const e of entries.sort((a, b) => a.at - b.at)) {
-			if (total <= 64 * 1024 * 1024) break;
-			await this.baselines.removeItem(e.path);
-			await this.mergeMeta.removeItem(e.path);
-			total -= e.size;
-		}
+		await writeMergeBaselineWithinBudget(
+			this.targetKey,
+			this.baselines,
+			this.mergeMeta,
+			path,
+			baseline,
+		);
 	}
 	async addRecovery(record: RecoveryRecord): Promise<void> {
 		this.assertWritable();
 		validateSyncPath(record.path);
-		await this.recovery.setItem(record.id, record);
+		// Snapshot before awaiting so callers cannot change the path while writing.
+		const snapshot = { ...record };
+		await LocalForageDb.recoveryIndex.addRecovery(this.targetKey, () =>
+			this.recovery.setItem(snapshot.id, snapshot),
+		);
 	}
 	async getRecovery(path: string): Promise<RecoveryRecord[]> {
 		validateSyncPath(path);
-		const records: RecoveryRecord[] = [];
-		await this.recovery.iterate<RecoveryRecord, void>((r) => {
-			if (r.path === path) records.push(r);
+		return LocalForageDb.recoveryIndex.getRecovery(this.targetKey, path, async () => {
+			const records: RecoveryRecord[] = [];
+			await this.recovery.iterate<RecoveryRecord, void>((r) => {
+				if (r.path === path) records.push(r);
+			});
+			return records.sort((a, b) => b.timestamp - a.timestamp);
 		});
-		return records.sort((a, b) => b.timestamp - a.timestamp);
 	}
 	async setDeletedMapping(record: DeletedMapping): Promise<void> {
 		this.assertWritable();

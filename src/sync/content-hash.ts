@@ -8,9 +8,17 @@ export function normalizeFilenHash(hash: string): string {
 	return hash.toLowerCase();
 }
 
-const toArrayBuffer = (data: Uint8Array | ArrayBuffer): ArrayBuffer => {
+// Borrow ordinary buffers only for the synchronous digest() call: WebCrypto
+// snapshots the bytes before returning its promise. Never mutate or transfer the
+// input here; callers retain ownership. Preserve subview bounds without slicing.
+// Shared-backed views are not a supported WebCrypto BufferSource, so copy them
+// into an ordinary buffer. Callers must prevent concurrent writes during that copy.
+const toDigestBufferSource = (data: Uint8Array | ArrayBuffer): BufferSource => {
 	if (data instanceof ArrayBuffer) return data;
-	return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+	if (data.buffer instanceof ArrayBuffer) {
+		return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+	}
+	return new Uint8Array(data);
 };
 
 const getSubtleCrypto = (): SubtleCrypto => {
@@ -24,13 +32,13 @@ const getSubtleCrypto = (): SubtleCrypto => {
 
 export async function sha256Hex(data: Uint8Array | ArrayBuffer): Promise<string> {
 	const subtle = getSubtleCrypto();
-	const digest = await subtle.digest("SHA-256", toArrayBuffer(data));
+	const digest = await subtle.digest("SHA-256", toDigestBufferSource(data));
 	return bufferToHex(new Uint8Array(digest));
 }
 
 export async function sha512Hex(data: Uint8Array | ArrayBuffer): Promise<string> {
 	const subtle = getSubtleCrypto();
-	const digest = await subtle.digest("SHA-512", toArrayBuffer(data));
+	const digest = await subtle.digest("SHA-512", toDigestBufferSource(data));
 	return bufferToHex(new Uint8Array(digest));
 }
 

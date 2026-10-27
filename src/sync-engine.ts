@@ -581,55 +581,70 @@ export class SyncEngine {
 		} else {
 			onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
 
-			const baselineStart = performance.now();
-			const prevRecords = await this.config.db.getAllFiles();
-			baselineMs = Math.round(performance.now() - baselineStart);
-			const filteredPrev = filterPrevRecords(prevRecords, pathFilter);
-			const baselinePaths = new Set(filteredPrev.keys());
-			this.assertScanEpoch(epoch);
-
-			const localScanStart = performance.now();
-			// Routine reconcile runs reuse valid session hashes; explicit verification
-			// forces fresh content evidence for the complete inventory. No-baseline
-			// files are deferred to equality resolution so both fingerprints come from
-			// one read (single-read equality), unless explicit verification demands it.
-			const deferNoBaselineHashing = !verifyContents;
-			const local = await this.walkLocal(
-				pathFilter,
-				verifyContents,
-				deferNoBaselineHashing ? baselinePaths : null,
-				epoch,
-			);
-			localScanMs = Math.round(performance.now() - localScanStart);
-			this.assertScanEpoch(epoch);
-
-			onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-			const remoteStart = performance.now();
-			let remote: RemoteScan;
-
-			if (
-				canFastPoll &&
-				!refreshRemote &&
-				eventProbeAvailable &&
-				!probeHasChanges &&
-				remoteCacheValid &&
-				this.remoteTreeCache !== null
-			) {
-				remote = this.remoteTreeCache.scan;
-				remoteFromCache = true;
-				remoteReuses = 1;
-			} else {
+			const baselineRead = (async () => {
+				const start = performance.now();
+				const records = await this.config.db.getAllFiles();
+				baselineMs = Math.round(performance.now() - start);
+				return filterPrevRecords(records, pathFilter);
+			})();
+			const localRead = (async () => {
+				// Routine scans need baseline paths to defer new-file hashing to equality
+				// resolution. Explicit verification can start immediately. walkLocal keeps
+				// the existing byte-bounded hashing pool in both cases.
+				const baselinePaths = verifyContents ? null : new Set((await baselineRead).keys());
+				this.assertScanEpoch(epoch);
+				const start = performance.now();
+				const local = await this.walkLocal(
+					pathFilter,
+					verifyContents,
+					baselinePaths,
+					epoch,
+				);
+				localScanMs = Math.round(performance.now() - start);
+				// If the remote read is still running, show the remaining scan phase.
+				onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+				return local;
+			})();
+			const remoteRead = (async (): Promise<RemoteTreeCache> => {
+				const start = performance.now();
+				if (
+					canFastPoll &&
+					!refreshRemote &&
+					eventProbeAvailable &&
+					!probeHasChanges &&
+					remoteCacheValid &&
+					this.remoteTreeCache !== null
+				) {
+					remoteFromCache = true;
+					remoteReuses = 1;
+					remoteScanMs = Math.round(performance.now() - start);
+					return this.remoteTreeCache;
+				}
 				const fetchStartedAt = Date.now();
-				remote = await this.walkRemote(pathFilter);
-				this.remoteTreeCache = {
+				// sync() already creates the root before this concurrent read phase.
+				const scan = await this.walkRemote(pathFilter, undefined, { noCreate: true });
+				remoteRefreshes = 1;
+				remoteScanMs = Math.round(performance.now() - start);
+				return {
 					fetchedAt: Date.now(),
 					eventWatermark: Math.max(newWatermark, fetchStartedAt),
-					scan: remote,
+					scan,
 				};
-				remoteRefreshes = 1;
-			}
-			remoteScanMs = Math.round(performance.now() - remoteStart);
+			})();
+			// Drain every read before rejecting so failed passes cannot leave hashing
+			// or remote work running into a retry. Never publish partial inventories.
+			const [baselineResult, localResult, remoteResult] = await Promise.allSettled([
+				baselineRead,
+				localRead,
+				remoteRead,
+			]);
+			if (baselineResult.status === "rejected") throw baselineResult.reason;
+			if (localResult.status === "rejected") throw localResult.reason;
+			if (remoteResult.status === "rejected") throw remoteResult.reason;
 			this.assertScanEpoch(epoch);
+			const filteredPrev = baselineResult.value;
+			const local = localResult.value;
+			const remote = remoteResult.value.scan;
 
 			const equalityStart = performance.now();
 			const equalityHashes = await this.resolveRemoteFileHashes(
@@ -669,6 +684,7 @@ export class SyncEngine {
 			}
 
 			// Publish snapshots only after successful scanning, then prune cache.
+			this.remoteTreeCache = remoteResult.value;
 			this.localScanSnapshot = {
 				fetchedAt: Date.now(),
 				scan: { files: new Map(local.files), dirs: new Set(local.dirs) },
@@ -1209,16 +1225,31 @@ export class SyncEngine {
 		// Full fresh scans for preview: verify contents and refresh remote metadata.
 		this.localHashes.resetCounters();
 		const epoch = this.invalidationEpoch;
-		const [local, prevRecords] = await Promise.all([
-			this.walkLocal(pathFilter, true, null, epoch, exclusionsTracker),
-			this.config.db.getAllFiles(),
+		// Preview has no baseline dependency and must remain strictly read-only.
+		// Drain failed reads just as sync does, so a subsequent run cannot overlap
+		// unfinished hashing or remote work from this preview.
+		const [localResult, baselineResult, remoteResult] = await Promise.allSettled([
+			(async () => {
+				const local = await this.walkLocal(
+					pathFilter,
+					true,
+					null,
+					epoch,
+					exclusionsTracker,
+				);
+				onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+				return local;
+			})(),
+			(async () => this.config.db.getAllFiles())(),
+			this.walkRemote(pathFilter, exclusionsTracker, { noCreate: true }),
 		]);
+		if (localResult.status === "rejected") throw localResult.reason;
+		if (baselineResult.status === "rejected") throw baselineResult.reason;
+		if (remoteResult.status === "rejected") throw remoteResult.reason;
 		this.assertScanEpoch(epoch);
-
-		onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-		// Walk remote without creating folder!
-		const remote = await this.walkRemote(pathFilter, exclusionsTracker, { noCreate: true });
-		this.assertScanEpoch(epoch);
+		const local = localResult.value;
+		const prevRecords = baselineResult.value;
+		const remote = remoteResult.value;
 
 		const filteredPrev = filterPrevRecords(prevRecords, pathFilter);
 

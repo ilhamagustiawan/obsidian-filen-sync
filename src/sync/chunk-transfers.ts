@@ -1,6 +1,7 @@
 import type FilenSDK from "@filen/sdk";
 import type { AuthVersion, FileEncryptionVersion } from "@filen/sdk";
 import { mapPool } from "./pool";
+import { sha512Hex } from "./content-hash";
 
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 export const CHUNK_CONCURRENCY = 3; // Fixed pool of 3 workers
@@ -182,7 +183,7 @@ export async function uploadFileChunks(
 	const rm = await client.getWorker().crypto.utils.generateRandomString(32);
 	const uploadKey = await client.getWorker().crypto.utils.generateRandomString(32);
 
-	const hashHex = await computeSha512Hex(bytes);
+	const hashHex = await sha512Hex(bytes);
 
 	let completedChunks = 0;
 	let completedBytes = 0;
@@ -272,6 +273,7 @@ export type FileDownloadTarget = {
 /**
  * Download a file by fetching 1 MiB chunks in parallel through a fixed pool of 3 workers.
  * Chunks are index-addressed so completion order does not matter; any failed chunk fails the download.
+ * Only the destination and in-flight chunks retain file bytes, not the pool's results.
  */
 export async function downloadFileChunks(
 	sdk: FilenSDK,
@@ -279,15 +281,23 @@ export async function downloadFileChunks(
 	onProgress?: ChunkTransferProgressCallback,
 ): Promise<Uint8Array> {
 	const client = sdk as unknown as SdkWithInternals;
-	if (target.size === 0 || target.chunks === 0) {
+	const { size, chunks } = target;
+	if (!Number.isSafeInteger(size) || size < 0) {
+		throw new Error("Invalid download file size: expected a non-negative safe integer.");
+	}
+	if (!Number.isSafeInteger(chunks) || chunks < 0 || chunks !== Math.ceil(size / CHUNK_SIZE)) {
+		throw new Error("Invalid download chunk count: inconsistent with file size.");
+	}
+	const fullBuffer = new Uint8Array(size);
+	if (size === 0) {
 		onProgress?.(0, 0, 0, 0);
-		return new Uint8Array(0);
+		return fullBuffer;
 	}
 
 	let completedChunks = 0;
 	let completedBytes = 0;
-	const chunkIndices = Array.from({ length: target.chunks }, (_, i) => i);
-	const chunkBuffers = await mapPool(chunkIndices, CHUNK_CONCURRENCY, async (index) => {
+	const chunkIndices = Array.from({ length: chunks }, (_, i) => i);
+	await mapPool(chunkIndices, CHUNK_CONCURRENCY, async (index) => {
 		const encryptedBuffer = await client.getWorker().api.v3.file.download.chunk.buffer.fetch({
 			uuid: target.uuid,
 			bucket: target.bucket,
@@ -302,32 +312,18 @@ export async function downloadFileChunks(
 			version: (target.version ?? 2) as FileEncryptionVersion,
 		});
 
+		const offset = index * CHUNK_SIZE;
+		const expectedSize = Math.min(CHUNK_SIZE, size - offset);
+		if (decryptedBuffer.byteLength !== expectedSize) {
+			throw new Error(
+				`Invalid download chunk size at index ${index}: expected ${expectedSize}, received ${decryptedBuffer.byteLength}.`,
+			);
+		}
+		fullBuffer.set(decryptedBuffer, offset);
 		completedChunks += 1;
 		completedBytes += decryptedBuffer.byteLength;
-		onProgress?.(completedChunks, target.chunks, completedBytes, target.size);
-		return new Uint8Array(decryptedBuffer);
+		onProgress?.(completedChunks, chunks, completedBytes, size);
 	});
 
-	// Reassemble parts in index order
-	const totalSize = chunkBuffers.reduce((acc, part) => acc + part.byteLength, 0);
-	const fullBuffer = new Uint8Array(totalSize);
-	let offset = 0;
-	for (const part of chunkBuffers) {
-		fullBuffer.set(part, offset);
-		offset += part.byteLength;
-	}
-
 	return fullBuffer;
-}
-
-async function computeSha512Hex(bytes: Uint8Array): Promise<string> {
-	const cryptoObj =
-		globalThis.crypto ?? (typeof window !== "undefined" ? window.crypto : undefined);
-	const buffer = bytes.buffer.slice(
-		bytes.byteOffset,
-		bytes.byteOffset + bytes.byteLength,
-	) as ArrayBuffer;
-	const hashBuffer = await cryptoObj!.subtle.digest("SHA-512", buffer);
-	const hashArray = Array.from(new Uint8Array(hashBuffer));
-	return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
