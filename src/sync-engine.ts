@@ -1,29 +1,43 @@
-import { readLocalBytes } from "./sync/local-io";
 import { LocalEditPendingError } from "./sync/local-edit-pending";
-import { selectedSettingsPaths } from "./sync/settings-paths";
 import { scanLocal } from "./sync/local-scanner";
-import type { App } from "obsidian";
 import { normalizePath, TFile, TFolder } from "obsidian";
-import type { SyncDb } from "./db";
-import type { RemoteEntry, RemoteFs } from "./fs-remote";
-import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
+import type { RemoteEntry } from "./fs-remote";
+import type { SyncPathFilter } from "./path-filters";
 import type { SyncedFileRecord } from "./settings";
-import { isValidFilenSha512 } from "./sync/content-hash";
 import { checkBulkGuard, type BulkGuardReport, type BulkGuardThresholds } from "./sync/bulk-guard";
-import { sha256Hex, SyncExecutor, type ExecutionResult, type LocalEntry } from "./sync/executor";
+import type { ExecutionResult, LocalEntry } from "./sync/executor";
 import { assertNoPathCollisions } from "./sync/path-validation";
 import { planSync } from "./sync/planner";
 import { LocalHashCache } from "./sync/local-hash-cache";
-import { mapPool } from "./sync/pool";
-import { ByteBoundedWorkPool, type BoundedPoolConfig } from "./sync/byte-bounded-pool";
+import { confirmPlannedChanges, runApplyPass } from "./sync/apply-pass";
+import {
+	LOCAL_SCAN_SNAPSHOT_TTL_MS,
+	REMOTE_TREE_CACHE_TTL_MS,
+	type ExclusionsTracker,
+	type LocalScan,
+	type LocalScanSnapshot,
+	type RemoteScan,
+	type RemoteTreeCache,
+	type ScanPolicy,
+	type SyncEngineConfig,
+	type SyncRunOptions,
+} from "./sync/engine-types";
+import { resolveEqualityHashes, type EqualityHashResult } from "./sync/equality-hashes";
+import { deriveScanPolicy } from "./sync/scan-policy";
+import {
+	createEnginePathFilter,
+	filterPrevRecords,
+	selectedEngineSettingsPaths,
+	toLocalFileInfos,
+	toRemoteFileInfos,
+	walkRemoteTree,
+} from "./sync/scan-inputs";
 import type {
 	ConflictCopy,
 	LocalFileInfo,
 	RemoteFileInfo,
 	ScanCounters,
 	ScanDiagnostics,
-	ScanFallbackReason,
-	ScanMode,
 	SnapshotProvenance,
 	SyncActivityEvent,
 	SyncDirection,
@@ -45,97 +59,45 @@ export type {
 	SyncProgress,
 	TargetIdentityInfo,
 };
+export {
+	createDefaultHashingPool,
+	HASH_POOL_DEFAULT_CONFIG,
+	HASH_POOL_ENABLED,
+	LOCAL_SCAN_SNAPSHOT_TTL_MS,
+	REMOTE_TREE_CACHE_TTL_MS,
+} from "./sync/engine-types";
+export type { SyncRunOptions } from "./sync/engine-types";
 
-export const REMOTE_TREE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-export const LOCAL_SCAN_SNAPSHOT_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Small-file hashing pool limits. Concurrency is bounded by workers AND by an
- * accounted in-flight byte budget; files at/above `largeJobThresholdBytes`
- * hash serially. These values are the current defaults and are exercised by
- * the checked-in deterministic benchmarks (benchmark-workloads.test.mjs).
- */
-export const HASH_POOL_DEFAULT_CONFIG: BoundedPoolConfig = {
-	maxWorkers: 2,
-	maxInFlightBytes: 8 * 1024 * 1024,
-	largeJobThresholdBytes: 8 * 1024 * 1024,
-	accountFactor: 2,
+/** Planner inputs and scan evidence gathered by one narrow or full scan. */
+type PlannedPass = {
+	planResult: ReturnType<typeof planSync>;
+	bulkReport: ReturnType<typeof checkBulkGuard>;
+	localFiles: Map<string, LocalEntry>;
+	remoteFiles: Map<string, RemoteEntry>;
+	prev: Map<string, SyncedFileRecord>;
+	directories?: { local: Set<string>; remote: Set<string>; skipRemoteFolderPrune: boolean };
+	equalityComparisons: number;
+	equalityDownloads: number;
+	remoteRefreshes: number;
+	remoteReuses: number;
+	inventoryFiles: number;
+	inventoryDirs: number;
+	scanMs: number;
+	planMs: number;
+	localScanMs: number;
+	baselineMs: number;
+	remoteScanMs: number;
+	equalityMs: number;
 };
 
-/**
- * Concurrent small-file hashing is enabled by default only because the checked-in
- * deterministic benchmarks (benchmark-workloads.test.mjs) show it eliminates
- * unnecessary reads without regressing serial hashing correctness or bounds.
- * Set to false to keep serial hashing.
- */
-export const HASH_POOL_ENABLED = true;
-
-export function createDefaultHashingPool(): ByteBoundedWorkPool {
-	return new ByteBoundedWorkPool(HASH_POOL_DEFAULT_CONFIG);
-}
-
-type RemoteTreeCache = {
-	fetchedAt: number;
-	eventWatermark: number;
-	scan: RemoteScan;
-};
-
-type LocalScanSnapshot = {
-	fetchedAt: number;
-	scan: LocalScan;
-};
-
-type SyncEngineConfig = {
-	app: App;
-	db: SyncDb;
-	pluginId: string;
-	settings: {
-		deviceId: string;
-		vaultName: string;
-		ignorePatterns: string[];
-		fastRemotePolling: boolean;
-		skipLargeFiles: boolean;
-		skipSizeLargerThanMB: number;
-		conflictResolution?: "auto" | "copy";
-		syncSettings?: boolean;
-		selectedSettings?: string[];
-	};
-	remote: RemoteFs;
-	verifyTarget?: () => Promise<void>;
-	transferConcurrency?: 1 | 2;
-	/** Byte-bounded small-file hashing pool; omit to hash serially. */
-	hashingPool?: ByteBoundedWorkPool;
-};
-
-type LocalScan = {
-	files: Map<string, LocalEntry>;
-	dirs: Set<string>;
-};
-
-type RemoteScan = {
-	files: Map<string, RemoteEntry>;
-	dirs: Set<string>;
-};
-
-export type SyncRunOptions = {
-	isManual?: boolean;
-	initialSync?: boolean;
-	/** Legacy forced pass: verifies local contents AND refreshes remote metadata. */
-	fullScan?: boolean;
-	/** Force fresh content hashes for the full inventory. */
-	verifyContents?: boolean;
-	/** Force a fresh remote metadata walk. */
-	refreshRemote?: boolean;
-	/** Hinted paths for the narrow edit pass. */
-	scanHints?: string[];
-};
-
-type ScanPolicy = {
-	mode: ScanMode;
-	fallbackReason?: ScanFallbackReason | string;
-	verifyContents: boolean;
+/** Remote-side facts the full scan needs from the event probe. */
+type RemoteReadPlan = {
+	canFastPoll: boolean;
 	refreshRemote: boolean;
-	narrow: boolean;
+	eventProbeAvailable: boolean;
+	probeHasChanges: boolean;
+	remoteCacheValid: boolean;
+	newWatermark: number;
 };
 
 export class SyncEngine {
@@ -180,22 +142,7 @@ export class SyncEngine {
 	): Promise<SyncOutcome> {
 		await this.config.remote.mkdir("");
 
-		const maxFileSizeBytes = this.config.settings.skipLargeFiles
-			? this.config.settings.skipSizeLargerThanMB * 1024 * 1024
-			: undefined;
-
-		const pathFilter = createSyncPathFilter({
-			configDir: this.config.app.vault.configDir,
-			pluginId: this.config.pluginId,
-			ignorePatterns: this.config.settings.ignorePatterns,
-			maxFileSizeBytes,
-			selectedSettings: selectedSettingsPaths(
-				this.config.app.vault.configDir,
-				this.config.pluginId,
-				this.config.settings.syncSettings,
-				this.config.settings.selectedSettings,
-			),
-		});
+		const pathFilter = createEnginePathFilter(this.config);
 
 		let replanAttempts = 0;
 		const maxReplanAttempts = 1;
@@ -278,63 +225,6 @@ export class SyncEngine {
 		}
 	}
 
-	private deriveScanPolicy(
-		options: SyncRunOptions,
-		replanAttempts: number,
-		snapshotValid: boolean,
-		cacheValid: boolean,
-		probeHasChanges: boolean,
-		probeFailed: boolean,
-		probeStatus: "available" | "unsupported" | "disabled",
-		hasValidFileHints: boolean,
-	): ScanPolicy {
-		const isManual = options.isManual === true;
-		const isInitial = options.initialSync === true;
-		const forceVerified = isManual || isInitial;
-		const verifyContents =
-			forceVerified || options.fullScan === true || options.verifyContents === true;
-		const refreshRemote =
-			forceVerified || options.fullScan === true || options.refreshRemote === true;
-
-		const narrow =
-			!this.config.settings.syncSettings &&
-			!verifyContents &&
-			!refreshRemote &&
-			replanAttempts === 0 &&
-			snapshotValid &&
-			cacheValid &&
-			!probeHasChanges &&
-			hasValidFileHints;
-
-		if (narrow) {
-			return { mode: "narrow", verifyContents, refreshRemote, narrow: true };
-		}
-
-		const hasAnyHints = options.scanHints !== undefined && options.scanHints.length > 0;
-		const folderHintsOnly = hasAnyHints && !hasValidFileHints;
-
-		let fallbackReason: ScanFallbackReason | string | undefined;
-		if (isManual) fallbackReason = "manual-sync";
-		else if (isInitial) fallbackReason = "initial-sync";
-		else if (replanAttempts > 0) fallbackReason = "replan";
-		else if (options.verifyContents === true) fallbackReason = "explicit-verify";
-		else if (options.fullScan === true || options.refreshRemote === true)
-			fallbackReason = "explicit-refresh";
-		else if (folderHintsOnly) fallbackReason = "folder-hints";
-		else if (!hasAnyHints) fallbackReason = "missing-hints";
-		else if (probeStatus === "unsupported") fallbackReason = "no-remote-event-support";
-		else if (probeStatus === "disabled") fallbackReason = "fast-polling-disabled";
-		else if (probeFailed) fallbackReason = "remote-probe-failed";
-		else if (probeHasChanges) fallbackReason = "remote-changes-detected";
-		else if (!cacheValid && !snapshotValid) fallbackReason = "cold-session";
-		else if (!cacheValid) fallbackReason = "stale-remote-tree";
-		else if (!snapshotValid) fallbackReason = "stale-local-snapshot";
-		else fallbackReason = "ambiguous-hints";
-
-		const mode: ScanMode = verifyContents && refreshRemote ? "full" : "reconcile";
-		return { mode, fallbackReason, verifyContents, refreshRemote, narrow: false };
-	}
-
 	private async executeSyncPass(
 		pathFilter: SyncPathFilter,
 		direction: SyncDirection,
@@ -405,539 +295,78 @@ export class SyncEngine {
 				);
 			});
 
-		const resolvedPolicy = this.deriveScanPolicy(
+		const resolvedPolicy: ScanPolicy = deriveScanPolicy({
+			syncSettings: this.config.settings.syncSettings,
 			options,
 			replanAttempts,
-			localSnapshotValid,
-			remoteCacheValid,
+			snapshotValid: localSnapshotValid,
+			cacheValid: remoteCacheValid,
 			probeHasChanges,
 			probeFailed,
 			probeStatus,
 			hasValidFileHints,
-		);
+		});
 
-		const isNarrow = resolvedPolicy.narrow;
-
-		let planResult: ReturnType<typeof planSync>;
-		let bulkReport: ReturnType<typeof checkBulkGuard>;
-		let effectiveLocalFiles: Map<string, LocalEntry>;
-		let effectiveRemoteFiles: Map<string, RemoteEntry>;
-		let effectivePrev: Map<string, SyncedFileRecord>;
-		let localDirs = new Set<string>();
-		let remoteDirs = new Set<string>();
-		let remoteFromCache = false;
-		let equalityDownloads = 0;
-		let equalityComparisons = 0;
-		let remoteProbes = 0;
-		let remoteRefreshes = 0;
-		let remoteReuses = 0;
-		remoteProbes = canFastPoll && !refreshRemote ? 1 : 0;
-
-		let scanMs = 0;
-		let planMs = 0;
-		let localScanMs = 0;
-		let baselineMs = 0;
-		let remoteScanMs = 0;
-		let equalityMs = 0;
-		let directoriesMs = 0;
-		let executeMs = 0;
-		let inventoryFiles = 0;
-		let inventoryDirs = 0;
+		const remoteProbes = canFastPoll && !refreshRemote ? 1 : 0;
 
 		const syncPassStart = performance.now();
 		const scanStart = performance.now();
 		const epoch = this.invalidationEpoch;
 
-		if (isNarrow) {
-			onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
-			const candidatePaths = new Set([
-				...options.scanHints!,
-				...((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
-			]);
-			const candidateLocalFiles = new Map<string, LocalEntry>();
-			for (const path of candidatePaths) {
-				const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
-				if (file instanceof TFile) {
-					if (pathFilter.isIgnored(file.path, file.stat.size)) continue;
-					const snapshot = { path: file.path, ...file.stat, file };
-					const fp = await this.localHashes.readBoth(
-						file,
-						() => this.config.app.vault.readBinary(file),
-						false,
-						{ withSha512: false },
-					);
-					candidateLocalFiles.set(snapshot.path, {
-						...snapshot,
-						hash: fp.hash,
-						sha512: fp.sha512,
-						file,
-					});
-				}
-			}
-
-			this.assertScanEpoch(epoch);
-
-			const candidatePrev = new Map<string, SyncedFileRecord>();
-			for (const path of candidatePaths) {
-				const record = await this.config.db.getFile(path);
-				if (
-					record !== null &&
-					record !== undefined &&
-					!pathFilter.isIgnored(path, record.size)
-				) {
-					candidatePrev.set(path, record);
-				}
-			}
-
-			onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-			const candidateEntries: Array<[string, RemoteEntry]> = [];
-			for (const path of candidatePaths) {
-				const entry = this.remoteTreeCache!.scan.files.get(path);
-				if (
-					entry !== undefined &&
-					!entry.isDir &&
-					!pathFilter.isIgnored(entry.path, entry.size)
-				) {
-					candidateEntries.push([path, entry]);
-				}
-			}
-			const candidateEqualityHashes = await this.resolveRemoteFileHashes(
-				candidateEntries,
-				candidateLocalFiles,
-				candidatePrev,
-			);
-			equalityComparisons = candidateEqualityHashes.comparisons;
-			equalityDownloads = candidateEqualityHashes.downloads;
-
-			const candidateRemoteFiles = new Map<string, RemoteFileInfo>();
-			for (const [path, entry] of candidateEntries) {
-				candidateRemoteFiles.set(path, {
-					path: entry.path,
-					mtime: entry.mtime,
-					size: entry.size,
-					isDir: false,
-					uuid: entry.uuid,
-					remoteHash: entry.remoteHash,
-					hash: candidateEqualityHashes.resolved.get(path),
-				});
-			}
-
-			// Validate collisions against complete cached snapshot
-			const testLocalPaths = new Map<string, boolean>();
-			for (const [p] of this.localScanSnapshot!.scan.files) {
-				if (!candidatePaths.has(p)) testLocalPaths.set(p, false);
-			}
-			for (const [p] of candidateLocalFiles) {
-				testLocalPaths.set(p, false);
-			}
-			for (const d of this.localScanSnapshot!.scan.dirs) {
-				testLocalPaths.set(d, true);
-			}
-			assertNoPathCollisions(
-				[...testLocalPaths.entries()].map(([path, isDir]) => ({ path, isDir })),
-			);
-
-			scanMs = Math.round(performance.now() - scanStart);
-			localScanMs = scanMs;
-			const planStart = performance.now();
-			onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
-			const localFiles = new Map<string, LocalFileInfo>();
-			for (const [path, entry] of candidateLocalFiles) {
-				localFiles.set(path, {
-					path,
-					mtime: entry.mtime,
-					ctime: entry.ctime,
-					size: entry.size,
-					hash: entry.hash,
-				});
-			}
-
-			planResult = planSync({
-				pendingConflicts: new Set(
-					((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
-				),
-				localFiles,
-				remoteFiles: candidateRemoteFiles,
-				prevRecords: candidatePrev,
-				direction,
-			});
-
-			bulkReport = checkBulkGuard(
-				planResult.actions,
-				{
-					totalLocalFiles: this.localScanSnapshot!.scan.files.size,
-					totalRemoteFiles: this.remoteTreeCache!.scan.files.size,
-					totalBaselineFiles: this.localScanSnapshot!.scan.files.size,
-				},
-				bulkThresholds,
-			);
-			planMs = Math.round(performance.now() - planStart);
-
-			effectiveLocalFiles = candidateLocalFiles;
-			effectiveRemoteFiles = this.remoteTreeCache!.scan.files;
-			effectivePrev = candidatePrev;
-			inventoryFiles = candidateLocalFiles.size;
-			inventoryDirs = this.localScanSnapshot?.scan.dirs.size ?? 0;
-		} else {
-			onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
-
-			const baselineRead = (async () => {
-				const start = performance.now();
-				const records = await this.config.db.getAllFiles();
-				baselineMs = Math.round(performance.now() - start);
-				return filterPrevRecords(records, pathFilter);
-			})();
-			const localRead = (async () => {
-				// Routine scans need baseline paths to defer new-file hashing to equality
-				// resolution. Explicit verification can start immediately. walkLocal keeps
-				// the existing byte-bounded hashing pool in both cases.
-				const baselinePaths = verifyContents ? null : new Set((await baselineRead).keys());
-				this.assertScanEpoch(epoch);
-				const start = performance.now();
-				const local = await this.walkLocal(
+		const pass = resolvedPolicy.narrow
+			? await this.scanNarrow(
 					pathFilter,
+					direction,
+					options.scanHints!,
+					bulkThresholds,
+					onProgress,
+					scanStart,
+					epoch,
+				)
+			: await this.scanFull(
+					pathFilter,
+					direction,
 					verifyContents,
-					baselinePaths,
+					{
+						canFastPoll,
+						refreshRemote,
+						eventProbeAvailable,
+						probeHasChanges,
+						remoteCacheValid,
+						newWatermark,
+					},
+					bulkThresholds,
+					onProgress,
+					scanStart,
 					epoch,
 				);
-				localScanMs = Math.round(performance.now() - start);
-				// If the remote read is still running, show the remaining scan phase.
-				onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-				return local;
-			})();
-			const remoteRead = (async (): Promise<RemoteTreeCache> => {
-				const start = performance.now();
-				if (
-					canFastPoll &&
-					!refreshRemote &&
-					eventProbeAvailable &&
-					!probeHasChanges &&
-					remoteCacheValid &&
-					this.remoteTreeCache !== null
-				) {
-					remoteFromCache = true;
-					remoteReuses = 1;
-					remoteScanMs = Math.round(performance.now() - start);
-					return this.remoteTreeCache;
-				}
-				const fetchStartedAt = Date.now();
-				// sync() already creates the root before this concurrent read phase.
-				const scan = await this.walkRemote(pathFilter, undefined, { noCreate: true });
-				remoteRefreshes = 1;
-				remoteScanMs = Math.round(performance.now() - start);
-				return {
-					fetchedAt: Date.now(),
-					eventWatermark: Math.max(newWatermark, fetchStartedAt),
-					scan,
-				};
-			})();
-			// Drain every read before rejecting so failed passes cannot leave hashing
-			// or remote work running into a retry. Never publish partial inventories.
-			const [baselineResult, localResult, remoteResult] = await Promise.allSettled([
-				baselineRead,
-				localRead,
-				remoteRead,
-			]);
-			if (baselineResult.status === "rejected") throw baselineResult.reason;
-			if (localResult.status === "rejected") throw localResult.reason;
-			if (remoteResult.status === "rejected") throw remoteResult.reason;
-			this.assertScanEpoch(epoch);
-			const filteredPrev = baselineResult.value;
-			const local = localResult.value;
-			const remote = remoteResult.value.scan;
 
-			const equalityStart = performance.now();
-			const equalityHashes = await this.resolveRemoteFileHashes(
-				remote.files,
-				local.files,
-				filteredPrev,
-			);
-			equalityMs = Math.round(performance.now() - equalityStart);
-			this.assertScanEpoch(epoch);
-			equalityComparisons = equalityHashes.comparisons;
-			equalityDownloads = equalityHashes.downloads;
+		const cancelled = await confirmPlannedChanges(
+			pass.planResult.actions,
+			pass.bulkReport,
+			onProgress,
+			confirmLocalDeletes,
+			confirmBulkOperations,
+		);
+		if (cancelled) return cancelled;
 
-			// Build planner inputs after equality resolution so no-baseline files use
-			// the same-bytes fingerprints derived during equality checking.
-			const localFiles = new Map<string, LocalFileInfo>();
-			for (const [path, entry] of local.files) {
-				localFiles.set(path, {
-					path,
-					mtime: entry.mtime,
-					ctime: entry.ctime,
-					size: entry.size,
-					hash: entry.hash,
-				});
-			}
-
-			const remoteFiles = new Map<string, RemoteFileInfo>();
-			for (const [path, entry] of remote.files) {
-				remoteFiles.set(path, {
-					path,
-					mtime: entry.mtime,
-					size: entry.size,
-					isDir: entry.isDir,
-					uuid: entry.uuid,
-					remoteHash: entry.remoteHash,
-					hash: equalityHashes.resolved.get(path),
-				});
-			}
-
-			// Publish snapshots only after successful scanning, then prune cache.
-			this.remoteTreeCache = remoteResult.value;
-			this.localScanSnapshot = {
-				fetchedAt: Date.now(),
-				scan: { files: new Map(local.files), dirs: new Set(local.dirs) },
-			};
-			this.localHashes.prune(new Set(local.files.keys()));
-
-			scanMs = Math.round(performance.now() - scanStart);
-			const planStart = performance.now();
-			onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
-			planResult = planSync({
-				pendingConflicts: new Set(
-					((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
-				),
-				localFiles,
-				remoteFiles,
-				prevRecords: filteredPrev,
-				direction,
-			});
-
-			bulkReport = checkBulkGuard(
-				planResult.actions,
-				{
-					totalLocalFiles: local.files.size,
-					totalRemoteFiles: remote.files.size,
-					totalBaselineFiles: filteredPrev.size,
-				},
-				bulkThresholds,
-			);
-			planMs = Math.round(performance.now() - planStart);
-
-			effectiveLocalFiles = local.files;
-			effectiveRemoteFiles = remote.files;
-			effectivePrev = filteredPrev;
-			localDirs = local.dirs;
-			remoteDirs = remote.dirs;
-			inventoryFiles = local.files.size;
-			inventoryDirs = local.dirs.size;
-		}
-
-		if (bulkReport.blocked) {
-			onProgress?.({ phase: "confirming", current: 0, total: 0, path: "" });
-			if (confirmBulkOperations !== undefined) {
-				const confirmed = await confirmBulkOperations(bulkReport);
-				if (!confirmed) {
-					return {
-						applied: 0,
-						conflicts: 0,
-						conflictCopies: [],
-						cancelled: true,
-						cancelReason: bulkReport.reason,
-					};
-				}
-			} else {
-				return {
-					applied: 0,
-					conflicts: 0,
-					conflictCopies: [],
-					cancelled: true,
-					cancelReason: bulkReport.reason,
-				};
-			}
-		}
-
-		// 3. Local Deletions Confirmation
-		const deleteLocalPaths = planResult.actions
-			.filter((a) => a.operation === "delete-local")
-			.map((a) => a.path);
-
-		if (deleteLocalPaths.length > 0 && confirmLocalDeletes !== undefined) {
-			onProgress?.({ phase: "confirming", current: 0, total: 0, path: "" });
-			const confirmed = await confirmLocalDeletes(deleteLocalPaths);
-			if (!confirmed) {
-				return {
-					applied: 0,
-					conflicts: 0,
-					conflictCopies: [],
-					cancelled: true,
-					cancelReason: "Local deletes cancelled by user.",
-				};
-			}
-		}
-
-		// 4. Safe Apply Pass
-		const executor = new SyncExecutor({
-			app: this.config.app,
-			db: this.config.db,
-			deviceId: this.config.settings.deviceId,
-			remote: this.config.remote,
-			pluginId: this.config.pluginId,
-			verifyTarget: this.config.verifyTarget,
-			conflictResolution: this.config.settings.conflictResolution,
-			selectedSettings: selectedSettingsPaths(
-				this.config.app.vault.configDir,
-				this.config.pluginId,
-				this.config.settings.syncSettings,
-				this.config.settings.selectedSettings,
-			),
-		});
-
-		let applied = 0;
-		let conflicts = 0;
-		let uploaded = 0;
-		let downloaded = 0;
-		let deletedLocal = 0;
-		let deletedRemote = 0;
-		const conflictCopies: ConflictCopy[] = [];
-		const pendingConflicts: string[] = [];
-		const newConflicts: string[] = [];
-		const cleanedCopies = new Set<string>();
-		const total = planResult.actions.filter((action) => action.operation !== "noop").length;
-		let completed = 0;
-		let pendingLocalEdit: LocalEditPendingError | undefined;
-		const executeStart = performance.now();
-
-		if (!isNarrow) {
-			onProgress?.({ phase: "directories", current: 0, total: 0, path: "" });
-			const dirsStart = performance.now();
-			applied += await executor.syncDirectories(localDirs, remoteDirs, {
-				skipRemoteFolderPrune: remoteFromCache,
-			});
-			directoriesMs = Math.round(performance.now() - dirsStart);
-		}
-
-		let firstTransferMs: number | undefined;
-		const transferStart = performance.now();
-
-		const execute = async (action: (typeof planResult.actions)[number]): Promise<void> => {
-			const report = (completedBytes?: number, totalBytes?: number): void => {
-				if (action.operation !== "noop")
-					onProgress?.({
-						phase: "transferring",
-						current: completed,
-						total,
-						path: action.path,
-						operation: action.operation,
-						completedBytes,
-						totalBytes,
-					});
-			};
-			report();
-			if (cleanedCopies.has(action.path)) {
-				if (action.operation !== "noop") completed++;
-				report();
-				return;
-			}
-
-			let result: ExecutionResult;
-			try {
-				result = await executor.execute(
-					action,
-					effectiveLocalFiles.get(action.path),
-					effectiveRemoteFiles.get(action.path),
-					effectivePrev.get(action.path),
-					report,
-				);
-			} catch (error) {
-				if (!(error instanceof LocalEditPendingError)) throw error;
-				// Do not let an actively edited note starve unrelated transfers.
-				// Keep it uncompleted and ask the coordinator to retry after idle.
-				pendingLocalEdit = error;
-				return;
-			}
-			for (const path of result.cleanedCopies ?? []) cleanedCopies.add(path);
-			if (result.cleanedCopies?.length) {
+		const applyResult = await runApplyPass({
+			config: this.config,
+			actions: pass.planResult.actions,
+			localFiles: pass.localFiles,
+			remoteFiles: pass.remoteFiles,
+			prevRecords: pass.prev,
+			directories: pass.directories,
+			syncPassStart,
+			onProgress,
+			onActivity,
+			onApplied: (result) => this.patchSnapshots(result),
+			onCopiesCleaned: () => {
 				this.localScanSnapshot = null;
 				this.remoteTreeCache = null;
-			}
-
-			if (action.operation !== "noop") {
-				if (result.applied === 0 && !result.reviewPending)
-					throw new Error(
-						`File changed before applying ${action.path}. Replan the sync.`,
-					);
-				completed++;
-				if (firstTransferMs === undefined) {
-					firstTransferMs = Math.round(performance.now() - syncPassStart);
-				}
-				report();
-			}
-			if (result.reviewPending) {
-				pendingConflicts.push(result.reviewPending);
-				if (result.newConflict) newConflicts.push(result.reviewPending);
-			}
-			applied += result.applied;
-			conflicts += result.conflicts;
-			if (result.applied > 0) {
-				this.patchSnapshots(result);
-				switch (action.operation) {
-					case "upload":
-						uploaded++;
-						break;
-					case "download":
-						downloaded++;
-						break;
-					case "delete-local":
-						deletedLocal++;
-						break;
-					case "delete-remote":
-						deletedRemote++;
-						break;
-				}
-			}
-
-			if (action.operation !== "noop" && result.applied > 0) {
-				onActivity?.({
-					type: "operation-complete",
-					operation: action.operation,
-					path: action.path,
-					detail:
-						action.operation === "conflict" && result.conflicts === 0
-							? "Automatically resolved; originals saved in local recovery"
-							: action.detail,
-				});
-			}
-
-			if (result.conflictCopy !== undefined) {
-				conflictCopies.push(result.conflictCopy);
-			}
-		};
-		// Keep deletes and conflicts serial. Large attachments stay serial to bound memory.
-		let batch: typeof planResult.actions = [];
-		const flush = async (): Promise<void> => {
-			await mapPool(batch, this.config.transferConcurrency ?? 2, execute);
-			batch = [];
-		};
-		const runTransfers = async (): Promise<void> => {
-			for (const action of planResult.actions) {
-				const size = Math.max(
-					effectiveLocalFiles.get(action.path)?.size ?? 0,
-					effectiveRemoteFiles.get(action.path)?.size ?? 0,
-				);
-				if (
-					(action.operation === "upload" || action.operation === "download") &&
-					size < 8 * 1024 * 1024
-				)
-					batch.push(action);
-				else {
-					await flush();
-					await execute(action);
-				}
-			}
-			await flush();
-		};
-
-		if (this.config.remote.withMutationSession) {
-			await this.config.remote.withMutationSession(runTransfers);
-		} else {
-			await runTransfers();
-		}
-		if (pendingLocalEdit) throw pendingLocalEdit;
-
-		executeMs = Math.round(performance.now() - executeStart);
-		const transferMs = Math.round(performance.now() - transferStart);
+			},
+		});
+		const { applied } = applyResult;
 		if (applied > 0 && options.scanHints === undefined) {
 			this.remoteTreeCache = null;
 		}
@@ -947,13 +376,13 @@ export class SyncEngine {
 			localReadBytes: this.localHashes.readBytes,
 			hashHits: this.localHashes.hashHits,
 			hashMisses: this.localHashes.hashMisses,
-			equalityComparisons,
-			equalityDownloads,
+			equalityComparisons: pass.equalityComparisons,
+			equalityDownloads: pass.equalityDownloads,
 			remoteProbes,
-			remoteRefreshes,
-			remoteReuses,
-			inventoryFiles,
-			inventoryDirs,
+			remoteRefreshes: pass.remoteRefreshes,
+			remoteReuses: pass.remoteReuses,
+			inventoryFiles: pass.inventoryFiles,
+			inventoryDirs: pass.inventoryDirs,
 		};
 		const scanDiagnostics: ScanDiagnostics = {
 			mode: resolvedPolicy.mode,
@@ -965,167 +394,342 @@ export class SyncEngine {
 
 		return {
 			applied,
-			conflicts,
-			conflictCopies,
-			pendingConflicts,
-			newConflicts,
-			uploaded,
-			downloaded,
-			deletedLocal,
-			deletedRemote,
+			conflicts: applyResult.conflicts,
+			conflictCopies: applyResult.conflictCopies,
+			pendingConflicts: applyResult.pendingConflicts,
+			newConflicts: applyResult.newConflicts,
+			uploaded: applyResult.uploaded,
+			downloaded: applyResult.downloaded,
+			deletedLocal: applyResult.deletedLocal,
+			deletedRemote: applyResult.deletedRemote,
 			timing: {
 				totalMs: Math.round(performance.now() - syncPassStart),
-				scanMs,
-				planMs,
-				transferMs: applied > 0 ? transferMs : 0,
-				firstTransferMs,
+				scanMs: pass.scanMs,
+				planMs: pass.planMs,
+				transferMs: applied > 0 ? applyResult.transferMs : 0,
+				firstTransferMs: applyResult.firstTransferMs,
 				eventProbeMs,
-				localScanMs,
-				baselineMs,
-				remoteScanMs,
-				equalityMs,
-				directoriesMs,
-				executeMs,
+				localScanMs: pass.localScanMs,
+				baselineMs: pass.baselineMs,
+				remoteScanMs: pass.remoteScanMs,
+				equalityMs: pass.equalityMs,
+				directoriesMs: applyResult.directoriesMs,
+				executeMs: applyResult.executeMs,
 			},
 			provenance,
 			scanDiagnostics,
 		};
 	}
 
-	/**
-	 * Resolves equality fingerprints for eligible no-baseline candidates (equal
-	 * size/mtime with a validated Filen SHA-512). When feasible, local SHA-256 and
-	 * SHA-512 are derived from one stable binary read so the pair always refers to
-	 * the same verified bytes. Invalid/missing remote hashes retain the existing
-	 * equality fallback (remote download for SHA-256 comparison).
-	 */
+	/** Narrow edit pass: re-reads only hinted and conflicted paths against cached inventories. */
+	private async scanNarrow(
+		pathFilter: SyncPathFilter,
+		direction: SyncDirection,
+		scanHints: string[],
+		bulkThresholds: BulkGuardThresholds | undefined,
+		onProgress: ((progress: SyncProgress) => void) | undefined,
+		scanStart: number,
+		epoch: number,
+	): Promise<PlannedPass> {
+		onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
+		const candidatePaths = new Set([
+			...scanHints,
+			...((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+		]);
+		const candidateLocalFiles = new Map<string, LocalEntry>();
+		for (const path of candidatePaths) {
+			const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
+			if (file instanceof TFile) {
+				if (pathFilter.isIgnored(file.path, file.stat.size)) continue;
+				const snapshot = { path: file.path, ...file.stat, file };
+				const fp = await this.localHashes.readBoth(
+					file,
+					() => this.config.app.vault.readBinary(file),
+					false,
+					{ withSha512: false },
+				);
+				candidateLocalFiles.set(snapshot.path, {
+					...snapshot,
+					hash: fp.hash,
+					sha512: fp.sha512,
+					file,
+				});
+			}
+		}
+
+		this.assertScanEpoch(epoch);
+
+		const candidatePrev = new Map<string, SyncedFileRecord>();
+		for (const path of candidatePaths) {
+			const record = await this.config.db.getFile(path);
+			if (
+				record !== null &&
+				record !== undefined &&
+				!pathFilter.isIgnored(path, record.size)
+			) {
+				candidatePrev.set(path, record);
+			}
+		}
+
+		onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+		const candidateEntries: Array<[string, RemoteEntry]> = [];
+		for (const path of candidatePaths) {
+			const entry = this.remoteTreeCache!.scan.files.get(path);
+			if (
+				entry !== undefined &&
+				!entry.isDir &&
+				!pathFilter.isIgnored(entry.path, entry.size)
+			) {
+				candidateEntries.push([path, entry]);
+			}
+		}
+		const candidateEqualityHashes = await this.resolveRemoteFileHashes(
+			candidateEntries,
+			candidateLocalFiles,
+			candidatePrev,
+		);
+
+		const candidateRemoteFiles = new Map<string, RemoteFileInfo>();
+		for (const [path, entry] of candidateEntries) {
+			candidateRemoteFiles.set(path, {
+				path: entry.path,
+				mtime: entry.mtime,
+				size: entry.size,
+				isDir: false,
+				uuid: entry.uuid,
+				remoteHash: entry.remoteHash,
+				hash: candidateEqualityHashes.resolved.get(path),
+			});
+		}
+
+		// Validate collisions against complete cached snapshot
+		const testLocalPaths = new Map<string, boolean>();
+		for (const [p] of this.localScanSnapshot!.scan.files) {
+			if (!candidatePaths.has(p)) testLocalPaths.set(p, false);
+		}
+		for (const [p] of candidateLocalFiles) {
+			testLocalPaths.set(p, false);
+		}
+		for (const d of this.localScanSnapshot!.scan.dirs) {
+			testLocalPaths.set(d, true);
+		}
+		assertNoPathCollisions(
+			[...testLocalPaths.entries()].map(([path, isDir]) => ({ path, isDir })),
+		);
+
+		const scanMs = Math.round(performance.now() - scanStart);
+		const planStart = performance.now();
+		onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
+		const localFiles: Map<string, LocalFileInfo> = toLocalFileInfos(candidateLocalFiles);
+
+		const planResult = planSync({
+			pendingConflicts: new Set(
+				((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+			),
+			localFiles,
+			remoteFiles: candidateRemoteFiles,
+			prevRecords: candidatePrev,
+			direction,
+		});
+
+		const bulkReport = checkBulkGuard(
+			planResult.actions,
+			{
+				totalLocalFiles: this.localScanSnapshot!.scan.files.size,
+				totalRemoteFiles: this.remoteTreeCache!.scan.files.size,
+				totalBaselineFiles: this.localScanSnapshot!.scan.files.size,
+			},
+			bulkThresholds,
+		);
+		const planMs = Math.round(performance.now() - planStart);
+
+		return {
+			planResult,
+			bulkReport,
+			localFiles: candidateLocalFiles,
+			remoteFiles: this.remoteTreeCache!.scan.files,
+			prev: candidatePrev,
+			equalityComparisons: candidateEqualityHashes.comparisons,
+			equalityDownloads: candidateEqualityHashes.downloads,
+			remoteRefreshes: 0,
+			remoteReuses: 0,
+			inventoryFiles: candidateLocalFiles.size,
+			inventoryDirs: this.localScanSnapshot?.scan.dirs.size ?? 0,
+			scanMs,
+			planMs,
+			localScanMs: scanMs,
+			baselineMs: 0,
+			remoteScanMs: 0,
+			equalityMs: 0,
+		};
+	}
+
+	/** Full or reconcile pass: reads baseline, local and remote inventories concurrently. */
+	private async scanFull(
+		pathFilter: SyncPathFilter,
+		direction: SyncDirection,
+		verifyContents: boolean,
+		remotePlan: RemoteReadPlan,
+		bulkThresholds: BulkGuardThresholds | undefined,
+		onProgress: ((progress: SyncProgress) => void) | undefined,
+		scanStart: number,
+		epoch: number,
+	): Promise<PlannedPass> {
+		let baselineMs = 0;
+		let localScanMs = 0;
+		let remoteScanMs = 0;
+		let remoteFromCache = false;
+		let remoteRefreshes = 0;
+		let remoteReuses = 0;
+
+		onProgress?.({ phase: "scanning-local", current: 0, total: 0, path: "" });
+
+		const baselineRead = (async () => {
+			const start = performance.now();
+			const records = await this.config.db.getAllFiles();
+			baselineMs = Math.round(performance.now() - start);
+			return filterPrevRecords(records, pathFilter);
+		})();
+		const localRead = (async () => {
+			// Routine scans need baseline paths to defer new-file hashing to equality
+			// resolution. Explicit verification can start immediately. walkLocal keeps
+			// the existing byte-bounded hashing pool in both cases.
+			const baselinePaths = verifyContents ? null : new Set((await baselineRead).keys());
+			this.assertScanEpoch(epoch);
+			const start = performance.now();
+			const local = await this.walkLocal(pathFilter, verifyContents, baselinePaths, epoch);
+			localScanMs = Math.round(performance.now() - start);
+			// If the remote read is still running, show the remaining scan phase.
+			onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+			return local;
+		})();
+		const remoteRead = (async (): Promise<RemoteTreeCache> => {
+			const start = performance.now();
+			if (
+				remotePlan.canFastPoll &&
+				!remotePlan.refreshRemote &&
+				remotePlan.eventProbeAvailable &&
+				!remotePlan.probeHasChanges &&
+				remotePlan.remoteCacheValid &&
+				this.remoteTreeCache !== null
+			) {
+				remoteFromCache = true;
+				remoteReuses = 1;
+				remoteScanMs = Math.round(performance.now() - start);
+				return this.remoteTreeCache;
+			}
+			const fetchStartedAt = Date.now();
+			// sync() already creates the root before this concurrent read phase.
+			const scan = await this.walkRemote(pathFilter, undefined, { noCreate: true });
+			remoteRefreshes = 1;
+			remoteScanMs = Math.round(performance.now() - start);
+			return {
+				fetchedAt: Date.now(),
+				eventWatermark: Math.max(remotePlan.newWatermark, fetchStartedAt),
+				scan,
+			};
+		})();
+		// Drain every read before rejecting so failed passes cannot leave hashing
+		// or remote work running into a retry. Never publish partial inventories.
+		const [baselineResult, localResult, remoteResult] = await Promise.allSettled([
+			baselineRead,
+			localRead,
+			remoteRead,
+		]);
+		if (baselineResult.status === "rejected") throw baselineResult.reason;
+		if (localResult.status === "rejected") throw localResult.reason;
+		if (remoteResult.status === "rejected") throw remoteResult.reason;
+		this.assertScanEpoch(epoch);
+		const filteredPrev = baselineResult.value;
+		const local = localResult.value;
+		const remote = remoteResult.value.scan;
+
+		const equalityStart = performance.now();
+		const equalityHashes = await this.resolveRemoteFileHashes(
+			remote.files,
+			local.files,
+			filteredPrev,
+		);
+		const equalityMs = Math.round(performance.now() - equalityStart);
+		this.assertScanEpoch(epoch);
+
+		// Build planner inputs after equality resolution so no-baseline files use
+		// the same-bytes fingerprints derived during equality checking.
+		const localFiles = toLocalFileInfos(local.files);
+		const remoteFiles = toRemoteFileInfos(remote.files, equalityHashes.resolved);
+
+		// Publish snapshots only after successful scanning, then prune cache.
+		this.remoteTreeCache = remoteResult.value;
+		this.localScanSnapshot = {
+			fetchedAt: Date.now(),
+			scan: { files: new Map(local.files), dirs: new Set(local.dirs) },
+		};
+		this.localHashes.prune(new Set(local.files.keys()));
+
+		const scanMs = Math.round(performance.now() - scanStart);
+		const planStart = performance.now();
+		onProgress?.({ phase: "planning", current: 0, total: 0, path: "" });
+		const planResult = planSync({
+			pendingConflicts: new Set(
+				((await this.config.db.getConflicts?.()) ?? new Map()).keys(),
+			),
+			localFiles,
+			remoteFiles,
+			prevRecords: filteredPrev,
+			direction,
+		});
+
+		const bulkReport = checkBulkGuard(
+			planResult.actions,
+			{
+				totalLocalFiles: local.files.size,
+				totalRemoteFiles: remote.files.size,
+				totalBaselineFiles: filteredPrev.size,
+			},
+			bulkThresholds,
+		);
+		const planMs = Math.round(performance.now() - planStart);
+
+		return {
+			planResult,
+			bulkReport,
+			localFiles: local.files,
+			remoteFiles: remote.files,
+			prev: filteredPrev,
+			directories: {
+				local: local.dirs,
+				remote: remote.dirs,
+				skipRemoteFolderPrune: remoteFromCache,
+			},
+			equalityComparisons: equalityHashes.comparisons,
+			equalityDownloads: equalityHashes.downloads,
+			remoteRefreshes,
+			remoteReuses,
+			inventoryFiles: local.files.size,
+			inventoryDirs: local.dirs.size,
+			scanMs,
+			planMs,
+			localScanMs,
+			baselineMs,
+			remoteScanMs,
+			equalityMs,
+		};
+	}
+
+	/** See resolveEqualityHashes; kept as a method so tests can observe equality reads. */
 	private async resolveRemoteFileHashes(
 		remoteEntries: Iterable<[string, RemoteEntry]>,
 		localFiles: Map<string, LocalEntry>,
 		prevRecords: Map<string, SyncedFileRecord>,
-	): Promise<{
-		resolved: Map<string, string | undefined>;
-		comparisons: number;
-		downloads: number;
-	}> {
-		const candidates: Array<{ path: string; entry: RemoteEntry; localEntry: LocalEntry }> = [];
-		for (const [path, entry] of remoteEntries) {
-			if (entry.isDir) continue;
-			const localEntry = localFiles.get(path);
-			if (
-				localEntry !== undefined &&
-				localEntry.size === entry.size &&
-				(!prevRecords.has(path) ||
-					entry.uuid !== prevRecords.get(path)?.remoteUuid ||
-					entry.remoteHash !== prevRecords.get(path)?.remoteHash ||
-					entry.mtime !==
-						(prevRecords.get(path)?.remoteMtime ?? prevRecords.get(path)?.mtime))
-			) {
-				candidates.push({ path, entry, localEntry });
-			}
-		}
-
-		const resolved = new Map<string, string | undefined>();
-		let comparisons = 0;
-		let downloads = 0;
-
-		for (const { path, entry, localEntry } of candidates) {
-			comparisons++;
-			const applyFreshLocalHash = (hash?: string, sha512?: string): void => {
-				if (hash !== undefined) {
-					localEntry.hash = hash;
-					localEntry.sha512 = sha512;
-				}
-			};
-
-			if (entry.remoteHash !== undefined && isValidFilenSha512(entry.remoteHash)) {
-				try {
-					// Prefer the SHA-512 already derived from the same read as the local
-					// SHA-256; otherwise do one fresh read for both fingerprints.
-					let fp: { hash?: string; sha512?: string };
-					if (localEntry.sha512 !== undefined) {
-						fp = { hash: localEntry.hash, sha512: localEntry.sha512 };
-					} else {
-						const abstractFile = localEntry.adapterOnly
-							? localEntry.file
-							: this.config.app.vault.getAbstractFileByPath(normalizePath(path));
-						if (abstractFile instanceof TFile) {
-							const r = await this.localHashes.readBoth(
-								abstractFile,
-								() => readLocalBytes(this.config.app, localEntry),
-								false,
-								{ withSha512: true },
-							);
-							fp = { hash: r.hash, sha512: r.sha512 };
-						} else {
-							fp = { hash: localEntry.hash, sha512: localEntry.sha512 };
-						}
-					}
-					if (fp.sha512 !== undefined && fp.hash !== undefined) {
-						if (fp.sha512.toLowerCase() === entry.remoteHash.toLowerCase()) {
-							applyFreshLocalHash(fp.hash, fp.sha512);
-							resolved.set(path, fp.hash);
-						} else {
-							applyFreshLocalHash(fp.hash, fp.sha512);
-							resolved.set(path, undefined);
-						}
-					} else {
-						resolved.set(path, undefined);
-					}
-				} catch {
-					// Fall through to remote download fallback
-					const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
-					downloads++;
-					const remoteSha256 = await sha256Hex(remoteBytes);
-					const abstractFile = this.config.app.vault.getAbstractFileByPath(
-						normalizePath(path),
-					);
-					let localSha256: string | undefined = localEntry.hash;
-					if (abstractFile instanceof TFile) {
-						const r = await this.localHashes.readBoth(
-							abstractFile,
-							() => readLocalBytes(this.config.app, localEntry),
-							false,
-							{ withSha512: false },
-						);
-						localSha256 = r.hash ?? localEntry.hash;
-						applyFreshLocalHash(localSha256, r.sha512);
-					}
-					if (localSha256 !== undefined && localSha256 === remoteSha256) {
-						resolved.set(path, localSha256);
-					} else {
-						resolved.set(path, remoteSha256);
-					}
-				}
-				continue;
-			}
-
-			// Fallback: download remote file and compute SHA-256 for the comparison
-			const remoteBytes = await this.config.remote.readFile(path, entry.uuid);
-			downloads++;
-			const remoteSha256 = await sha256Hex(remoteBytes);
-			const abstractFile = localEntry.adapterOnly
-				? localEntry.file
-				: this.config.app.vault.getAbstractFileByPath(normalizePath(path));
-			let localSha256: string | undefined = localEntry.hash;
-			if (abstractFile instanceof TFile) {
-				const r = await this.localHashes.readBoth(
-					abstractFile,
-					() => readLocalBytes(this.config.app, localEntry),
-					false,
-					{ withSha512: false },
-				);
-				localSha256 = r.hash ?? localEntry.hash;
-				applyFreshLocalHash(localSha256, r.sha512);
-			}
-			if (localSha256 !== undefined && localSha256 === remoteSha256) {
-				resolved.set(path, localSha256);
-			} else {
-				resolved.set(path, remoteSha256);
-			}
-		}
-
-		return { resolved, comparisons, downloads };
+	): Promise<EqualityHashResult> {
+		return resolveEqualityHashes(
+			this.config.app,
+			this.config.remote,
+			this.localHashes,
+			remoteEntries,
+			localFiles,
+			prevRecords,
+		);
 	}
 
 	private async walkLocal(
@@ -1133,7 +737,7 @@ export class SyncEngine {
 		verifyContents: boolean,
 		baselinePaths: Set<string> | null,
 		epoch: number,
-		exclusionsTracker?: { ignoredCount: number; tooLargeCount: number; samplePaths: string[] },
+		exclusionsTracker?: ExclusionsTracker,
 	): Promise<LocalScan> {
 		const result = await scanLocal(
 			this.config.app,
@@ -1143,12 +747,7 @@ export class SyncEngine {
 			baselinePaths,
 			this.config.hashingPool,
 			exclusionsTracker,
-			selectedSettingsPaths(
-				this.config.app.vault.configDir,
-				this.config.pluginId,
-				this.config.settings.syncSettings,
-				this.config.settings.selectedSettings,
-			),
+			selectedEngineSettingsPaths(this.config),
 		);
 		this.assertScanEpoch(epoch);
 		return result;
@@ -1156,32 +755,10 @@ export class SyncEngine {
 
 	private async walkRemote(
 		pathFilter: SyncPathFilter,
-		exclusionsTracker?: { ignoredCount: number; tooLargeCount: number; samplePaths: string[] },
+		exclusionsTracker?: ExclusionsTracker,
 		options: { noCreate?: boolean } = {},
 	): Promise<RemoteScan> {
-		const files = new Map<string, RemoteEntry>();
-		const dirs = new Set<string>();
-		const remoteEntries = await this.config.remote.walk(options);
-		assertNoPathCollisions(remoteEntries.map(({ path, isDir }) => ({ path, isDir })));
-		for (const entry of remoteEntries) {
-			const exclusion = pathFilter.checkExclusion(entry.path, entry.size);
-			if (exclusion !== "included") {
-				if (exclusionsTracker) {
-					if (exclusion === "too_large") exclusionsTracker.tooLargeCount += 1;
-					else exclusionsTracker.ignoredCount += 1;
-					if (exclusionsTracker.samplePaths.length < 10) {
-						exclusionsTracker.samplePaths.push(entry.path);
-					}
-				}
-				continue;
-			}
-			if (entry.isDir) {
-				dirs.add(entry.path);
-			} else {
-				files.set(entry.path, entry);
-			}
-		}
-		return { files, dirs };
+		return walkRemoteTree(this.config.remote, pathFilter, exclusionsTracker, options);
 	}
 
 	/**
@@ -1195,27 +772,12 @@ export class SyncEngine {
 		onProgress?: (progress: SyncProgress) => void,
 		bulkThresholds?: BulkGuardThresholds,
 	): Promise<SyncPreviewResult> {
-		const maxFileSizeBytes = this.config.settings.skipLargeFiles
-			? this.config.settings.skipSizeLargerThanMB * 1024 * 1024
-			: undefined;
+		const pathFilter = createEnginePathFilter(this.config);
 
-		const pathFilter = createSyncPathFilter({
-			configDir: this.config.app.vault.configDir,
-			pluginId: this.config.pluginId,
-			ignorePatterns: this.config.settings.ignorePatterns,
-			maxFileSizeBytes,
-			selectedSettings: selectedSettingsPaths(
-				this.config.app.vault.configDir,
-				this.config.pluginId,
-				this.config.settings.syncSettings,
-				this.config.settings.selectedSettings,
-			),
-		});
-
-		const exclusionsTracker = {
+		const exclusionsTracker: ExclusionsTracker = {
 			ignoredCount: 0,
 			tooLargeCount: 0,
-			samplePaths: [] as string[],
+			samplePaths: [],
 		};
 
 		const previewStart = performance.now();
@@ -1253,16 +815,7 @@ export class SyncEngine {
 
 		const filteredPrev = filterPrevRecords(prevRecords, pathFilter);
 
-		const localFiles = new Map<string, LocalFileInfo>();
-		for (const [path, entry] of local.files) {
-			localFiles.set(path, {
-				path,
-				mtime: entry.mtime,
-				ctime: entry.ctime,
-				size: entry.size,
-				hash: entry.hash,
-			});
-		}
+		const localFiles = toLocalFileInfos(local.files);
 
 		const equalityHashes = await this.resolveRemoteFileHashes(
 			remote.files,
@@ -1271,18 +824,7 @@ export class SyncEngine {
 		);
 		this.assertScanEpoch(epoch);
 
-		const remoteFiles = new Map<string, RemoteFileInfo>();
-		for (const [path, entry] of remote.files) {
-			remoteFiles.set(path, {
-				path,
-				mtime: entry.mtime,
-				size: entry.size,
-				isDir: entry.isDir,
-				uuid: entry.uuid,
-				remoteHash: entry.remoteHash,
-				hash: equalityHashes.resolved.get(path),
-			});
-		}
+		const remoteFiles = toRemoteFileInfos(remote.files, equalityHashes.resolved);
 
 		const scanMs = Math.round(performance.now() - scanStart);
 		const planStart = performance.now();
@@ -1353,14 +895,3 @@ export class SyncEngine {
 		};
 	}
 }
-
-const filterPrevRecords = (
-	records: Map<string, SyncedFileRecord>,
-	pathFilter: SyncPathFilter,
-): Map<string, SyncedFileRecord> => {
-	const filtered = new Map<string, SyncedFileRecord>();
-	for (const [path, record] of records) {
-		if (!pathFilter.isIgnored(path, record.size)) filtered.set(path, record);
-	}
-	return filtered;
-};
