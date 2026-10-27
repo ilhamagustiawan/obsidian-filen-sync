@@ -4,17 +4,13 @@ import type { App, EventRef, TAbstractFile } from "obsidian";
 import { Notice, Platform, TFile, TFolder } from "obsidian";
 import type { SyncDb } from "../db";
 import type { ConflictRecord, ConflictResolution } from "./conflict-types";
+import type { ConflictContext } from "./conflict-store";
 import {
-	captureConflict,
-	readLocalSide,
-	readRemoteSide,
-	type ConflictContext,
-} from "./conflict-store";
-import { applyConflict } from "./conflict-apply";
-import { sha256Hex } from "./content-hash";
-import { collectConflictCopies } from "./conflict-cleanup";
+	applyConflictResolution,
+	captureReviewedLegacyConflict,
+	loadConflictForReview,
+} from "./conflict-review";
 import type { FilenRemoteFs } from "../fs-remote";
-import { createSyncPathFilter } from "../path-filters";
 import type { FilenSyncSettings } from "../settings";
 import { LOCAL_HASH_CACHE_TTL_MS } from "./local-hash-cache";
 import { createDefaultHashingPool, HASH_POOL_ENABLED, SyncEngine } from "../sync-engine";
@@ -22,94 +18,48 @@ import type { BulkGuardReport, BulkGuardThresholds } from "./bulk-guard";
 import { getOriginalPathFromConflictPath, isConflictFilePath } from "./conflict-utils";
 import { saveDiagnosticRecord, truncateActionsIfNeeded } from "./diagnostic-history";
 import type {
+	CoordinatorCallbacks,
+	CoordinatorRunOptions,
+	StatusBarState,
+	SyncRunResult,
+} from "./coordinator-types";
+import {
+	getAutoSyncBackoffMs,
+	isNetworkClassError,
+	isReplanError,
+	isTransientError,
+} from "./sync-errors";
+import { derivePendingStatus } from "./pending-status";
+import {
+	formatTimingSummary,
+	progressDetail,
+	progressLabel,
+	syncOperationCompleteMessage,
+} from "./sync-status-format";
+import { buildSyncFailureRecord, buildSyncSuccessRecord } from "./sync-diagnostic-records";
+import { shouldAutoSyncForFileEvent, updateConflictIndex } from "./vault-change-events";
+import type {
 	SyncActivityEvent,
 	SyncDirection,
-	SyncOperation,
 	SyncPreviewResult,
 	SyncProgress,
 	SyncTimingSummary,
 	TargetIdentityInfo,
 } from "./types";
 
-function formatTimingSummary(timing?: SyncTimingSummary): string {
-	if (!timing) return "";
-	const parts: string[] = [`total ${(timing.totalMs / 1000).toFixed(1)}s`];
-	if (timing.scanMs !== undefined && timing.scanMs > 0) parts.push(`scan ${timing.scanMs}ms`);
-	if (timing.planMs !== undefined && timing.planMs > 0) parts.push(`plan ${timing.planMs}ms`);
-	if (timing.transferMs !== undefined && timing.transferMs > 0)
-		parts.push(`transfer ${timing.transferMs}ms`);
-	if (timing.firstTransferMs !== undefined)
-		parts.push(`first file in ${timing.firstTransferMs}ms`);
-	// Stage timings distinguish where time went; they overlap and are not summed.
-	if (timing.targetPrepMs !== undefined && timing.targetPrepMs > 0)
-		parts.push(`target prep ${timing.targetPrepMs}ms`);
-	if (timing.eventProbeMs !== undefined && timing.eventProbeMs > 0)
-		parts.push(`probe ${timing.eventProbeMs}ms`);
-	if (timing.localScanMs !== undefined && timing.localScanMs > 0)
-		parts.push(`local scan ${timing.localScanMs}ms`);
-	if (timing.baselineMs !== undefined && timing.baselineMs > 0)
-		parts.push(`baseline ${timing.baselineMs}ms`);
-	if (timing.remoteScanMs !== undefined && timing.remoteScanMs > 0)
-		parts.push(`remote ${timing.remoteScanMs}ms`);
-	if (timing.equalityMs !== undefined && timing.equalityMs > 0)
-		parts.push(`equality ${timing.equalityMs}ms`);
-	if (timing.directoriesMs !== undefined && timing.directoriesMs > 0)
-		parts.push(`dirs ${timing.directoriesMs}ms`);
-	if (timing.executeMs !== undefined && timing.executeMs > 0)
-		parts.push(`apply ${timing.executeMs}ms`);
-	return ` (${parts.join(", ")})`;
-}
+export type {
+	CoordinatorCallbacks,
+	OpeningCheckState,
+	StatusBarKind,
+	StatusBarState,
+	SyncRunResult,
+} from "./coordinator-types";
+export { isNetworkClassError, isReplanError } from "./sync-errors";
+export { formatRelativeTime } from "./sync-status-format";
 
-export type StatusBarKind = "idle" | "pending" | "syncing" | "success" | "warning" | "error";
-
-export type StatusBarState = {
-	kind: StatusBarKind;
-	text: string;
-	detail: string;
-	updatedAt: number | null;
-	progress?: SyncProgress;
-	isManual?: boolean;
-	syncCompleted?: boolean;
-};
-
-export type SyncRunResult =
-	| {
-			kind: "applied";
-			applied: number;
-			conflicts: number;
-			uploaded: number;
-			downloaded: number;
-			deletedLocal: number;
-			deletedRemote: number;
-	  }
-	| { kind: "up-to-date" }
-	| { kind: "skipped"; reason: string }
-	| { kind: "cancelled"; reason: string }
-	| { kind: "failed"; message: string };
-
-const AUTO_SYNC_FAILURE_BASE_BACKOFF_MS = 30_000;
-const AUTO_SYNC_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
 const ERROR_NOTICE_THROTTLE_MS = 15 * 60_000;
 /** A resume trigger that close to a successful reconciliation is coalesced away. */
 const RESUME_RECONCILE_SKIP_MS = 60_000;
-
-export type CoordinatorCallbacks = {
-	onStatusChange: (state: StatusBarState) => void;
-	onReviewConflicts?: () => void;
-	onOpeningCheckChange?: (state: OpeningCheckState) => void;
-	getAutoSyncBlockReason?: () => string | null;
-	onLogActivity: (message: string) => void;
-	confirmLocalDeletes: (paths: string[]) => Promise<boolean>;
-	confirmBulkOperations: (report: BulkGuardReport) => Promise<boolean>;
-	saveSettings: () => Promise<void>;
-	prepareTarget?: (options?: { readOnly?: boolean }) => Promise<void>;
-	getTargetInfo?: (noCreate?: boolean) => Promise<TargetIdentityInfo>;
-};
-
-export type OpeningCheckState =
-	| { kind: "scheduled"; scheduledAt: number }
-	| { kind: "cleared" }
-	| { kind: "blocked"; text: string };
 
 export class SyncCoordinator {
 	private isSyncing = false;
@@ -290,15 +240,7 @@ export class SyncCoordinator {
 	async refreshConflict(path: string, targetKey: string | undefined): Promise<ConflictRecord> {
 		return this.conflictSession(
 			targetKey,
-			async (context) => {
-				const record = await context.db.getConflict?.(path);
-				if (!record) throw new Error("This conflict was already resolved.");
-				if (record.kind === "settings" && !context.selectedSettings?.includes(path))
-					throw new Error("Select this settings file for sync before reviewing it.");
-				if (record.approval && !record.approval.localApplied) return record;
-				const refreshed = (await captureConflict(context, path, record.reason)).record;
-				return collectConflictCopies(context, refreshed);
-			},
+			(context) => loadConflictForReview(context, path),
 			"Conflict review",
 		);
 	}
@@ -310,10 +252,7 @@ export class SyncCoordinator {
 			targetKey,
 			async (context) => {
 				const record = await context.db.getConflict?.(resolution.path);
-				const apply = () => applyConflict(context, resolution);
-				if (context.remote.withMutationSession)
-					await context.remote.withMutationSession(apply);
-				else await apply();
+				await applyConflictResolution(context, resolution);
 				for (const copy of record?.copies ?? []) this.conflictsIndex?.delete(copy.path);
 				this.pendingPaths.delete(resolution.path);
 				this.callbacks.onLogActivity(`Conflict resolved and synced: ${resolution.path}`);
@@ -331,43 +270,12 @@ export class SyncCoordinator {
 		await this.conflictSession(
 			targetKey,
 			async (context) => {
-				for (const copy of copies) {
-					if (
-						(await sha256Hex(
-							new Uint8Array(await this.app.vault.adapter.readBinary(copy.path)),
-						)) !== copy.hash
-					)
-						throw new Error("A legacy copy changed. Refresh the review.");
-				}
-				if ((await readLocalSide(context, path)).hash !== hash)
-					throw new Error("Local file changed. Refresh the review.");
-				const remote = await readRemoteSide(context, path);
-				const captured = await captureConflict(context, path, "Legacy conflict review");
-				if (remote.hash !== hash)
-					throw new Error(
-						"Filen differs from the reviewed current file. Reopen this conflict to review both originals.",
-					);
-				const reviewed = await collectConflictCopies(context, captured.record);
-				if (
-					reviewed.copies?.some(
-						(copy) =>
-							!copies.some(
-								(known) =>
-									known.path === copy.path &&
-									known.hash === copy.local.recovery?.hash &&
-									(!copy.remote.recovery ||
-										copy.remote.recovery.hash === known.hash),
-							),
-					)
-				)
-					throw new Error(
-						"Additional copies need review. Reopen this conflict to review them.",
-					);
-				const apply = () =>
-					applyConflict(context, { path, revision: reviewed.revision, bytes });
-				if (context.remote.withMutationSession)
-					await context.remote.withMutationSession(apply);
-				else await apply();
+				const reviewed = await captureReviewedLegacyConflict(context, path, hash, copies);
+				await applyConflictResolution(context, {
+					path,
+					revision: reviewed.revision,
+					bytes,
+				});
 				for (const copy of reviewed.copies ?? []) this.conflictsIndex?.delete(copy.path);
 				this.pendingPaths.delete(path);
 				this.callbacks.onLogActivity(`Legacy conflict resolved and synced: ${path}`);
@@ -378,43 +286,8 @@ export class SyncCoordinator {
 
 	private publishPending(): void {
 		if (this.isSyncing || this.isReplanRetryHeld) return;
-		const conflictCount = this.conflictCount;
-		if (conflictCount > 0) {
-			this.publishStatus({
-				kind: "warning",
-				text: `${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`,
-				detail:
-					this.pendingCount > 0
-						? `${this.pendingCount} local changes pending · ${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`
-						: `${conflictCount} conflict(s) to review in vault.`,
-				updatedAt: Date.now(),
-			});
-			return;
-		}
-		if (
-			this.lastStatus?.kind === "warning" &&
-			!this.lastStatus.text.toLowerCase().includes("conflict")
-		)
-			return;
-		if (this.lastStatus?.kind === "error") return;
-		if (this.pendingCount > 0) {
-			this.publishStatus({
-				kind: "idle",
-				text: "Ready",
-				detail: "Local changes are queued for automatic sync.",
-				updatedAt: Date.now(),
-			});
-		} else if (
-			this.lastStatus?.kind === "warning" &&
-			this.lastStatus.text.toLowerCase().includes("conflict")
-		) {
-			this.publishStatus({
-				kind: "idle",
-				text: "up to date",
-				detail: "All conflicts resolved and files up to date.",
-				updatedAt: Date.now(),
-			});
-		}
+		const next = derivePendingStatus(this.conflictCount, this.pendingCount, this.lastStatus);
+		if (next) this.publishStatus(next);
 	}
 
 	get active(): boolean {
@@ -572,15 +445,7 @@ export class SyncCoordinator {
 	async runSync(
 		label: string,
 		direction: SyncDirection = "both",
-		options: {
-			silent?: boolean;
-			autoSync?: boolean;
-			isManual?: boolean;
-			initialSync?: boolean;
-			fullScan?: boolean;
-			correlationId?: string;
-			previewId?: string;
-		} = {},
+		options: CoordinatorRunOptions = {},
 	): Promise<SyncRunResult> {
 		if (this.closed) return { kind: "skipped", reason: "Sync coordinator closed." };
 		if (options.autoSync && this.conflictReviewActive) {
@@ -668,10 +533,7 @@ export class SyncCoordinator {
 					this.publishStatus({
 						kind: "syncing",
 						text: progressLabel(p),
-						detail:
-							p.phase === "transferring"
-								? `${p.current}/${p.total} changes complete · ${p.path}${p.totalBytes === undefined ? "" : ` · ${((p.completedBytes ?? 0) / 1048576).toFixed(1)} / ${(p.totalBytes / 1048576).toFixed(1)} MB`}`
-								: progressLabel(p),
+						detail: progressDetail(p),
 						updatedAt: Date.now(),
 						progress: p,
 						isManual,
@@ -751,57 +613,20 @@ export class SyncCoordinator {
 			}
 
 			if (targetInfo) {
-				const isCancel = Boolean(result.cancelled);
-				await saveDiagnosticRecord({
-					id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-					kind: "sync",
-					timestamp: Date.now(),
-					direction,
-					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
-					target: targetInfo,
-					provenance: result.provenance ?? (scanHints ? "narrow" : "full"),
-					timing: timingWithPrep,
-					scan: result.scanDiagnostics,
-					counts: {
-						upload: result.uploaded ?? 0,
-						download: result.downloaded ?? 0,
-						deleteLocal: result.deletedLocal ?? 0,
-						deleteRemote: result.deletedRemote ?? 0,
-						conflict: result.conflicts,
-						noop: 0,
-						totalProposed: result.applied,
-					},
-					destructiveStats: {
-						localDeletes: result.deletedLocal ?? 0,
-						remoteDeletes: result.deletedRemote ?? 0,
-						localOverwrites: 0,
-						remoteOverwrites: 0,
-						totalDestructiveLocal: result.deletedLocal ?? 0,
-						totalDestructiveRemote: result.deletedRemote ?? 0,
-					},
-					safetyReport: {
-						blocked: false,
-						stats: {
-							localDeletes: result.deletedLocal ?? 0,
-							remoteDeletes: result.deletedRemote ?? 0,
-							localOverwrites: 0,
-							remoteOverwrites: 0,
-							totalDestructiveLocal: result.deletedLocal ?? 0,
-							totalDestructiveRemote: result.deletedRemote ?? 0,
+				await saveDiagnosticRecord(
+					buildSyncSuccessRecord(
+						{
+							direction,
+							isManual,
+							target: targetInfo,
+							correlationId: options.correlationId,
+							previewId: options.previewId,
 						},
-					},
-					outcome: isCancel
-						? "cancelled"
-						: result.applied > 0 || hasConflicts
-							? "success"
-							: "success",
-					outcomeDetail: result.cancelReason,
-					correlationId: options.correlationId,
-					previewId: options.previewId,
-					actions: [],
-					totalActionsCount: result.applied,
-					actionsTruncated: false,
-				});
+						result,
+						result.provenance ?? (scanHints ? "narrow" : "full"),
+						timingWithPrep,
+					),
+				);
 			}
 
 			if (result.applied === 0 && !hasConflicts) {
@@ -854,51 +679,18 @@ export class SyncCoordinator {
 			this.callbacks.onLogActivity(`${label} failed: ${message}`);
 
 			if (targetInfo) {
-				await saveDiagnosticRecord({
-					id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-					kind: "sync",
-					timestamp: Date.now(),
-					direction,
-					trigger: isManual ? (options.previewId ? "apply-preview" : "manual") : "auto",
-					target: targetInfo,
-					provenance: "full",
-					timing: { totalMs: 0 },
-					counts: {
-						upload: 0,
-						download: 0,
-						deleteLocal: 0,
-						deleteRemote: 0,
-						conflict: 0,
-						noop: 0,
-						totalProposed: 0,
-					},
-					destructiveStats: {
-						localDeletes: 0,
-						remoteDeletes: 0,
-						localOverwrites: 0,
-						remoteOverwrites: 0,
-						totalDestructiveLocal: 0,
-						totalDestructiveRemote: 0,
-					},
-					safetyReport: {
-						blocked: false,
-						stats: {
-							localDeletes: 0,
-							remoteDeletes: 0,
-							localOverwrites: 0,
-							remoteOverwrites: 0,
-							totalDestructiveLocal: 0,
-							totalDestructiveRemote: 0,
+				await saveDiagnosticRecord(
+					buildSyncFailureRecord(
+						{
+							direction,
+							isManual,
+							target: targetInfo,
+							correlationId: options.correlationId,
+							previewId: options.previewId,
 						},
-					},
-					outcome: "failure",
-					outcomeDetail: message,
-					correlationId: options.correlationId,
-					previewId: options.previewId,
-					actions: [],
-					totalActionsCount: 0,
-					actionsTruncated: false,
-				});
+						message,
+					),
+				);
 			}
 
 			if (isNetworkClassError(error)) {
@@ -1042,30 +834,12 @@ export class SyncCoordinator {
 
 		this.getConflictFiles();
 		const handleVaultChange = (action: string) => (file: TAbstractFile, oldPath?: string) => {
-			const index = this.conflictsIndex!;
-			for (const [path, entry] of index) {
-				if (
-					file instanceof TFolder &&
-					action === "renamed" &&
-					oldPath &&
-					path.startsWith(`${oldPath}/`)
-				) {
-					index.delete(path);
-					index.set(entry.path, entry);
-					continue;
-				}
-				if (
-					entry === file ||
-					(oldPath && (path === oldPath || path.startsWith(`${oldPath}/`))) ||
-					(action === "deleted" &&
-						(path === file.path || path.startsWith(`${file.path}/`)))
-				)
-					index.delete(path);
-			}
-			if (file instanceof TFile && action !== "deleted" && isConflictFilePath(file.path)) {
-				index.set(file.path, file);
-				if (this.isSyncing && action === "created") this.savedNewConflicts = true;
-			}
+			if (
+				updateConflictIndex(this.conflictsIndex!, action, file, oldPath) &&
+				this.isSyncing &&
+				action === "created"
+			)
+				this.savedNewConflicts = true;
 
 			this.syncEngine?.invalidateLocal(file.path, file instanceof TFolder);
 			if (oldPath !== undefined)
@@ -1078,7 +852,8 @@ export class SyncCoordinator {
 					this.publishPending();
 				}
 			}
-			if (!this.shouldAutoSyncForFileEvent(file, oldPath)) return;
+			if (!shouldAutoSyncForFileEvent(this.app, this.pluginId, this.settings, file, oldPath))
+				return;
 			this.pendingPaths.set(file.path, ++this.changeRevision);
 			if (oldPath !== undefined) this.pendingPaths.set(oldPath, this.changeRevision);
 			this.lastEditAt = Date.now();
@@ -1355,33 +1130,6 @@ export class SyncCoordinator {
 		return !this.settings.syncPaused;
 	}
 
-	private shouldAutoSyncForFileEvent(file: TAbstractFile, oldPath?: string): boolean {
-		if (!(file instanceof TFile) && !(file instanceof TFolder)) return false;
-		const pathFilter = createSyncPathFilter({
-			configDir: this.app.vault.configDir,
-			pluginId: this.pluginId,
-			selectedSettings: selectedSettingsPaths(
-				this.app.vault.configDir,
-				this.pluginId,
-				this.settings.syncSettings,
-				this.settings.selectedSettings,
-			),
-			ignorePatterns: this.settings.ignorePatterns,
-			maxFileSizeBytes: this.settings.skipLargeFiles
-				? this.settings.skipSizeLargerThanMB * 1048576
-				: undefined,
-		});
-		if (
-			pathFilter.isIgnored(file.path, file instanceof TFile ? file.stat?.size : undefined) &&
-			(oldPath === undefined ||
-				pathFilter.isIgnored(oldPath, file instanceof TFile ? file.stat?.size : undefined))
-		) {
-			return false;
-		}
-
-		return true;
-	}
-
 	private registerAutoSyncDomEvent(
 		target: Window | Document,
 		type: string,
@@ -1414,139 +1162,4 @@ export class SyncCoordinator {
 				return;
 		}
 	}
-}
-
-function isTransientError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	const lower = message.toLowerCase();
-	if (lower.includes("timed out") || lower.includes("request was cancelled")) return false;
-	const transientPatterns = [
-		"network",
-		"timeout",
-		"econnreset",
-		"econnrefused",
-		"etimedout",
-		"enotfound",
-		"dns",
-		"socket",
-		"tls",
-		"abort",
-		"fetch failed",
-		"too many requests",
-		"rate limit",
-		"503",
-		"502",
-		"504",
-		"429",
-		"internal server error",
-	];
-	return transientPatterns.some((pattern) => lower.includes(pattern));
-}
-
-const syncOperationCompleteMessage = (operation: SyncOperation, path: string): string => {
-	switch (operation) {
-		case "upload":
-			return `Uploaded ${path}`;
-		case "download":
-			return `Downloaded ${path}`;
-		case "delete-local":
-			return `Deleted locally ${path}`;
-		case "delete-remote":
-			return `Deleted remotely ${path}`;
-		case "conflict":
-			return `Conflict copy created for ${path}`;
-		default:
-			return `Synced ${path}`;
-	}
-};
-
-const getAutoSyncBackoffMs = (error: unknown, failureCount: number): number => {
-	const retryAfterMs = readRetryAfterMs(error);
-	if (retryAfterMs !== null) {
-		return Math.min(
-			Math.max(retryAfterMs, AUTO_SYNC_FAILURE_BASE_BACKOFF_MS),
-			AUTO_SYNC_FAILURE_MAX_BACKOFF_MS,
-		);
-	}
-	return Math.min(
-		AUTO_SYNC_FAILURE_BASE_BACKOFF_MS * Math.pow(2, Math.max(0, failureCount - 1)),
-		AUTO_SYNC_FAILURE_MAX_BACKOFF_MS,
-	);
-};
-
-const readRetryAfterMs = (error: unknown): number | null => {
-	const message = error instanceof Error ? error.message : String(error);
-	const secondsMatch = message.match(/retry[- ]after[^0-9]*(\d+)\s*(seconds?|secs?|s)\b/iu);
-	const secondsValue = secondsMatch?.[1];
-	if (secondsValue !== undefined) return Number.parseInt(secondsValue, 10) * 1000;
-	const msMatch = message.match(/retry[- ]after[^0-9]*(\d+)\s*(milliseconds?|msecs?|ms)\b/iu);
-	const msValue = msMatch?.[1];
-	if (msValue !== undefined) return Number.parseInt(msValue, 10);
-	return null;
-};
-
-export function formatRelativeTime(epochMs: number, now = Date.now()): string {
-	const diffMs = Math.max(0, now - epochMs);
-	const diffSecs = Math.floor(diffMs / 1000);
-	if (diffSecs < 60) return "just now";
-	const diffMins = Math.floor(diffSecs / 60);
-	if (diffMins === 1) return "1 minute ago";
-	if (diffMins < 60) return `${diffMins} minutes ago`;
-	const diffHours = Math.floor(diffMins / 60);
-	if (diffHours === 1) return "1 hour ago";
-	if (diffHours < 24) return `${diffHours} hours ago`;
-	const diffDays = Math.floor(diffHours / 24);
-	if (diffDays === 1) return "1 day ago";
-	return `${diffDays} days ago`;
-}
-
-export function isNetworkClassError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	const lower = message.toLowerCase();
-	const patterns = [
-		"network",
-		"econnrefused",
-		"econnreset",
-		"etimedout",
-		"enotfound",
-		"timeout",
-		"timed out",
-		"dns",
-		"socket",
-		"tls",
-		"offline",
-		"fetch failed",
-		"connection refused",
-		"connection closed",
-		"unreachable",
-		"gateway",
-		"502",
-		"503",
-		"504",
-	];
-	return patterns.some((p) => lower.includes(p));
-}
-
-function progressLabel(progress: SyncProgress): string {
-	switch (progress.phase) {
-		case "scanning-local":
-			return "Checking local files…";
-		case "scanning-remote":
-			return "Checking Filen…";
-		case "planning":
-			return "Comparing changes…";
-		case "directories":
-			return "Preparing folders…";
-		case "confirming":
-			return "Waiting for confirmation…";
-		case "transferring":
-			return `${progress.operation === "upload" ? "Uploading" : progress.operation === "download" ? "Downloading" : "Applying changes"} · ${progress.current}/${progress.total}`;
-		default:
-			return "Syncing…";
-	}
-}
-
-export function isReplanError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.includes("Replan the sync") || message.includes("Changes detected during sync");
 }
