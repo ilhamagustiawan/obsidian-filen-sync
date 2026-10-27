@@ -8,11 +8,11 @@ export type ReviewSection = {
 export function reviewSections(
 	current: string,
 	copies: Array<{ label: string; text: string }>,
+	deadline = diffDeadline(),
 ): ReviewSection[] | undefined {
 	if (textBytes(current) + copies.reduce((n, c) => n + textBytes(c.text), 0) > 1024 * 1024)
 		return undefined;
 	try {
-		const deadline = diffDeadline();
 		const changes: Array<Edit & { source: number }> = [];
 		for (const [source, copy] of copies.entries())
 			changes.push(...textEdits(current, copy.text, deadline).map((e) => ({ ...e, source })));

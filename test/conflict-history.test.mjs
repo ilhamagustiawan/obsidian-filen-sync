@@ -211,7 +211,12 @@ test("review sections reconstruct untouched bytes and require each explicit choi
 	assert.equal(sections[0].alternatives.length, 2);
 	assert.throws(() => m.reconstructReview(original, sections, []), /Choose/);
 	assert.equal(m.reconstructReview(original, sections, [1]), "intro\r\nONE\r\ntwo\r\nend");
-	const large = m.reviewSections("a\n".repeat(1100), [{ label: "A", text: "b\n".repeat(1100) }]);
+	// No diff deadline: CI runners can exceed the 250 ms production budget.
+	const large = m.reviewSections(
+		"a\n".repeat(1100),
+		[{ label: "A", text: "b\n".repeat(1100) }],
+		Infinity,
+	);
 	assert.equal(
 		m.reconstructReview(
 			"a\n".repeat(1100),
