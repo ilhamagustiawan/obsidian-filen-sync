@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 test("initial command requests verified two-way sync and preserves warning state", async () => {
+	await mkdir(resolve("tmp"), { recursive: true });
 	const dir = await mkdtemp(resolve("tmp/initial-command-"));
 	try {
 		const stub = join(dir, "obsidian.mjs");
@@ -83,7 +84,7 @@ test("initial command requests verified two-way sync and preserves warning state
 		assert.equal(cleared, false);
 		plugin.app.vault = { getFiles: () => [] };
 		plugin.app.workspace.getActiveFile = () => null;
-		const menu = plugin.buildStatusBarMenu();
+		const menu = plugin.statusBar.buildMenu();
 		assert.equal(menu.items[0].title, "Not connected");
 		assert.equal(menu.items[0].disabled, true);
 		assert.equal(menu.items[1].title, "Not synced yet");
@@ -153,6 +154,49 @@ test("initial command requests verified two-way sync and preserves warning state
 			},
 		});
 		assert.equal(await plugin.testConnection(), false);
+
+		// Auto-sync stays quiet while a force upload owns the target.
+		plugin.hasSavedAuth = () => true;
+		assert.equal(plugin.canAutoSync(), true);
+		plugin.forceSyncInProgress = true;
+		assert.equal(plugin.canAutoSync(), false);
+		plugin.forceSyncInProgress = false;
+
+		// Offline force upload stops before touching the sync target.
+		let prepared = 0;
+		plugin.prepareSyncTarget = async () => {
+			prepared++;
+		};
+		const file = { path: "a.md", name: "a.md", stat: { mtime: 5, ctime: 1, size: 3 } };
+		plugin.isOffline = () => true;
+		await plugin.forceSyncFile(file);
+		assert.equal(prepared, 0);
+		assert.equal(plugin.forceSyncInProgress, false);
+
+		// Online force upload reads local content once and records the baseline.
+		plugin.isOffline = () => false;
+		let reads = 0;
+		const records = [];
+		plugin.app.vault.readBinary = async () => {
+			reads++;
+			return new Uint8Array([1, 2, 3]).buffer;
+		};
+		plugin.db = {
+			getConflict: async () => undefined,
+			getFile: async () => undefined,
+			setFile: async (_path, record) => records.push(record),
+		};
+		plugin.getOrCreateRemoteFs = () => ({
+			stat: async () => null,
+			writeFile: async () => ({ uuid: "remote-1" }),
+		});
+		plugin.saveSettings = async () => {};
+		await plugin.forceSyncFile(file);
+		assert.equal(prepared, 1);
+		assert.equal(reads, 1);
+		assert.equal(records.length, 1);
+		assert.equal(records[0].remoteUuid, "remote-1");
+		assert.equal(records[0].size, 3);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

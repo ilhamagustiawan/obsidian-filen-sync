@@ -36,3 +36,59 @@ class Confirmation extends MobileDialog {
 		this.contentEl.empty();
 	}
 }
+
+/** Confirmation styled for destructive actions (warning button, inline heading). */
+export function confirmDestructiveAction(
+	app: App,
+	title: string,
+	message: string,
+	confirmText: string,
+): Promise<boolean> {
+	return new Promise((resolve) => {
+		new ConfirmActionModal(app, title, message, confirmText, resolve).open();
+	});
+}
+
+class ConfirmActionModal extends MobileDialog {
+	private resolved = false;
+
+	constructor(
+		app: App,
+		private readonly title: string,
+		private readonly message: string,
+		private readonly confirmText: string,
+		private readonly resolve: (confirmed: boolean) => void,
+	) {
+		super(app);
+		this.modalEl.addClass("filen-confirm-dialog");
+	}
+
+	onOpen(): void {
+		this.contentEl.empty();
+		this.contentEl.createEl("h2", { text: this.title });
+		this.contentEl.createEl("p", { text: this.message });
+
+		const actions = this.contentEl.createDiv({ cls: "modal-button-container" });
+		const cancelButton = actions.createEl("button", { text: "Cancel" });
+		cancelButton.addEventListener("click", () => {
+			this.finish(false);
+		});
+
+		const confirmButton = actions.createEl("button", { text: this.confirmText });
+		confirmButton.addClass("mod-warning");
+		confirmButton.addEventListener("click", () => {
+			this.finish(true);
+		});
+	}
+
+	onClose(): void {
+		if (!this.resolved) this.finish(false);
+	}
+
+	private finish(confirmed: boolean): void {
+		if (this.resolved) return;
+		this.resolved = true;
+		this.resolve(confirmed);
+		this.close();
+	}
+}
