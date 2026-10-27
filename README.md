@@ -1,8 +1,8 @@
-# Obsidian Filen Sync
+# Filen Sync
 
 Sync an Obsidian vault with Filen using a direct folder mirror.
 
-Obsidian Filen Sync mirrors vault files between Obsidian and a dedicated folder in your Filen account. It provides bidirectional synchronization, one-way push and pull, automatic background sync, conflict preservation, two-pane remote version history, and transfer safety rails, all while isolating sync baselines in local IndexedDB.
+Filen Sync mirrors vault files between Obsidian and a dedicated folder in your Filen account. It provides bidirectional synchronization, one-way push and pull, automatic background sync, conflict preservation, two-pane remote version history, and transfer safety rails, all while isolating sync baselines in local IndexedDB.
 
 > **Early release:** Keep independent backups of your vault until you have verified the plugin with your workflow.
 
@@ -81,7 +81,7 @@ You can install beta releases and receive automatic updates using the [BRAT](htt
       manifest.json
       styles.css
     ```
-3. In Obsidian, open **Settings → Community plugins**, select **Reload plugins**, and enable **Obsidian Filen Sync**.
+3. In Obsidian, open **Settings → Community plugins**, select **Reload plugins**, and enable **Filen Sync**.
 
 ### Install from source
 
@@ -94,7 +94,7 @@ Copy the built files (`main.js`, `manifest.json`, `styles.css`) into `<vault>/.o
 
 ## Setup
 
-1. Open **Settings → Obsidian Filen Sync**.
+1. Open **Settings → Filen Sync**.
 2. Enter your Filen **Email**.
 3. Enter your **Password** and optional **Two-factor code**.
 4. Check the **Remote folder** (default: `/Obsidian`) and **Vault name** (default: your vault's folder name).
@@ -113,17 +113,17 @@ Copy the built files (`main.js`, `manifest.json`, `styles.css`) into `<vault>/.o
 
 All commands can be invoked from the Obsidian Command Palette (`Ctrl/Cmd + P`):
 
-| Command                                            | What it does                                                                                               |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Obsidian Filen Sync: Initial sync**              | Fully verify both sides during setup or recovery; preserve existing sync history.                          |
-| **Obsidian Filen Sync: Sync now**                  | Compare local and remote changes, apply updates bidirectionally, and preserve conflict copies when needed. |
-| **Obsidian Filen Sync: Push changed local files**  | Upload changed local files to Filen without pulling remote changes or deleting local files.                |
-| **Obsidian Filen Sync: Pull changed remote files** | Download changed remote files from Filen without uploading local changes or deleting remote files.         |
-| **Obsidian Filen Sync: Force sync current file**   | Upload active editor file directly to Filen, with overwrite confirmation if the remote copy changed.       |
-| **Obsidian Filen Sync: Test Filen connection**     | Test Filen authentication and remote read/write access.                                                    |
-| **Obsidian Filen Sync: Pause or resume auto-sync** | Pause or resume background auto-sync triggers without affecting manual commands.                           |
-| **Obsidian Filen Sync: Toggle sync on save**       | Enable or disable save-triggered background sync.                                                          |
-| **Obsidian Filen Sync: Open activity logs**        | Open the sync activity modal showing recent connection, scan, transfer, and conflict events.               |
+| Command                                   | What it does                                                                                               |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Filen Sync: Initial sync**              | Fully verify both sides during setup or recovery; preserve existing sync history.                          |
+| **Filen Sync: Sync now**                  | Compare local and remote changes, apply updates bidirectionally, and preserve conflict copies when needed. |
+| **Filen Sync: Push changed local files**  | Upload changed local files to Filen without pulling remote changes or deleting local files.                |
+| **Filen Sync: Pull changed remote files** | Download changed remote files from Filen without uploading local changes or deleting remote files.         |
+| **Filen Sync: Force sync current file**   | Upload active editor file directly to Filen, with overwrite confirmation if the remote copy changed.       |
+| **Filen Sync: Test Filen connection**     | Test Filen authentication and remote read/write access.                                                    |
+| **Filen Sync: Pause or resume auto-sync** | Pause or resume background auto-sync triggers without affecting manual commands.                           |
+| **Filen Sync: Toggle sync on save**       | Enable or disable save-triggered background sync.                                                          |
+| **Filen Sync: Open activity logs**        | Open the sync activity modal showing recent connection, scan, transfer, and conflict events.               |
 
 ## User interface
 
@@ -247,7 +247,7 @@ Default ignore rules skip noisy, device-specific, or internal paths:
 - `node_modules`
 - The plugin's internal data directory
 
-Add custom vault-relative paths or glob patterns in **Settings → Obsidian Filen Sync → Ignore paths**, one per line.
+Add custom vault-relative paths or glob patterns in **Settings → Filen Sync → Ignore paths**, one per line.
 
 ## Safety and data integrity
 
@@ -296,6 +296,19 @@ npm run lint       # oxlint
 npm run fmt:check  # oxfmt check
 npm run fmt        # oxfmt auto-format
 ```
+
+`npm run test` runs `test/run-tests.mjs` and every `test/*.test.mjs` file automatically.
+
+### Browser layout tests
+
+`npm run test:browser` runs the standalone CSS layout regressions in `test/*.browser.mjs`. They are not part of `npm run test` or CI and require Playwright with Chromium, which is not a project dependency:
+
+```bash
+npm install --no-save playwright && npx playwright install chromium
+npm run test:browser
+```
+
+Set `FILEN_BROWSER_CHANNEL=chrome` to run the mobile layout test in an installed Chrome.
 
 ### Deploy to local test vault
 

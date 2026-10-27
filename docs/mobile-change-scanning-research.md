@@ -137,7 +137,7 @@ Local links refer to the snapshot named above. SDK package files are authoritati
 [F-validation]: ../src/sync/path-validation.ts
 [F-tests]: ../test/sync-ux.test.mjs
 [F-bench]: ../test/benchmark-workloads.test.mjs
-[F-old-plan]: ../plans/mobile-experience-performance.md
+[F-old-plan]: archive/mobile-experience-performance.md
 [O-api]: https://github.com/obsidianmd/obsidian-api/blob/master/obsidian.d.ts
 [O-vault]: https://github.com/obsidianmd/obsidian-developer-docs/blob/main/en/Plugins/Vault.md
 [S-package]: https://www.npmjs.com/package/@filen/sdk/v/0.4.2

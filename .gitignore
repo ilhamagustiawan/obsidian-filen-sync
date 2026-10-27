@@ -35,3 +35,6 @@ data.json
 
 # zips
 *.zip
+
+# Local agent scratch notes
+.scratch/
