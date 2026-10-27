@@ -1,0 +1,8 @@
+{
+	"name": "mime-types-stub",
+	"version": "1.0.0",
+	"description": "Local stand-in for mime-types, aliased in esbuild.config.mjs. @filen/sdk only looks up MIME types in upload helpers this plugin does not call.",
+	"license": "AGPL-3.0-only",
+	"type": "commonjs",
+	"main": "index.js"
+}
