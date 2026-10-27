@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import process from "process";
 import { polyfillNode } from "esbuild-plugin-polyfill-node";
 
@@ -11,8 +11,18 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = process.argv[2] === "production";
+// Set ESBUILD_METAFILE=<path> to write a metafile for bundle analysis.
+const metafilePath = process.env.ESBUILD_METAFILE;
 const fsExtraShimPath = path.resolve("src/shims/fs-extra.ts");
-const keyUtilsStubPath = path.resolve("stubs/js-crypto-key-utils/index.js");
+// Modules @filen/sdk imports but never calls in its browser environment. See each stub's
+// header for why it is safe; crypto replaces the much larger crypto-browserify polyfill.
+const stubPaths = new Map([
+	["js-crypto-key-utils", path.resolve("stubs/js-crypto-key-utils/index.js")],
+	["crypto", path.resolve("stubs/node-crypto/index.js")],
+	["node:crypto", path.resolve("stubs/node-crypto/index.js")],
+	["node-forge", path.resolve("stubs/node-forge/index.js")],
+	["mime-types", path.resolve("stubs/mime-types/index.js")],
+]);
 
 const context = await esbuild.context({
 	banner: {
@@ -47,17 +57,18 @@ const context = await esbuild.context({
 			},
 		},
 		{
-			name: "alias-js-crypto-key-utils",
+			name: "alias-unused-sdk-dependencies",
 			setup(build) {
-				build.onResolve({ filter: /^js-crypto-key-utils$/ }, () => ({
-					path: keyUtilsStubPath,
-				}));
+				build.onResolve(
+					{ filter: /^(js-crypto-key-utils|(node:)?crypto|node-forge|mime-types)$/ },
+					(args) => ({ path: stubPaths.get(args.path) }),
+				);
 			},
 		},
 		polyfillNode({
 			polyfills: {
 				fs: false,
-				crypto: true,
+				crypto: false,
 				os: true,
 				path: true,
 				stream: true,
@@ -89,10 +100,13 @@ const context = await esbuild.context({
 	treeShaking: true,
 	outfile: "main.js",
 	minify: prod,
+	drop: prod ? ["debugger"] : [],
+	metafile: Boolean(metafilePath),
 });
 
 if (prod) {
-	await context.rebuild();
+	const result = await context.rebuild();
+	if (metafilePath) writeFileSync(metafilePath, JSON.stringify(result.metafile));
 	process.exit(0);
 } else {
 	await context.watch();

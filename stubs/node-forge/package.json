@@ -1,0 +1,8 @@
+{
+	"name": "node-forge-stub",
+	"version": "1.0.0",
+	"description": "Local stand-in for node-forge, aliased in esbuild.config.mjs. @filen/sdk only uses forge on its react-native paths.",
+	"license": "AGPL-3.0-only",
+	"type": "commonjs",
+	"main": "index.js"
+}

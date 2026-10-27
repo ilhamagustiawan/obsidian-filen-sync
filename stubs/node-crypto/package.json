@@ -1,0 +1,8 @@
+{
+	"name": "node-crypto-stub",
+	"version": "1.0.0",
+	"description": "Local stand-in for Node's crypto module, aliased in esbuild.config.mjs. Provides the hashing, HMAC and randomness @filen/sdk reaches in its browser environment.",
+	"license": "AGPL-3.0-only",
+	"type": "commonjs",
+	"main": "index.js"
+}
