@@ -227,6 +227,7 @@
 	border-radius: var(--radius-m, 8px);
 	border: 1px solid var(--background-modifier-border);
 	background: var(--background-secondary);
+	color: var(--text-normal);
 	box-shadow: var(--shadow-l, 0 8px 24px rgba(0, 0, 0, 0.25));
 	width: min(360px, calc(100vw - 32px));
 	max-width: calc(100vw - 32px);
@@ -234,7 +235,7 @@
 
 /* Obsidian's flex notice host must allow its content wrapper to shrink.
    Otherwise a long summary sets the minimum width of the entire notice body. */
-.notice.filen-sync-progress-notice > .notice-content {
+.notice.filen-sync-progress-notice > :is(.notice-content, .notice-message) {
 	flex: 1 1 auto;
 	min-width: 0;
 	width: 100%;

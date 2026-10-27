@@ -252,7 +252,10 @@ export class SyncNoticeController {
 		this.summaryEl = container.createDiv({ cls: "filen-notice-summary" });
 
 		this.activeNotice = new Notice(frag, 0);
-		this.noticeEl = this.activeNotice.noticeEl;
+		// Obsidian exposes the inner notice-message on newer versions. Style and
+		// position the outer notice so its native dark background is replaced too.
+		const messageEl = this.activeNotice.noticeEl;
+		this.noticeEl = messageEl.closest<HTMLElement>(".notice") ?? messageEl;
 		this.noticeEl.addClass("filen-sync-progress-notice");
 		if (this.isMobile()) {
 			this.noticeEl.addClass("filen-mobile-progress");

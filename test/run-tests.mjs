@@ -1908,6 +1908,7 @@ test("SyncNoticeController handles sync states, mobile compact mode, visibility,
 					this.duration = duration;
 					this.hidden = false;
 					this.noticeEl = globalThis.__createMockElement("div", "notice");
+					this.noticeEl.closest = (selector) => selector === ".notice" ? this.noticeEl : null;
 					if (frag && frag.children) {
 						this.noticeEl.children.push(...frag.children);
 					}
