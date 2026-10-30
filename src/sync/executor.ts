@@ -1,4 +1,4 @@
-import { readLocalBytes } from "./local-io";
+import { ensureLocalDirectory, readLocalBytes } from "./local-io";
 import { decodeText, mergeMarkdown, mergeSettings } from "./merge";
 import { LocalEditPendingError } from "./local-edit-pending";
 import { captureConflict, conflictVersions, type ConflictContext } from "./conflict-store";
@@ -84,29 +84,6 @@ export class SyncExecutor {
 			deletedLocalPath: !stat ? path : undefined,
 			deletedRemotePath: !remote ? path : undefined,
 		};
-	}
-
-	async syncDirectories(
-		localDirs: Set<string>,
-		remoteDirs: Set<string>,
-		options: { skipRemoteFolderPrune?: boolean } = {},
-	): Promise<number> {
-		let applied = 0;
-		for (const path of sortDirs(localDirs)) {
-			if (!remoteDirs.has(path)) {
-				await this.config.remote.mkdir(path);
-				applied += 1;
-			}
-		}
-		if (!options.skipRemoteFolderPrune) {
-			for (const path of sortDirs(remoteDirs)) {
-				if (!localDirs.has(path)) {
-					await ensureLocalDirectory(this.config.app, path);
-					applied += 1;
-				}
-			}
-		}
-		return applied;
 	}
 
 	async execute(
@@ -551,33 +528,8 @@ const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
 	return buffer;
 };
 
-const sortDirs = (dirs: Set<string>): string[] =>
-	[...dirs].sort((l, r) => l.split("/").length - r.split("/").length || l.localeCompare(r));
-
 const ensureLocalFolder = async (app: App, path: string): Promise<void> => {
 	const parts = normalizePath(path).split("/");
 	parts.pop();
-	await ensureLocalDirectoryParts(app, parts);
-};
-
-const ensureLocalDirectory = async (app: App, path: string): Promise<void> => {
-	await ensureLocalDirectoryParts(
-		app,
-		normalizePath(path)
-			.split("/")
-			.filter((p) => p.length > 0),
-	);
-};
-
-const ensureLocalDirectoryParts = async (app: App, parts: string[]): Promise<void> => {
-	let current = "";
-	for (const part of parts) {
-		current = current.length === 0 ? part : `${current}/${part}`;
-		if (
-			app.vault.getAbstractFileByPath(current) === null &&
-			!(await app.vault.adapter.exists(current))
-		) {
-			await app.vault.adapter.mkdir(current);
-		}
-	}
+	await ensureLocalDirectory(app, parts.join("/"));
 };

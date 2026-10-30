@@ -1,6 +1,8 @@
 import type { RemoteEntry } from "../fs-remote";
 import type { SyncedFileRecord } from "../settings";
 import type { BulkGuardReport } from "./bulk-guard";
+import { nextDirectoryBaseline, type DirectoryOutcome, type DirectoryPass } from "./dir-planner";
+import { createDirectories, pruneDirectories } from "./directory-apply";
 import type { SyncEngineConfig } from "./engine-types";
 import { SyncExecutor, type ExecutionResult, type LocalEntry } from "./executor";
 import { LocalEditPendingError } from "./local-edit-pending";
@@ -52,7 +54,7 @@ export async function confirmPlannedChanges(
 	// 3. Local Deletions Confirmation
 	const deleteLocalPaths = actions
 		.filter((a) => a.operation === "delete-local")
-		.map((a) => a.path);
+		.map((a) => (a.isDir ? `${a.path}/` : a.path));
 
 	if (deleteLocalPaths.length > 0 && confirmLocalDeletes !== undefined) {
 		onProgress?.({ phase: "confirming", current: 0, total: 0, path: "" });
@@ -77,7 +79,7 @@ export type ApplyPassInput = {
 	remoteFiles: Map<string, RemoteEntry>;
 	prevRecords: Map<string, SyncedFileRecord>;
 	/** Directory reconciliation only runs on full inventories. */
-	directories?: { local: Set<string>; remote: Set<string>; skipRemoteFolderPrune: boolean };
+	directories?: DirectoryPass;
 	syncPassStart: number;
 	onProgress?: (progress: SyncProgress) => void;
 	onActivity?: (event: SyncActivityEvent) => void;
@@ -85,6 +87,8 @@ export type ApplyPassInput = {
 	onApplied: (result: ExecutionResult) => void;
 	/** Called when conflict-copy cleanup invalidated the scan snapshots. */
 	onCopiesCleaned: () => void;
+	/** Called when folders were created or deleted, invalidating the scan snapshots. */
+	onDirectoriesChanged: () => void;
 };
 
 export type ApplyPassResult = {
@@ -133,14 +137,17 @@ export async function runApplyPass(input: ApplyPassInput): Promise<ApplyPassResu
 	let pendingLocalEdit: LocalEditPendingError | undefined;
 	const executeStart = performance.now();
 
+	const dirOutcomes = new Map<string, DirectoryOutcome>();
+	const dirContext = {
+		app: config.app,
+		remote: config.remote,
+		outcomes: dirOutcomes,
+		onActivity,
+	};
 	if (input.directories !== undefined) {
 		onProgress?.({ phase: "directories", current: 0, total: 0, path: "" });
 		const dirsStart = performance.now();
-		applied += await executor.syncDirectories(
-			input.directories.local,
-			input.directories.remote,
-			{ skipRemoteFolderPrune: input.directories.skipRemoteFolderPrune },
-		);
+		applied += await createDirectories(dirContext, input.directories.actions);
 		directoriesMs = Math.round(performance.now() - dirsStart);
 	}
 
@@ -260,10 +267,37 @@ export async function runApplyPass(input: ApplyPassInput): Promise<ApplyPassResu
 		await flush();
 	};
 
-	if (config.remote.withMutationSession) {
-		await config.remote.withMutationSession(runTransfers);
-	} else {
+	// Folder deletions run after transfers so emptied folders can be pruned.
+	const runAll = async (): Promise<void> => {
 		await runTransfers();
+		if (input.directories === undefined) return;
+		onProgress?.({ phase: "directories", current: 0, total: 0, path: "" });
+		const pruneStart = performance.now();
+		const pruned = await pruneDirectories(dirContext, input.directories.actions);
+		applied += pruned.applied;
+		deletedLocal += pruned.deletedLocal;
+		deletedRemote += pruned.deletedRemote;
+		directoriesMs += Math.round(performance.now() - pruneStart);
+	};
+
+	if (config.remote.withMutationSession) {
+		await config.remote.withMutationSession(runAll);
+	} else {
+		await runAll();
+	}
+	if (input.directories !== undefined) {
+		const dirs = input.directories;
+		const next = nextDirectoryBaseline(
+			dirs.baseline,
+			dirs.local,
+			dirs.remote,
+			dirs.actions,
+			dirOutcomes,
+		);
+		for (const path of dirs.stored ?? []) if (!dirs.baseline?.has(path)) next.add(path);
+		if (dirs.stored === null || !sameSet(next, dirs.stored))
+			await config.db.setSyncedDirs?.(next);
+		if ([...dirOutcomes.values()].includes("applied")) input.onDirectoriesChanged();
 	}
 	if (pendingLocalEdit) throw pendingLocalEdit;
 
@@ -286,3 +320,6 @@ export async function runApplyPass(input: ApplyPassInput): Promise<ApplyPassResu
 		transferMs,
 	};
 }
+
+const sameSet = (left: Set<string>, right: Set<string>): boolean =>
+	left.size === right.size && [...left].every((path) => right.has(path));

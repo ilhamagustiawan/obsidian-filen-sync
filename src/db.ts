@@ -42,6 +42,9 @@ export interface SyncDb {
 	setFile(path: string, record: SyncedFileRecord): Promise<void>;
 	deleteFile(path: string): Promise<void>;
 	getAllFiles(): Promise<Map<string, SyncedFileRecord>>;
+	/** Folders present on both sides after the last full sync; null when never recorded. */
+	getSyncedDirs?(): Promise<Set<string> | null>;
+	setSyncedDirs?(dirs: Set<string>): Promise<void>;
 
 	/** Current schema version (after migrations). */
 	schemaVersion: number;
@@ -54,6 +57,7 @@ export interface SyncDb {
 }
 
 const META_KEY = "__filen_sync_meta__";
+const SYNCED_DIRS_KEY = "dirs";
 
 type DbMeta = {
 	schemaVersion: number;
@@ -104,6 +108,7 @@ class LocalForageDb implements SyncDb {
 	private readonly recovery: ReturnType<typeof localforage.createInstance>;
 	private readonly deleted: ReturnType<typeof localforage.createInstance>;
 	private readonly conflicts: ReturnType<typeof localforage.createInstance>;
+	private readonly dirs: ReturnType<typeof localforage.createInstance>;
 
 	constructor(
 		private readonly store: ReturnType<typeof localforage.createInstance>,
@@ -116,6 +121,7 @@ class LocalForageDb implements SyncDb {
 		this.recovery = localforage.createInstance({ name: targetKey, storeName: "recovery" });
 		this.deleted = localforage.createInstance({ name: targetKey, storeName: "deleted-items" });
 		this.conflicts = localforage.createInstance({ name: targetKey, storeName: "conflicts" });
+		this.dirs = localforage.createInstance({ name: targetKey, storeName: "synced-dirs" });
 	}
 
 	private assertWritable(): void {
@@ -250,6 +256,20 @@ class LocalForageDb implements SyncDb {
 			records.push(r);
 		});
 		return records;
+	}
+
+	async getSyncedDirs(): Promise<Set<string> | null> {
+		const stored = await this.dirs.getItem<unknown>(SYNCED_DIRS_KEY);
+		if (stored === null) return null;
+		if (!Array.isArray(stored) || !stored.every((path) => typeof path === "string"))
+			throw new Error("Invalid folder history. Sync paused to protect this target.");
+		for (const path of stored) validateSyncPath(path);
+		return new Set(stored);
+	}
+	async setSyncedDirs(dirs: Set<string>): Promise<void> {
+		this.assertWritable();
+		for (const path of dirs) validateSyncPath(path);
+		await this.dirs.setItem(SYNCED_DIRS_KEY, [...dirs].sort());
 	}
 
 	get schemaVersion(): number {

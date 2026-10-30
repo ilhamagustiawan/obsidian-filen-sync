@@ -769,12 +769,14 @@ export default class FilenSyncPlugin extends Plugin {
 	private confirmLocalDeletes(paths: string[]): Promise<boolean> {
 		const examples = paths.slice(0, 8).join(", ");
 		const more = paths.length > 8 ? `, and ${paths.length - 8} more` : "";
-		const message = `Sync would delete ${paths.length} local file(s) that no longer exist in Filen: ${examples}${more}. Deleted files go to the system trash.`;
+		// Folder paths arrive with a trailing slash.
+		const items = paths.some((path) => path.endsWith("/")) ? "item" : "file";
+		const message = `Sync would delete ${paths.length} local ${items}(s) that no longer exist in Filen: ${examples}${more}. Deleted ${items}s go to the system trash.`;
 		return confirmDestructiveAction(
 			this.app,
-			"Delete local files?",
+			`Delete local ${items}s?`,
 			message,
-			"Delete local files",
+			`Delete local ${items}s`,
 		);
 	}
 

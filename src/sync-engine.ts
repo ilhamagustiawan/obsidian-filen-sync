@@ -8,6 +8,7 @@ import { checkBulkGuard, type BulkGuardReport, type BulkGuardThresholds } from "
 import type { ExecutionResult, LocalEntry } from "./sync/executor";
 import { assertNoPathCollisions } from "./sync/path-validation";
 import { planSync } from "./sync/planner";
+import { filterDirectoryBaseline, planDirectories, type DirectoryPass } from "./sync/dir-planner";
 import { LocalHashCache } from "./sync/local-hash-cache";
 import { confirmPlannedChanges, runApplyPass } from "./sync/apply-pass";
 import {
@@ -75,7 +76,7 @@ type PlannedPass = {
 	localFiles: Map<string, LocalEntry>;
 	remoteFiles: Map<string, RemoteEntry>;
 	prev: Map<string, SyncedFileRecord>;
-	directories?: { local: Set<string>; remote: Set<string>; skipRemoteFolderPrune: boolean };
+	directories?: DirectoryPass;
 	equalityComparisons: number;
 	equalityDownloads: number;
 	remoteRefreshes: number;
@@ -342,7 +343,7 @@ export class SyncEngine {
 				);
 
 		const cancelled = await confirmPlannedChanges(
-			pass.planResult.actions,
+			[...pass.planResult.actions, ...(pass.directories?.actions ?? [])],
 			pass.bulkReport,
 			onProgress,
 			confirmLocalDeletes,
@@ -362,6 +363,10 @@ export class SyncEngine {
 			onActivity,
 			onApplied: (result) => this.patchSnapshots(result),
 			onCopiesCleaned: () => {
+				this.localScanSnapshot = null;
+				this.remoteTreeCache = null;
+			},
+			onDirectoriesChanged: () => {
 				this.localScanSnapshot = null;
 				this.remoteTreeCache = null;
 			},
@@ -631,14 +636,17 @@ export class SyncEngine {
 		})();
 		// Drain every read before rejecting so failed passes cannot leave hashing
 		// or remote work running into a retry. Never publish partial inventories.
-		const [baselineResult, localResult, remoteResult] = await Promise.allSettled([
-			baselineRead,
-			localRead,
-			remoteRead,
-		]);
+		const [baselineResult, localResult, remoteResult, dirBaselineResult] =
+			await Promise.allSettled([
+				baselineRead,
+				localRead,
+				remoteRead,
+				this.readDirectoryBaseline(),
+			]);
 		if (baselineResult.status === "rejected") throw baselineResult.reason;
 		if (localResult.status === "rejected") throw localResult.reason;
 		if (remoteResult.status === "rejected") throw remoteResult.reason;
+		if (dirBaselineResult.status === "rejected") throw dirBaselineResult.reason;
 		this.assertScanEpoch(epoch);
 		const filteredPrev = baselineResult.value;
 		const local = localResult.value;
@@ -696,11 +704,14 @@ export class SyncEngine {
 			localFiles: local.files,
 			remoteFiles: remote.files,
 			prev: filteredPrev,
-			directories: {
-				local: local.dirs,
-				remote: remote.dirs,
-				skipRemoteFolderPrune: remoteFromCache,
-			},
+			directories: this.planDirectoryPass(
+				local.dirs,
+				remote.dirs,
+				dirBaselineResult.value,
+				pathFilter,
+				direction,
+				remoteFromCache,
+			),
 			equalityComparisons: equalityHashes.comparisons,
 			equalityDownloads: equalityHashes.downloads,
 			remoteRefreshes,
@@ -714,6 +725,23 @@ export class SyncEngine {
 			remoteScanMs,
 			equalityMs,
 		};
+	}
+
+	private async readDirectoryBaseline(): Promise<Set<string> | null> {
+		return (await this.config.db.getSyncedDirs?.()) ?? null;
+	}
+
+	private planDirectoryPass(
+		local: Set<string>,
+		remote: Set<string>,
+		stored: Set<string> | null,
+		pathFilter: SyncPathFilter,
+		direction: SyncDirection,
+		remoteFromCache: boolean,
+	): DirectoryPass {
+		const baseline = filterDirectoryBaseline(stored, (path) => pathFilter.isIgnored(path));
+		const actions = planDirectories({ local, remote, baseline, direction, remoteFromCache });
+		return { local, remote, stored, baseline, actions };
 	}
 
 	/** See resolveEqualityHashes; kept as a method so tests can observe equality reads. */
@@ -790,24 +818,27 @@ export class SyncEngine {
 		// Preview has no baseline dependency and must remain strictly read-only.
 		// Drain failed reads just as sync does, so a subsequent run cannot overlap
 		// unfinished hashing or remote work from this preview.
-		const [localResult, baselineResult, remoteResult] = await Promise.allSettled([
-			(async () => {
-				const local = await this.walkLocal(
-					pathFilter,
-					true,
-					null,
-					epoch,
-					exclusionsTracker,
-				);
-				onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
-				return local;
-			})(),
-			(async () => this.config.db.getAllFiles())(),
-			this.walkRemote(pathFilter, exclusionsTracker, { noCreate: true }),
-		]);
+		const [localResult, baselineResult, remoteResult, dirBaselineResult] =
+			await Promise.allSettled([
+				(async () => {
+					const local = await this.walkLocal(
+						pathFilter,
+						true,
+						null,
+						epoch,
+						exclusionsTracker,
+					);
+					onProgress?.({ phase: "scanning-remote", current: 0, total: 0, path: "" });
+					return local;
+				})(),
+				(async () => this.config.db.getAllFiles())(),
+				this.walkRemote(pathFilter, exclusionsTracker, { noCreate: true }),
+				this.readDirectoryBaseline(),
+			]);
 		if (localResult.status === "rejected") throw localResult.reason;
 		if (baselineResult.status === "rejected") throw baselineResult.reason;
 		if (remoteResult.status === "rejected") throw remoteResult.reason;
+		if (dirBaselineResult.status === "rejected") throw dirBaselineResult.reason;
 		this.assertScanEpoch(epoch);
 		const local = localResult.value;
 		const prevRecords = baselineResult.value;
@@ -849,18 +880,34 @@ export class SyncEngine {
 			},
 			bulkThresholds,
 		);
+		const directoryActions = this.planDirectoryPass(
+			local.dirs,
+			remote.dirs,
+			dirBaselineResult.value,
+			pathFilter,
+			direction,
+			false,
+		).actions;
+		const actions = [...planResult.actions, ...directoryActions];
+		const counts = { ...planResult.counts };
+		for (const action of directoryActions) {
+			if (action.operation === "upload") counts.upload += 1;
+			else if (action.operation === "download") counts.download += 1;
+			else if (action.operation === "delete-local") counts.deleteLocal += 1;
+			else if (action.operation === "delete-remote") counts.deleteRemote += 1;
+		}
 		const planMs = Math.round(performance.now() - planStart);
 		const totalMs = Math.round(performance.now() - previewStart);
 
-		const totalProposed = planResult.actions.filter((a) => a.operation !== "noop").length;
+		const totalProposed = actions.filter((a) => a.operation !== "noop").length;
 
 		return {
 			target: targetInfo,
 			direction,
 			createdAt: Date.now(),
-			actions: planResult.actions,
+			actions,
 			counts: {
-				...planResult.counts,
+				...counts,
 				totalProposed,
 			},
 			destructiveStats: bulkReport.stats,

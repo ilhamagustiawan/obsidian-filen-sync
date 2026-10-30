@@ -29,6 +29,8 @@ before(async () => {
   createDirectory: async ({name,parent}) => { m.creates++; await m.delay(); if (m.createFailure) throw new Error('create failed'); const uuid = 'made-' + name; m.created.push({name,parent,uuid}); return uuid; },
   fileExists: async ({name,parent}) => { m.fileExistsCalls++; await m.delay(); return m.fileExistsResponse?.({name,parent}) ?? (m.files.has(name) ? { exists: true, uuid: m.files.get(name).uuid } : { exists: false }); },
   trashFile: async ({uuid}) => { m.trashed.push(uuid); return true; },
+  listDirectory: async ({uuid, onlyDirectories}) => { m.listings++; const items = m.listing.get(uuid) ?? []; return onlyDirectories ? items.filter(i => i.type === 'directory') : items; },
+  trashDirectory: async ({uuid}) => { m.trashedDirs.push(uuid); },
   listTrash: async () => m.trash,
   getDirectory: async ({uuid}) => { const dir=m.dirsByUuid.get(uuid); if(!dir) throw Error('unknown directory'); return dir; },
   restoreFile: async ({uuid}) => { m.restored.push(uuid); m.trash=m.trash.filter(i=>i.uuid!==uuid); },
@@ -105,6 +107,9 @@ function fixture({ delayMs = 0, tree = {} } = {}) {
 		logouts: 0,
 		created: [],
 		trashed: [],
+		trashedDirs: [],
+		listing: new Map(),
+		listings: 0,
 		trash: [],
 		restored: [],
 		dirsByUuid: new Map(),
@@ -510,4 +515,25 @@ test("trash restoration rejects occupied destinations and missing original paren
 	assert.equal(child.parentMissing, true);
 	await assert.rejects(remote.restoreDeleted(child, []), /parent folder/);
 	assert.equal(mock.restored.length, 0);
+});
+
+test("rmdir resolves folders from live listings and only trashes empty ones", async () => {
+	const remote = fixture();
+	const dir = (name, uuid) => ({ type: "directory", name, uuid });
+	mock.listing.set("base", [dir("Obsidian", "root-1")]);
+	mock.listing.set("root-1", [dir("A", "dir-a"), dir("Full", "dir-full")]);
+	mock.listing.set("dir-full", [{ type: "file", name: ".ignored", uuid: "f-1" }]);
+	// A stale SDK path cache must not be consulted for folder identity.
+	mock.paths.set("/Obsidian/A", "stale-a");
+	mock.paths.set("/Obsidian/Gone", "stale-gone");
+	const lookups = mock.lookups;
+
+	assert.deepEqual(await remote.statDir("A"), { uuid: "dir-a" });
+	assert.equal(await remote.statDir("Gone"), null);
+	assert.equal(await remote.rmdir("Gone"), "absent");
+	assert.equal(await remote.rmdir("Full"), "not-empty", "ignored children keep the folder");
+	assert.deepEqual(mock.trashedDirs, []);
+	assert.equal(await remote.rmdir("A"), "deleted");
+	assert.deepEqual(mock.trashedDirs, ["dir-a"]);
+	assert.equal(mock.lookups, lookups, "no cached pathToItemUUID lookups");
 });
