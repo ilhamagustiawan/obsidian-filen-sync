@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-filen-sync",
 	"name": "Filen Sync",
-	"version": "1.9.0",
+	"version": "1.9.1",
 	"minAppVersion": "1.11.4",
 	"description": "Sync your Obsidian vault with Filen using a direct folder mirror, optional auto-sync, conflict copies, and file versions.",
 	"author": "Ilham Agustiawan",
