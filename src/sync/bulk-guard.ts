@@ -29,6 +29,10 @@ export type BulkGuardReport = {
  * 1. Blocks if destructive operations on either side exceed maxDestructiveFiles (default 20).
  * 2. Blocks if destructive operations exceed percentageThreshold (default 20%) AND at least minPercentageFiles (default 5).
  * 3. Blocks if an existing populated side suddenly reports 0 files while the baseline had files.
+ *
+ * Folder actions (`isDir`) are not counted: a folder is only deleted after it is
+ * re-verified empty, so it never destroys content. Local folder deletions are
+ * still covered by the local-delete confirmation.
  */
 export function checkBulkGuard(
 	actions: PlannedAction[],

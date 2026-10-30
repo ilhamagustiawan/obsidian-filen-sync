@@ -64,6 +64,10 @@ export type RemoteFs = {
 		expectedOptions?: { remoteHash?: string; version?: number },
 	): Promise<void>;
 	mkdir(path: string): Promise<void>;
+	/** Fresh (uncached) directory lookup; null when the folder does not exist. */
+	statDir?(path: string): Promise<{ uuid: string } | null>;
+	/** Trash a directory only if it has no children at all, including ignored ones. */
+	rmdir?(path: string): Promise<"deleted" | "absent" | "not-empty">;
 	checkConnect(): Promise<void>;
 	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
 	readFileVersion(version: RemoteFileVersion): Promise<Uint8Array>;
@@ -457,6 +461,47 @@ export class FilenRemoteFs implements RemoteFs {
 			this.createdDirectoryPaths.clear();
 			throw error;
 		}
+	}
+
+	async statDir(path: string): Promise<{ uuid: string } | null> {
+		this.verifiedRootForSync = null;
+		validateSyncPath(path);
+		const uuid = await this.freshDirectoryUuid(await this.getClient(), path);
+		return uuid === null ? null : { uuid };
+	}
+
+	async rmdir(path: string): Promise<"deleted" | "absent" | "not-empty"> {
+		this.verifiedRootForSync = null;
+		validateSyncPath(path);
+		const client = await this.getClient();
+		const uuid = await this.freshDirectoryUuid(client, path);
+		if (uuid === null) return "absent";
+		if ((await client.cloud().listDirectory({ uuid })).length > 0) return "not-empty";
+		await client.cloud().trashDirectory({ uuid });
+		this.scannedDirectoryUuids = null;
+		this.createdDirectoryPaths.clear();
+		if (!this.inMutationSession) {
+			this.verifiedRootForSync = null;
+			client.init(client.config);
+			configureSdkRetryBounds(client);
+		}
+		return "deleted";
+	}
+
+	/** Walks live directory listings from the account root; never reads the SDK path cache. */
+	private async freshDirectoryUuid(client: FilenSDK, path: string): Promise<string | null> {
+		let uuid = client.config.baseFolderUUID;
+		if (uuid === undefined || uuid.length === 0)
+			throw new Error("Filen did not provide the account root folder.");
+		for (const name of this.join(path)
+			.split("/")
+			.filter((part) => part.length > 0)) {
+			const children = await client.cloud().listDirectory({ uuid, onlyDirectories: true });
+			const match = children.find((item) => item.type === "directory" && item.name === name);
+			if (match === undefined) return null;
+			uuid = match.uuid;
+		}
+		return uuid;
 	}
 
 	async checkEvents(

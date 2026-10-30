@@ -450,6 +450,18 @@ export class SyncPreviewModal extends MobileDialog {
 	}
 
 	private formatOperationBadge(action: PlannedAction): string {
+		if (action.isDir) {
+			switch (action.operation) {
+				case "upload":
+					return "Create remote folder";
+				case "download":
+					return "Create local folder";
+				case "delete-local":
+					return "Delete local folder";
+				case "delete-remote":
+					return "Delete remote folder";
+			}
+		}
 		switch (action.operation) {
 			case "upload":
 				return action.isOverwrite ? "Upload (overwrite)" : "Upload";
